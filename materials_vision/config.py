@@ -14,11 +14,7 @@ else:
     print('Wczytuje ściezki do danych w OneDrive')
 
 
-MAIN_DIR = Path(
-    r"/Users/dawidwalicki/Documents/OneDrive/",
-    r"OneDrive - Politechnika Warszawska"
-)
-"-------------------------------------DANE------------------------------------"
+# == DANE ==
 DATA = MAIN_DIR / "Dane"
 # PIANKI SERIA RL
 DATA_DG = DATA / "DG"
@@ -35,7 +31,7 @@ DATA_DG_VAB_RESULTS = DATA_DG_VAB_RESULTS = (
     DATA_DG_VAB_SEM_PARALLEL / "Zestawienie wielkości porów.xlsx"
 )
 
-#
+
 DATA_MA = DATA / "MA"
 
 # PIANKI SERIA AS
@@ -44,6 +40,6 @@ DATA_AS_RESULTS = DATA_AS / "Dataset.xlsx"
 
 DATA_PATH_DICT = {"AS": DATA_AS}
 
-"--------------------------------MODELE---------------------------------------"
+# == MODELE ==
 SAM_CHECKPOINTS = MAIN_DIR / "SAM_checkpoints"
 SAM_VIT_B_WEIGHTS = SAM_CHECKPOINTS / "sam_vit_b_01ec64.pth"
