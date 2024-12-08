@@ -1,4 +1,18 @@
+import os
 from pathlib import Path
+
+if 'COLAB_GPU' in os.environ or 'COLAB_RUNTIME' in os.environ:
+    MAIN_DIR = Path(
+        r"/content/drive/MyDrive"
+    )
+    print('Wczytuje ściezki do danych w Google Drive')
+else:
+    MAIN_DIR = Path(
+        r"/Users/dawidwalicki/Documents/OneDrive/",
+        r"OneDrive - Politechnika Warszawska"
+    )
+    print('Wczytuje ściezki do danych w OneDrive')
+
 
 MAIN_DIR = Path(
     r"/Users/dawidwalicki/Documents/OneDrive/",
