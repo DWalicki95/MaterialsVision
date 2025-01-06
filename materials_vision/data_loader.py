@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from config import DATA_PATH_DICT
+from materials_vision.config import DATA_PATH_DICT
 
 
 class DataLoader:
