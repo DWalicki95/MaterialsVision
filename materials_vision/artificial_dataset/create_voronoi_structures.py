@@ -170,6 +170,7 @@ def draw_boundaries(
         Image with pores' boundaries
     """
     draw = ImageDraw.Draw(img)
+    max_deviation = boundary_width * 0.4
     for ridge in vor.ridge_vertices:
         # filter out "infinite" ridges at diagram edges
         if -1 in ridge:
@@ -185,14 +186,21 @@ def draw_boundaries(
             length = np.linalg.norm(vec)
             direction = vec / length if length > 0 else vec
             perp = np.array([-direction[1], direction[0]])
-
-            num_segments = max(3, int(length / 20))
+            num_segments = max(3, int(length / 15))
             t = np.linspace(0, 1, num_segments)
             points = start_np + t[:, None] * vec.reshape(1, -1)
-
-            noise = noise_intensity * np.random.randn(num_segments)
-            points += noise[:, None] * perp.reshape(1, -1) * length / 100
-
+            noise = np.clip(
+                noise_intensity * np.random.randn(num_segments),
+                -max_deviation, max_deviation
+            )
+            points += noise[:, None] * perp.reshape(1, -1)
+            # ensure points stay within Voronoi polygon bounds
+            for i in range(len(points)):
+                points[i] = np.clip(
+                    points[i],
+                    [boundary_width, boundary_width],
+                    [img_width-boundary_width, img_height-boundary_width]
+                )
             for i in range(len(points)-1):
                 seg_start = tuple(points[i])
                 seg_end = tuple(points[i+1])
@@ -201,7 +209,6 @@ def draw_boundaries(
                         boundary_width + jitter_strength * np.random.randn()
                     )
                 )
-
                 draw.line([seg_start, seg_end], fill=180, width=current_width)
         else:
             draw.line([start, end], fill=180, width=boundary_width)
@@ -357,5 +364,5 @@ if __name__ == '__main__':
         plot_sample=True,
         perforation_params=perforation_params,
         contamination_params=contamination_params,
-        add_boundary_noise=False
+        add_boundary_noise=True
     )
