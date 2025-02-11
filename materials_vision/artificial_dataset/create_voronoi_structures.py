@@ -1,5 +1,6 @@
 import random
-from typing import List
+import warnings
+from typing import Dict, List, Tuple
 
 import cv2
 import numpy as np
@@ -15,10 +16,25 @@ from materials_vision.preprocessing_utils import crop_image
 def generate_artifical_images(
     plot_sample: bool = False,
     seed: bool = True,
-    perforation_params: dict = {},
-    contamination_params: dict = {},
+    perforation_params: dict = {
+        'min_holes_per_pore': 0,
+        'max_holes_per_pore': 2,
+        'min_major': 10,
+        'max_major': 40,
+        'min_aspect': 0.4,
+        'max_deform': 0.5,
+        'rotation': True,
+        'max_attempts_per_hole': 50
+    },
+    contamination_params: dict = {
+        'min_contaminants': 2,
+        'max_contaminants': 8,
+        'min_radius': 2,
+        'max_radius': 8,
+        'intensity_variation': 20  # max diff. of contaminant color to pore
+    },
     add_boundary_noise: bool = True
-):
+) -> Tuple[ImageDraw.Draw, List[dict], Dict[str, dict]]:
     """
     Generate artificial images of porous material microstructure using
     Voronoi tesselation.
@@ -32,14 +48,19 @@ def generate_artifical_images(
         True ensures deterministic behavior, by default True
     perforation_params : dict, optional
         Dictionary of parameters used during adding perforations to the
-        structure, by default {}
+        structure
     contamination_params : dict, optional
         Dictionary of parameters used during adding contaminations to the
-        structure, by default {}
+        structure
     add_boundary_noise : bool, optional
         Flag parameter, if True then add some noise on boundary,
         by default True
     """
+    metadata = []
+    params = {
+        'pertforation_params': perforation_params,
+        'contamination_params': contamination_params
+    }
     if seed:
         random.seed(42)
         np.random.seed(42)
@@ -47,19 +68,22 @@ def generate_artifical_images(
     real_img_cropped = crop_image(real_img)
     real_img_shape = real_img_cropped.shape
     # assumed other important parameters
-    margin = 0
+    margin = 1
     boundary_width = 3
     gray_low = 100
     gray_high = 160
     img_width = real_img_shape[1]
     img_height = real_img_shape[0]
-    pores_num = random.randint(40, 60)
+    pores_num = random.randint(40, 70)
     # handle black spaces in the corners of the image
     points = generate_points_with_mirroring(pores_num, margin)
     vor = Voronoi(points)
     img = Image.new('L', (img_width, img_height), color=0)
     draw = ImageDraw.Draw(img)
-    for point in vor.point_region:
+    # variables for pores counting
+    pore_id = 1
+    pore_registry = {}  # track mirrored duplicates
+    for i, point in enumerate(vor.point_region):
         region = vor.regions[point]
         if -1 in region or len(region) == 0:
             continue
@@ -67,6 +91,24 @@ def generate_artifical_images(
         scaled_polygon = [
             (x * img_width, y * img_height) for (x, y) in polygon_
         ]
+        # count pores
+        if is_pore_valid(
+            i, pores_num, scaled_polygon, img_width, img_height
+        ):
+            pore_registry[i] = True
+            shapely_poly = Polygon(scaled_polygon)
+            poly_centroid_x = shapely_poly.centroid.x
+            poly_centroid_y = shapely_poly.centroid.y
+            metadata.append(
+                {
+                    'id': pore_id,
+                    'area': shapely_poly.area,
+                    'centroid': (poly_centroid_x, poly_centroid_y),
+                    'polygon': scaled_polygon
+
+                }
+            )
+            pore_id += 1
         # fill with random grayscale
         gray = np.random.randint(gray_low, gray_high)
         draw.polygon(scaled_polygon, fill=gray)
@@ -85,6 +127,7 @@ def generate_artifical_images(
     img = add_sem_effects(img)
     if plot_sample:
         img.show()
+    return img, metadata, params
 
 
 def load_sample_real_img():
@@ -124,6 +167,48 @@ def generate_points_with_mirroring(n: int, margin: int) -> np.ndarray:
             (-x, y)
         ]
     return np.vstack([points, np.array(mirrored)])
+
+
+def is_pore_valid(
+    i: int,
+    pores_num: int,
+    polygon_: List[tuple],
+    img_width: int,
+    img_height: int
+) -> bool:
+    """
+    Checks if pore (Voronoi cell) is Valid (within original image pixel range).
+
+    Parameters
+    ----------
+    i : int
+       Number of Voronoi cell region
+    pores_num : int
+        Expected number of pores
+    polygon_ : List[tuple]
+        Coords of cell vertices
+    img_width : int
+        Width of original / real image
+    img_height : int
+        Height of original / real image
+
+    Returns
+    -------
+    bool
+        True if pore is valid else False
+    """
+    is_pore_valid = False
+    if i < pores_num:
+        min_x = min(p[0] for p in polygon_)
+        max_x = max(p[0] for p in polygon_)
+        min_y = min(p[1] for p in polygon_)
+        max_y = max(p[1] for p in polygon_)
+        if (
+            max_x > 0 and min_x < img_width and
+            max_y > 0 and min_y < img_height
+        ):
+            is_pore_valid = True
+    return is_pore_valid
 
 
 def draw_boundaries(
@@ -259,40 +344,54 @@ def add_perforations(
         (min/ major) [0-1], max shape deformation (0 = perfect ellipse,
         0.2=+/-20% distortion, rotation if True then randlomly rotate ellipse)
     """
-    spoly = Polygon(polygon_)
-    if not spoly.is_valid:
-        return
-    min_x, min_y, max_x, max_y = spoly.bounds
-    num_holes = np.random.randint(params['min_holes_per_pore'],
-                                  params['max_holes_per_pore']+1)
-    for _ in range(num_holes):
-        added = False
-        attempts = 0
-        while not added and attempts < params['max_attempts_per_hole']:
-            major = np.random.uniform(params['min_major'], params['max_major'])
-            aspect = np.random.uniform(params['min_aspect'], 1)
-            minor = major * aspect
+    # it's neccessary not to show warnings generated by shapely module
+    # for completion task it's not a problem that perforations overlap or
+    # doesn't stay within cell boundaries (it happens in real image)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=RuntimeWarning,
+            module="shapely"
+        )
+        spoly = Polygon(polygon_)
+        if not spoly.is_valid:
+            return
+        min_x, min_y, max_x, max_y = spoly.bounds
+        num_holes = np.random.randint(params['min_holes_per_pore'],
+                                      params['max_holes_per_pore']+1)
 
-            angle = np.random.uniform(0, 360) if params['rotation'] else 0
+        for _ in range(num_holes):
+            added = False
+            attempts = 0
+            while not added and attempts < params['max_attempts_per_hole']:
+                major = np.random.uniform(
+                    params['min_major'], params['max_major']
+                )
+                aspect = np.random.uniform(params['min_aspect'], 1)
+                minor = major * aspect
 
-            deform_x = 1 + np.random.uniform(
-                -params['max_deform'], params['max_deform'])
-            deform_y = 1 + np.random.uniform(
-                -params['max_deform'], params['max_deform'])
+                angle = np.random.uniform(0, 360) if params['rotation'] else 0
 
-            x = np.random.uniform(min_x + major, max_x - major)
-            y = np.random.uniform(min_y + minor, max_y - minor)
+                deform_x = 1 + np.random.uniform(
+                    -params['max_deform'], params['max_deform'])
+                deform_y = 1 + np.random.uniform(
+                    -params['max_deform'], params['max_deform'])
 
-            ellipse = Point(x, y).buffer(1)
-            ellipse = affinity.scale(ellipse, major*deform_x, minor*deform_y)
-            ellipse = affinity.rotate(ellipse, angle)
+                x = np.random.uniform(min_x + major, max_x - major)
+                y = np.random.uniform(min_y + minor, max_y - minor)
 
-            if spoly.contains(ellipse.buffer(-1)):
-                coords = np.array(ellipse.exterior.coords.xy).T
-                perf_color = np.random.randint(0, 30)
-                draw.polygon([tuple(p) for p in coords], fill=perf_color)
-                added = True
-            attempts += 1
+                ellipse = Point(x, y).buffer(1)
+                ellipse = affinity.scale(
+                    ellipse, major*deform_x, minor*deform_y
+                )
+                ellipse = affinity.rotate(ellipse, angle)
+
+                if spoly.contains(ellipse.buffer(-1)):
+                    coords = np.array(ellipse.exterior.coords.xy).T
+                    perf_color = np.random.randint(0, 30)
+                    draw.polygon([tuple(p) for p in coords], fill=perf_color)
+                    added = True
+                attempts += 1
 
 
 def add_contaminants(
@@ -316,53 +415,43 @@ def add_contaminants(
         Configuration dictionary contain: min and max numbers of contaminations
         per pore, min and max contaminations
     """
-    spoly = Polygon(polygon_)
-    if not spoly.is_valid:
-        return
-    min_x, min_y, max_x, max_y = spoly.bounds
-    num_contaminants = np.random.randint(params['min_contaminants'],
-                                         params['max_contaminants']+1)
-    for _ in range(num_contaminants):
-        for attempt in range(50):
-            radius = np.random.uniform(
-                params['min_radius'], params['max_radius'])
-            x = np.random.uniform(min_x + radius, max_x - radius)
-            y = np.random.uniform(min_y + radius, max_y - radius)
-            contaminant = Point(x, y).buffer(radius)
-            if spoly.contains(contaminant):
-                contaminant_gray = base_gray + np.random.randint(
-                    -params['intensity_variation'],
-                    params['intensity_variation']
-                )
-                contaminant_gray = np.clip(contaminant_gray, 0, 255)
-                # draw with structural noise
-                bbox = [x-radius, y-radius, x+radius, y+radius]
-                draw.ellipse(bbox, fill=int(contaminant_gray))
-                break
+    # it's neccessary not to show warnings generated by shapely module
+    # for completion task it's not a problem that contaminations overlap or
+    # doesn't stay within cell boundaries (it happens in real image)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=RuntimeWarning,
+            module="shapely"
+        )
+        spoly = Polygon(polygon_)
+        if not spoly.is_valid:
+            return
+        min_x, min_y, max_x, max_y = spoly.bounds
+        num_contaminants = np.random.randint(params['min_contaminants'],
+                                             params['max_contaminants']+1)
+        for _ in range(num_contaminants):
+            for attempt in range(50):
+                radius = np.random.uniform(
+                    params['min_radius'], params['max_radius'])
+                x = np.random.uniform(min_x + radius, max_x - radius)
+                y = np.random.uniform(min_y + radius, max_y - radius)
+                contaminant = Point(x, y).buffer(radius)
+                if spoly.contains(contaminant):
+                    contaminant_gray = base_gray + np.random.randint(
+                        -params['intensity_variation'],
+                        params['intensity_variation']
+                    )
+                    contaminant_gray = np.clip(contaminant_gray, 0, 255)
+                    # draw with structural noise
+                    bbox = [x-radius, y-radius, x+radius, y+radius]
+                    draw.ellipse(bbox, fill=int(contaminant_gray))
+                    break
 
 
 if __name__ == '__main__':
-    perforation_params = {
-        'min_holes_per_pore': 0,
-        'max_holes_per_pore': 2,
-        'min_major': 10,
-        'max_major': 40,
-        'min_aspect': 0.4,
-        'max_deform': 0.5,
-        'rotation': True,
-        'max_attempts_per_hole': 50
-    }
-
-    contamination_params = {
-        'min_contaminants': 2,
-        'max_contaminants': 8,
-        'min_radius': 2,
-        'max_radius': 8,
-        'intensity_variation': 20  # max diff. of contaminant color to pore
-    }
     generate_artifical_images(
         plot_sample=True,
-        perforation_params=perforation_params,
-        contamination_params=contamination_params,
+        seed=False,
         add_boundary_noise=True
     )

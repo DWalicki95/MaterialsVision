@@ -43,3 +43,8 @@ DATA_PATH_DICT = {"AS": DATA_AS}
 # == MODELE ==
 SAM_CHECKPOINTS = MAIN_DIR / "SAM_checkpoints"
 SAM_VIT_B_WEIGHTS = SAM_CHECKPOINTS / "sam_vit_b_01ec64.pth"
+
+# == OUTPUT_PATHS ==
+
+# VORONOI DIAGRAMS
+ARTIFICAL_DATASET_PATH = DATA / "synthetic_dataset"
