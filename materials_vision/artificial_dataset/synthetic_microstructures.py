@@ -8,12 +8,12 @@ import numpy as np
 from PIL import ImageDraw
 from tqdm import tqdm
 
-from materials_vision.artificial_dataset.create_voronoi_structures import \
+from materials_vision.artificial_dataset.create_voronoi_diagrams import \
     generate_artifical_images
 from materials_vision.config import ARTIFICAL_DATASET_PATH
 
 
-class SyntheticMicrostructures():
+class SyntheticMicrostructuresGenerator():
     '''Synthetic microstructures creation and management object. '''
     def __init__(self, n_samples: int = 1):
         """Initialize class.
@@ -163,15 +163,3 @@ class SyntheticMicrostructures():
             1: sample_img_dict
         }
         self.visualize_pores_mask(sample_dataset_dict, 1)
-
-
-if __name__ == '__main__':
-    # choose number of samples you want to generate
-    n_samples = 10000
-
-    artificial_structures_manager = SyntheticMicrostructures(
-        n_samples=n_samples
-    )
-    artificial_structures_manager.generate_artificial_microstructures(
-        save=True
-    )
