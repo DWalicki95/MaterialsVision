@@ -34,7 +34,9 @@ def generate_artifical_images(
         'intensity_variation': 20  # max diff. of contaminant color to pore
     },
     add_boundary_noise: bool = True
-) -> Tuple[ImageDraw.Draw, List[dict], Dict[str, dict]]:
+) -> Tuple[
+    ImageDraw.Draw, List[dict], Dict[str, dict], np.ndarray, np.ndarray
+]:
     """
     Generate artificial images of porous material microstructure using
     Voronoi tesselation.
@@ -69,7 +71,7 @@ def generate_artifical_images(
     real_img_shape = real_img_cropped.shape
     # assumed other important parameters
     margin = 1
-    boundary_width = 3
+    boundary_width = 4
     gray_low = 100
     gray_high = 160
     img_width = real_img_shape[1]
@@ -116,6 +118,14 @@ def generate_artifical_images(
         add_contaminants(draw, scaled_polygon, gray, contamination_params)
         add_perforations(draw, scaled_polygon, perforation_params)
 
+    masks = generate_pore_masks(
+        metadata,
+        img_width,
+        img_height,
+        (boundary_width + 1) // 2
+    )
+    combined_mask = create_combined_mask(masks)
+
     img = draw_boundaries(
         vor=vor,
         img=img,
@@ -127,7 +137,7 @@ def generate_artifical_images(
     img = add_sem_effects(img)
     if plot_sample:
         img.show()
-    return img, metadata, params
+    return img, metadata, params, combined_mask, masks
 
 
 def load_sample_real_img():
@@ -216,7 +226,7 @@ def draw_boundaries(
     img: np.ndarray,
     img_width: int,
     img_height: int,
-    boundary_width: float = 3.0,
+    boundary_width: float = 4.0,
     add_boundary_noise: bool = True,
     noise_intensity: float = 1.5,
     jitter_strength: float = 1.2
@@ -449,9 +459,94 @@ def add_contaminants(
                     break
 
 
+def generate_pore_masks(
+    metadata: List[dict],
+    img_width: int,
+    img_height: int,
+    boundary_margin: int = 2
+) -> np.ndarray:
+    """
+    Generate binary masks for pores in the Voronoi diagram,
+    excluding boundaries.
+
+    Parameters
+    ----------
+    metadata : List[dict]
+        List of dictionaries containing information about each valid pore
+    img_width : int
+        Width of the target image in pixels
+    img_height : int
+        Height of the target image in pixels
+    boundary_margin : int, optional
+        Number of pixels to exclude around cell boundaries to ensure
+        clean separation between pores, by default 2
+
+    Returns
+    -------
+    np.ndarray
+        3D numpy array where each channel is a binary mask for a single pore
+        Shape: (num_pores, height, width)
+    """
+    # create empty array to store all masks
+    num_pores = len(metadata)
+    masks = np.zeros((num_pores, img_height, img_width), dtype=np.uint8)
+
+    # generate mask for each pore
+    for idx, pore_data in enumerate(metadata):
+        # create new image for this pore's mask
+        pore_img = Image.new('L', (img_width, img_height), color=0)
+        pore_draw = ImageDraw.Draw(pore_img)
+
+        # draw the polygon for this pore
+        polygon_ = pore_data['polygon']
+
+        # Create slightly smaller polygon to avoid boundaries
+        if boundary_margin > 0:
+            # Convert to shapely polygon for inward buffer
+            shapely_poly = Polygon(polygon_)
+            smaller_poly = shapely_poly.buffer(-boundary_margin)
+            # handle potential geometry splits from buffer
+            if smaller_poly.geom_type == 'Polygon':
+                # convert back to coordinate list
+                smaller_poly = list(smaller_poly.exterior.coords)
+                pore_draw.polygon(smaller_poly, fill=255)
+            elif smaller_poly.geom_type == 'MultiPolygon':
+                # handle each part separately
+                for part in smaller_poly.geoms:
+                    coords = list(part.exterior.coords)
+                    pore_draw.polygon(coords, fill=255)
+        else:
+            # use original polygon if no margin needed
+            pore_draw.polygon(polygon_, fill=255)
+
+        masks[idx] = np.array(pore_img)
+    return masks
+
+
+def create_combined_mask(masks: np.ndarray) -> np.ndarray:
+    """
+    Create a single mask where each pore has a unique ID label.
+
+    Parameters
+    ----------
+    masks : np.ndarray
+        3D array of individual pore masks
+
+    Returns
+    -------
+    np.ndarray
+        2D array where each pore is labeled with a unique integer (
+        1 to num_pores)
+    """
+    combined_mask = np.zeros((masks.shape[1], masks.shape[2]), dtype=np.uint16)
+    for i in range(masks.shape[0]):
+        combined_mask[masks[i] > 0] = i + 1
+    return combined_mask
+
+
 if __name__ == '__main__':
     generate_artifical_images(
         plot_sample=True,
         seed=False,
-        add_boundary_noise=True
+        add_boundary_noise=False
     )
