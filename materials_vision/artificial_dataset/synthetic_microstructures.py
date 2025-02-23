@@ -183,8 +183,10 @@ class SyntheticMicrostructuresGenerator():
             dataset_name: str = ''
     ) -> None:
         '''
-        Saves synthetic image as array, pores mask as array of arrays of
-        vertices and metadata as json file.
+        Saves synthetic image as array (npy), pores mask as (combined in one
+        file) as array (npy) and as tiff (easy for human interpretaion) and
+        also each pore as separated binary mask (as array (npy) and png file)
+        and fially metadata of each sample as json file.
         '''
         save_path_suffix_main = SYNTHETIC_DATASET_PATH / (
             f'synthetic_dataset_{dataset_name}'
