@@ -487,40 +487,46 @@ def generate_pore_masks(
         3D numpy array where each channel is a binary mask for a single pore
         Shape: (num_pores, height, width)
     """
-    # create empty array to store all masks
-    num_pores = len(metadata)
-    masks = np.zeros((num_pores, img_height, img_width), dtype=np.uint8)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=RuntimeWarning,
+            module="shapely"
+        )
+        # create empty array to store all masks
+        num_pores = len(metadata)
+        masks = np.zeros((num_pores, img_height, img_width), dtype=np.uint8)
 
-    # generate mask for each pore
-    for idx, pore_data in enumerate(metadata):
-        # create new image for this pore's mask
-        pore_img = Image.new('L', (img_width, img_height), color=0)
-        pore_draw = ImageDraw.Draw(pore_img)
+        # generate mask for each pore
+        for idx, pore_data in enumerate(metadata):
+            # create new image for this pore's mask
+            pore_img = Image.new('L', (img_width, img_height), color=0)
+            pore_draw = ImageDraw.Draw(pore_img)
 
-        # draw the polygon for this pore
-        polygon_ = pore_data['polygon']
+            # draw the polygon for this pore
+            polygon_ = pore_data['polygon']
 
-        # Create slightly smaller polygon to avoid boundaries
-        if boundary_margin > 0:
-            # Convert to shapely polygon for inward buffer
-            shapely_poly = Polygon(polygon_)
-            smaller_poly = shapely_poly.buffer(-boundary_margin)
-            # handle potential geometry splits from buffer
-            if smaller_poly.geom_type == 'Polygon':
-                # convert back to coordinate list
-                smaller_poly = list(smaller_poly.exterior.coords)
-                pore_draw.polygon(smaller_poly, fill=255)
-            elif smaller_poly.geom_type == 'MultiPolygon':
-                # handle each part separately
-                for part in smaller_poly.geoms:
-                    coords = list(part.exterior.coords)
-                    pore_draw.polygon(coords, fill=255)
-        else:
-            # use original polygon if no margin needed
-            pore_draw.polygon(polygon_, fill=255)
+            # Create slightly smaller polygon to avoid boundaries
+            if boundary_margin > 0:
+                # Convert to shapely polygon for inward buffer
+                shapely_poly = Polygon(polygon_)
+                smaller_poly = shapely_poly.buffer(-boundary_margin)
+                # handle potential geometry splits from buffer
+                if smaller_poly.geom_type == 'Polygon':
+                    # convert back to coordinate list
+                    smaller_poly = list(smaller_poly.exterior.coords)
+                    pore_draw.polygon(smaller_poly, fill=255)
+                elif smaller_poly.geom_type == 'MultiPolygon':
+                    # handle each part separately
+                    for part in smaller_poly.geoms:
+                        coords = list(part.exterior.coords)
+                        pore_draw.polygon(coords, fill=255)
+            else:
+                # use original polygon if no margin needed
+                pore_draw.polygon(polygon_, fill=255)
 
-        masks[idx] = np.array(pore_img)
-    return masks
+            masks[idx] = np.array(pore_img)
+        return masks
 
 
 def create_combined_mask(masks: np.ndarray) -> np.ndarray:
