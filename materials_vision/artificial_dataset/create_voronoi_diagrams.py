@@ -118,13 +118,12 @@ def generate_artifical_images(
         add_contaminants(draw, scaled_polygon, gray, contamination_params)
         add_perforations(draw, scaled_polygon, perforation_params)
 
-    masks = generate_pore_masks(
+    mask, invalid_mask_pores_id = generate_pore_masks(
         metadata,
         img_width,
         img_height,
         (boundary_width + 1) // 2
     )
-    combined_mask = create_combined_mask(masks)
 
     img = draw_boundaries(
         vor=vor,
@@ -137,7 +136,7 @@ def generate_artifical_images(
     img = add_sem_effects(img)
     if plot_sample:
         img.show()
-    return img, metadata, params, combined_mask, masks
+    return img, metadata, params, mask, invalid_mask_pores_id
 
 
 def load_sample_real_img():
@@ -487,6 +486,7 @@ def generate_pore_masks(
         3D numpy array where each channel is a binary mask for a single pore
         Shape: (num_pores, height, width)
     """
+    invalid_mask_pore_ids = []
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
@@ -508,51 +508,33 @@ def generate_pore_masks(
 
             # Create slightly smaller polygon to avoid boundaries
             if boundary_margin > 0:
-                # Convert to shapely polygon for inward buffer
-                shapely_poly = Polygon(polygon_)
-                smaller_poly = shapely_poly.buffer(-boundary_margin)
-                # handle potential geometry splits from buffer
-                if smaller_poly.geom_type == 'Polygon':
-                    # convert back to coordinate list
-                    smaller_poly = list(smaller_poly.exterior.coords)
-                    pore_draw.polygon(smaller_poly, fill=255)
-                elif smaller_poly.geom_type == 'MultiPolygon':
-                    # handle each part separately
-                    for part in smaller_poly.geoms:
-                        coords = list(part.exterior.coords)
-                        pore_draw.polygon(coords, fill=255)
+                try:
+                    # Convert to shapely polygon for inward buffer
+                    shapely_poly = Polygon(polygon_)
+                    smaller_poly = shapely_poly.buffer(-boundary_margin)
+                    # handle potential geometry splits from buffer
+                    if smaller_poly.geom_type == 'Polygon':
+                        # convert back to coordinate list
+                        smaller_poly = list(smaller_poly.exterior.coords)
+                        pore_draw.polygon(smaller_poly, fill=255)
+                    elif smaller_poly.geom_type == 'MultiPolygon':
+                        # handle each part separately
+                        for part in smaller_poly.geoms:
+                            coords = list(part.exterior.coords)
+                            pore_draw.polygon(coords, fill=255)
+                except Exception:
+                    invalid_mask_pore_ids.append(idx)
+                    continue
             else:
                 # use original polygon if no margin needed
                 pore_draw.polygon(polygon_, fill=255)
 
             masks[idx] = np.array(pore_img)
-        return masks
+        # combine mask
+        combined_mask = np.zeros(
+            (masks.shape[1], masks.shape[2]), dtype=np.uint16
+        )
+        for i in range(masks.shape[0]):
+            combined_mask[masks[i] > 0] = i + 1
 
-
-def create_combined_mask(masks: np.ndarray) -> np.ndarray:
-    """
-    Create a single mask where each pore has a unique ID label.
-
-    Parameters
-    ----------
-    masks : np.ndarray
-        3D array of individual pore masks
-
-    Returns
-    -------
-    np.ndarray
-        2D array where each pore is labeled with a unique integer (
-        1 to num_pores)
-    """
-    combined_mask = np.zeros((masks.shape[1], masks.shape[2]), dtype=np.uint16)
-    for i in range(masks.shape[0]):
-        combined_mask[masks[i] > 0] = i + 1
-    return combined_mask
-
-
-if __name__ == '__main__':
-    generate_artifical_images(
-        plot_sample=True,
-        seed=False,
-        add_boundary_noise=False
-    )
+        return combined_mask, invalid_mask_pore_ids

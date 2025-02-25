@@ -1,21 +1,24 @@
 import json
 from typing import Any, Dict, List
 
-import imageio
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import ImageDraw
 from tqdm import tqdm
+import logging
 
 from materials_vision.artificial_dataset.create_voronoi_diagrams import \
     generate_artifical_images
 from materials_vision.config import SYNTHETIC_DATASET_PATH
 
 
+logger = logging.getLogger(__name__)
+
+
 class SyntheticMicrostructuresGenerator():
     '''Synthetic microstructures creation and management object. '''
-    def __init__(self, n_samples: int = 1):
+    def __init__(self, n_samples: int = 1, dataset_name: str = ''):
         """Initialize class.
 
         Parameters
@@ -24,6 +27,7 @@ class SyntheticMicrostructuresGenerator():
             Number of samples to create, by default 1
         """
         self.n_samples = n_samples
+        self.dataset_name = dataset_name
 
     def generate_artificial_microstructures(self, save: bool = False) -> dict:
         """
@@ -41,22 +45,30 @@ class SyntheticMicrostructuresGenerator():
             number of pores and params used for image creation
         """
         self.dataset_dict = {}
-        for n in tqdm(range(self.n_samples), desc='Generowanie zbioru'):
+        for n in tqdm(range(self.n_samples), desc='Generowanie zbioru',
+                      mininterval=10):
             img_dict = {}
-            img, metadata, params, combined_mask, masks = (
+            img, metadata, params, combined_mask, invalid_mask_pore_id = (
                 generate_artifical_images(
                     plot_sample=False,
                     seed=False,
                     add_boundary_noise=False
                 )
             )
+            invalid_pores_in_mask = len(invalid_mask_pore_id)
+            if invalid_pores_in_mask > 0:
+                logger.warning(
+                    f'Invalid pores in combined mask detected ! \n'
+                    f'Number of invalid pores in mask: '
+                    f'{invalid_pores_in_mask} \n'
+                    f'Invalid pores ids: {invalid_mask_pore_id}.'
+                )
             img_idx = n + 1
             img_dict['image'] = img
             img_dict['metadata'] = metadata
             img_dict['n_pores'] = len(metadata)
             img_dict['params'] = params
             img_dict['mask'] = combined_mask
-            img_dict['separated_masks'] = masks
             self.dataset_dict[img_idx] = img_dict
             if save:
                 self._save_dataset_(
@@ -64,10 +76,9 @@ class SyntheticMicrostructuresGenerator():
                     img_idx=img_idx,
                     metadata=metadata,
                     combined_mask=combined_mask,
-                    separated_masks=masks,
-                    params=params
+                    params=params,
+                    dataset_name=self.dataset_name
                 )
-
         return self.dataset_dict
 
     def visualize_pores_mask(
@@ -178,15 +189,12 @@ class SyntheticMicrostructuresGenerator():
             img_idx: int,
             metadata: List[dict],
             combined_mask: np.ndarray,
-            separated_masks: np.ndarray,
             params: dict,
             dataset_name: str = ''
     ) -> None:
         '''
-        Saves synthetic image as array (npy), pores mask as (combined in one
-        file) as array (npy) and as tiff (easy for human interpretaion) and
-        also each pore as separated binary mask (as array (npy) and png file)
-        and fially metadata of each sample as json file.
+        Saves synthetic image and pores mask as array (npy) and fially metadata
+        of each sample as json file.
         '''
         save_path_suffix_main = SYNTHETIC_DATASET_PATH / (
             f'synthetic_dataset_{dataset_name}'
@@ -198,37 +206,7 @@ class SyntheticMicrostructuresGenerator():
         np.save(save_path_img, np.array(img))
         # save combined mask
         save_path_combined_mask_npy = f'{save_path_suffix}_combined_mask.npy'
-        save_path_combined_mask_tiff = f'{save_path_suffix}_combined_mask.tiff'
         np.save(save_path_combined_mask_npy, combined_mask)
-        # for human readable visualization we could save also normalized and
-        # converted to 16-bit tiff images
-        combined_mask_16bit = (
-            combined_mask.astype(
-                np.float32) / np.max(combined_mask) * 65535
-                ).astype(np.uint16)
-        Image.fromarray(combined_mask_16bit).save(
-            save_path_suffix_main / save_path_combined_mask_tiff,
-            format='TIFF'
-        )
-
-        # save each separated mask
-        save_path_separated_mask_dir = (
-            save_path_suffix_main / f'sample_{img_idx}_instance_masks'
-        )
-        num_separated_masks = separated_masks.shape[0]
-        save_path_separated_mask_dir.mkdir(parents=True, exist_ok=True)
-        for idx in range(num_separated_masks):
-            separated_mask_npy = (
-                save_path_separated_mask_dir / f'instance_mask_{idx+1}.npy'
-            )
-            separated_mask_png = (
-                save_path_separated_mask_dir / f'instance_mask_{idx+1}.png'
-            )
-            np.save(separated_mask_npy, separated_masks[idx])
-            imageio.imwrite(
-                str(separated_mask_png), separated_masks[idx]
-            )
-        # save metadata
         save_path_metadata = f'{save_path_suffix}_metadata.json'
         with open(save_path_metadata, 'w') as f:
             json.dump(
