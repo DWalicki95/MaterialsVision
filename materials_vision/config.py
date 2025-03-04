@@ -16,6 +16,7 @@ else:
 
 # == DANE ==
 DATA = MAIN_DIR / "Dane"
+DATA_LOCAL_DRIVE = Path("/Volumes/ADATA SD620/foam_materials/Dane")
 # PIANKI SERIA RL
 DATA_DG = DATA / "DG"
 DATA_DG_RL = DATA_DG / "Pianki RL"
@@ -44,9 +45,13 @@ DATA_PATH_DICT = {"AS": DATA_AS}
 SAM_CHECKPOINTS = MAIN_DIR / "SAM_checkpoints"
 SAM_VIT_B_WEIGHTS = SAM_CHECKPOINTS / "sam_vit_b_01ec64.pth"
 
-# == OUTPUT_PATHS ==
 
 # VORONOI DIAGRAMS
-SYNTHETIC_DATASET_PATH = Path(
-    "/Volumes/ADATA SD620/foam_materials/Dane/synthetic_dataset"
+SYNTHETIC_DATASET_PATH_LOCAL_DRIVE = (
+    DATA_LOCAL_DRIVE / "synthetic_dataset"
 )
+SYNTHETIC_DATASET_PATH_CLOUD = DATA / 'synthetic_dataset'
+
+
+# TRAIN AND TEST PATHS
+DATA_TRAIN_TEST = DATA_LOCAL_DRIVE / 'train_and_test'
