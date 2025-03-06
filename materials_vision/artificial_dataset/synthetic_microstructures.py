@@ -10,7 +10,7 @@ import logging
 
 from materials_vision.artificial_dataset.create_voronoi_diagrams import \
     generate_artifical_images
-from materials_vision.config import SYNTHETIC_DATASET_PATH
+from materials_vision.config import SYNTHETIC_DATASET_PATH_LOCAL_DRIVE
 
 
 logger = logging.getLogger(__name__)
@@ -196,7 +196,7 @@ class SyntheticMicrostructuresGenerator():
         Saves synthetic image and pores mask as array (npy) and fially metadata
         of each sample as json file.
         '''
-        save_path_suffix_main = SYNTHETIC_DATASET_PATH / (
+        save_path_suffix_main = SYNTHETIC_DATASET_PATH_LOCAL_DRIVE / (
             f'synthetic_dataset_{dataset_name}'
         )
         save_path_suffix_main.mkdir(parents=True, exist_ok=True)
