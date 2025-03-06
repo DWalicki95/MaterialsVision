@@ -2,15 +2,33 @@ from cellpose import io, models, train
 from materials_vision.utils import (
     get_train_and_test_dir, create_current_time_output_directory
 )
+from typing import Optional
 
 
 io.logger_setup()
 
 
-def retrain_cyto(model_name: str = 'cyto3_retrained'):
+def retrain_cyto(
+        train_dir: Optional[str] = None,
+        test_dir: Optional[str] = None,
+        model_name: str = 'cyto3_retrained'
+):
+    """
+    Allows to retrain cyto3 model.
+
+    Parameters
+    ----------
+    train_dir : Optional[str], optional
+        Path to train directory, by default None
+    test_dir : Optional[str], optional
+        Path to test directory, by default None
+    model_name : str, optional
+        Retrained model name, by default 'cyto3_retrained'
+    """
     output_dir = create_current_time_output_directory()
 
-    train_dir, test_dir = get_train_and_test_dir('synthetic_dataset_')
+    if train_dir is None or test_dir is None:
+        train_dir, test_dir = get_train_and_test_dir('synthetic_dataset_')
 
     output = io.load_train_test_data(
         train_dir=train_dir,
