@@ -1,4 +1,5 @@
 import argparse
+import wandb
 from materials_vision.cellpose.training import retrain_cyto
 
 
@@ -14,8 +15,30 @@ if __name__ == '__main__':
     if args.verbose:
         print("Verbose turn on.")
 
-    retrain_cyto(
+    train_losses, test_losses = retrain_cyto(
         train_dir=args.train_dir,
         test_dir=args.test_dir,
         model_name=args.model_name
+    )
+
+    wandb.init(
+        project='retrain_cellpose',
+        name=args.model_name,
+        config={
+            'train_dir': args.train_dir,
+            'test_dir': args.test_dir,
+            'model_name': args.model_name
+            }
+    )
+    wandb.log({'train_losses': train_losses, 'test_losses': test_losses})
+    wandb.log(
+        {
+            'train_losses': wandb.plot.line_series(
+                xs=list(range(len(train_losses))),
+                ys=[train_losses],
+                keys=['Train Loss'],
+                title='Training Losses',
+                xname='Epoch'
+            )
+        }
     )

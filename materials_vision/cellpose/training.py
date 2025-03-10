@@ -3,9 +3,7 @@ from materials_vision.utils import (
     get_train_and_test_dir, create_current_time_output_directory
 )
 from typing import Optional
-
-
-io.logger_setup()
+import logging
 
 
 def retrain_cyto(
@@ -25,6 +23,9 @@ def retrain_cyto(
     model_name : str, optional
         Retrained model name, by default 'cyto3_retrained'
     """
+    logging.root.handlers.clear()
+    io.logger_setup()
+
     output_dir = create_current_time_output_directory()
 
     if train_dir is None or test_dir is None:
@@ -61,3 +62,4 @@ def retrain_cyto(
         model_name=model_name
     )
     output_dir = create_current_time_output_directory()
+    return train_losses, test_losses
