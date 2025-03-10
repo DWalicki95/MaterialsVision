@@ -7,7 +7,12 @@ if __name__ == '__main__':
     parser.add_argument("--train_dir", type=str, default=None)
     parser.add_argument("--test_dir", type=str, default=None)
     parser.add_argument("--model_name", type=str, default="cyto3_retrained")
+    parser.add_argument(
+        "--verbose", action="store_true", help="Turn on detailed logging.")
     args = parser.parse_args()
+
+    if args.verbose:
+        print("Verbose turn on.")
 
     retrain_cyto(
         train_dir=args.train_dir,
