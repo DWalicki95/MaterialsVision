@@ -54,7 +54,7 @@ def retrain_cyto(
         weight_decay=1e-4,
         learning_rate=0.1,
         n_epochs=100,
-        batch_size=8,
+        batch_size=4,
         save_path=output_dir,
         SGD=False,
         compute_flows=False,
