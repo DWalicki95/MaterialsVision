@@ -9,7 +9,7 @@ import logging
 def retrain_cyto(
         train_dir: Optional[str] = None,
         test_dir: Optional[str] = None,
-        model_name: str = 'cyto3_retrained'
+        model_name: str = 'cyto3_retrained.pth'
 ):
     """
     Allows to retrain cyto3 model.
@@ -41,7 +41,7 @@ def retrain_cyto(
     images, labels, image_names, test_images, test_labels, image_names_test = \
         output
 
-    model = models.CellposeModel(model_type='cyto3')
+    model = models.CellposeModel(gpu=True, model_type='cyto3')
 
     model_path, train_losses, test_losses = train.train_seg(
         model.net,
