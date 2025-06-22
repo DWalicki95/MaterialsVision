@@ -1,3 +1,12 @@
 */.ipynb_checkpoints/
 .zshrce
 .DS_Store
+*.log
+
+# wandb-related files
+*.wandb
+wandb-metadata.json
+wandb-summary.json
+train_losses_table_*.json
+config.yaml
+latest-run
