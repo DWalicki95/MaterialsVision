@@ -1,4 +1,6 @@
 import json
+import logging
+from pathlib import Path
 from typing import Any, Dict, List
 
 import matplotlib.cm as cm
@@ -6,12 +8,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import ImageDraw
 from tqdm import tqdm
-import logging
 
 from materials_vision.artificial_dataset.create_voronoi_diagrams import \
     generate_artifical_images
 from materials_vision.config import SYNTHETIC_DATASET_PATH_LOCAL_DRIVE
-
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,11 @@ class SyntheticMicrostructuresGenerator():
         self.n_samples = n_samples
         self.dataset_name = dataset_name
 
-    def generate_artificial_microstructures(self, save: bool = False) -> dict:
+    def generate_artificial_microstructures(
+            self,
+            save: bool = False,
+            save_path: Path = SYNTHETIC_DATASET_PATH_LOCAL_DRIVE
+    ) -> dict:
         """
         Generates synthetic microstructures and store them in dictionary.
 
@@ -77,7 +81,8 @@ class SyntheticMicrostructuresGenerator():
                     metadata=metadata,
                     combined_mask=combined_mask,
                     params=params,
-                    dataset_name=self.dataset_name
+                    dataset_name=self.dataset_name,
+                    dataset_path=save_path
                 )
         return self.dataset_dict
 
@@ -190,13 +195,14 @@ class SyntheticMicrostructuresGenerator():
             metadata: List[dict],
             combined_mask: np.ndarray,
             params: dict,
-            dataset_name: str = ''
+            dataset_name: str = '',
+            dataset_path: Path = SYNTHETIC_DATASET_PATH_LOCAL_DRIVE
     ) -> None:
         '''
         Saves synthetic image and pores mask as array (npy) and fially metadata
         of each sample as json file.
         '''
-        save_path_suffix_main = SYNTHETIC_DATASET_PATH_LOCAL_DRIVE / (
+        save_path_suffix_main = dataset_path / (
             f'synthetic_dataset_{dataset_name}'
         )
         save_path_suffix_main.mkdir(parents=True, exist_ok=True)
