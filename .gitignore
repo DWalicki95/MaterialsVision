@@ -1,12 +1,12 @@
+*.env
+
 */.ipynb_checkpoints/
 .zshrce
 .DS_Store
 *.log
+*.pyc
 
-# wandb-related files
-*.wandb
-wandb-metadata.json
-wandb-summary.json
-train_losses_table_*.json
-config.yaml
-latest-run
+side_scripts/verify_roboflow_mask.py
+side_scripts/cellpose_dataset_converter.py
+
+outputs/
