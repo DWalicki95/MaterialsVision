@@ -6,8 +6,9 @@
 *.log
 *.pyc
 
-side_scripts/verify_roboflow_mask.py
-side_scripts/cellpose_dataset_converter.py
+notebooks/synthetic_3d_inspection.ipynb
+
+side_scripts/
 
 outputs/
 mlruns/
