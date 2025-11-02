@@ -478,8 +478,6 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
             # log figures to MLflow
             mlflow.log_figure(train_losses_plot, 'train_losses.png')
             mlflow.log_figure(test_losses_plot, 'test_losses.png')
-            mlflow.log_artifact(str(train_plot_path), artifact_path="plots")
-            mlflow.log_artifact(str(test_plot_path), artifact_path="plots")
 
             logging.info("Logging model artifacts...")
             model_path_obj = Path(model_path)
