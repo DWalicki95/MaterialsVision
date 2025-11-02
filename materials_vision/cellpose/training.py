@@ -467,7 +467,7 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
                 x_label='Epoch'
             )
 
-            # save plots
+            # save plots locally
             train_plot_path = output_dir / 'train_losses.png'
             test_plot_path = output_dir / 'test_losses.png'
             train_losses_plot.savefig(
@@ -475,9 +475,13 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
             test_losses_plot.savefig(
                 test_plot_path, dpi=150, bbox_inches='tight')
 
-            # log figures to MLflow
-            mlflow.log_figure(train_losses_plot, 'train_losses.png')
-            mlflow.log_figure(test_losses_plot, 'test_losses.png')
+            # log figures to MLflow (only via log_figure)
+            mlflow.log_figure(train_losses_plot, 'plots/train_losses.png')
+            mlflow.log_figure(test_losses_plot, 'plots/test_losses.png')
+            
+            # Close figures to free memory
+            train_losses_plot.clf()
+            test_losses_plot.clf()
 
             logging.info("Logging model artifacts...")
             model_path_obj = Path(model_path)
@@ -512,9 +516,15 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
                     f"Trained model not found at {model_path}")
 
             # log additional artifacts from output directory
+            # FIXED: Exclude files already logged via mlflow.log_figure()
             logging.info("Logging additional artifacts...")
+            already_logged_files = {train_plot_path, test_plot_path}
+            
             for file_path in output_dir.rglob('*'):
-                if file_path.is_file() and file_path != model_path_obj:
+                if (file_path.is_file() and 
+                    file_path != model_path_obj and 
+                    file_path not in already_logged_files):
+                    
                     relative_path = file_path.relative_to(output_dir)
                     artifact_subpath = str(
                         relative_path.parent) if relative_path.parent != Path(
