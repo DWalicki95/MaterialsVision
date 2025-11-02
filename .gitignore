@@ -8,7 +8,8 @@
 
 notebooks/synthetic_3d_inspection.ipynb
 
-side_scripts/
+side_scripts/*
+!side_scripts/augment_dataset.py
 
 outputs/
 mlruns/
