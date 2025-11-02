@@ -224,6 +224,7 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
     n_epochs = config['training']['epochs']
     batch_size = config['input']['batch_size']
     compute_flows = config['training']['compute_flows']
+    min_train_mask = config['training'].get('min_train_masks', 1)
 
     # System monitoring configuration
     enable_monitoring = config.get("logging", {}).get(
@@ -361,6 +362,7 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
                 save_path=str(output_dir),
                 compute_flows=compute_flows,
                 save_every=save_every,
+                min_train_masks=min_train_mask,
                 model_name=model_name
             )
 

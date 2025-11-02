@@ -28,6 +28,7 @@ training:
   learning_rate: 0.1
   compute_flows: True
   model_name: "cpsam"
+  min_train_masks: 1
 
 logging:
   experiment_name: "cellpose retraining AS - augmentation"
