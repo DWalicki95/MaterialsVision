@@ -147,6 +147,39 @@ class SystemMonitor:
         return stats
 
 
+def filter_test_losses(train_losses, test_losses):
+    """
+    Filter out zero test losses (epochs where test wasn't evaluated).
+
+    Cellpose only evaluates test loss at epoch 5 and every 10 epochs.
+    This function extracts only the valid test loss values.
+
+    Parameters
+    ----------
+    train_losses : np.ndarray
+        Training losses for all epochs
+    test_losses : np.ndarray
+        Test losses for all epochs (contains zeros for non-evaluated epochs)
+
+    Returns
+    -------
+    tuple
+        (test_loss_epochs, test_loss_values, train_loss_at_test_epochs)
+    """
+    # Find epochs where test loss was actually evaluated (non-zero)
+    test_loss_epochs = [
+        i for i, loss in enumerate(test_losses) if loss > 0]
+    test_loss_values = [test_losses[i] for i in test_loss_epochs]
+    train_loss_at_test_epochs = [train_losses[i] for i in test_loss_epochs]
+
+    logging.info(
+        f"Valid test loss evaluations at epochs: {test_loss_epochs} "
+        f"({len(test_loss_epochs)} out of {len(test_losses)} total epochs)"
+    )
+
+    return test_loss_epochs, test_loss_values, train_loss_at_test_epochs
+
+
 def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
     """
     Retrain cyto3 model with proper MLflow tracking and system monitoring.
@@ -333,6 +366,10 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
 
             logging.info(f'Training complete. Model saved to: {model_path}')
 
+            # Filter test losses to only valid evaluations
+            test_loss_epochs, test_loss_values, train_loss_at_test_epochs = \
+                filter_test_losses(train_losses, test_losses)
+
             # CRITICAL: Copy model to .cellpose/models/ directory
             cellpose_models_dir = Path.home() / '.cellpose' / 'models'
             cellpose_models_dir.mkdir(parents=True, exist_ok=True)
@@ -354,24 +391,33 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
                 logging.warning(f"Model file {model_path} not found!")
 
             logging.info('Logging training metrics...')
-            # log losses per epoch
-            for epoch, (train_loss, test_loss) in enumerate(zip(train_losses, test_losses)):
+
+            # Log train losses for all epochs
+            for epoch, train_loss in enumerate(train_losses):
                 mlflow.log_metrics({
                     'training/train_loss': train_loss,
-                    'training/test_loss': test_loss,
-                    'training/loss_diff': abs(train_loss - test_loss)
                 }, step=epoch)
 
-            # log summary metrics
-            mlflow.log_metrics({
-                'summary/final_train_loss': train_losses[-1],
-                'summary/final_test_loss': test_losses[-1],
-                'summary/best_train_loss': min(train_losses),
-                'summary/best_test_loss': min(test_losses),
-                'summary/avg_train_loss': sum(
-                    train_losses) / len(train_losses),
-                'summary/avg_test_loss': sum(test_losses) / len(test_losses),
-            })
+            # Log test losses only for evaluated epochs
+            for idx, epoch in enumerate(test_loss_epochs):
+                mlflow.log_metrics({
+                    'training/test_loss': test_loss_values[idx],
+                    'training/loss_diff': abs(
+                        train_loss_at_test_epochs[idx] - test_loss_values[idx])
+                }, step=epoch)
+
+            # log summary metrics (using only valid test losses)
+            if test_loss_values:  # Check if we have any test losses
+                mlflow.log_metrics({
+                    'summary/final_train_loss': train_losses[-1],
+                    'summary/final_test_loss': test_loss_values[-1],
+                    'summary/best_train_loss': min(train_losses),
+                    'summary/best_test_loss': min(test_loss_values),
+                    'summary/avg_train_loss': sum(
+                        train_losses) / len(train_losses),
+                    'summary/avg_test_loss': sum(
+                        test_loss_values) / len(test_loss_values),
+                })
 
             # Stop monitoring and log summary stats
             if monitor:
@@ -407,9 +453,17 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
                     )
 
             logging.info("Creating and logging loss plots...")
-            # create plots
+
+            # Plot train losses (all epochs)
             train_losses_plot = plot_loss(n_epochs, train_losses, 'Train')
-            test_losses_plot = plot_loss(n_epochs, test_losses, 'Test')
+
+            # Plot test losses (only evaluated epochs with markers)
+            test_losses_plot = plot_loss(
+                test_loss_epochs,  # x-values
+                test_loss_values,   # y-values
+                'Test',
+                x_label='Epoch'
+            )
 
             # save plots
             train_plot_path = output_dir / 'train_losses.png'
@@ -473,7 +527,7 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
                         logging.warning(
                             f"Could not log artifact {file_path}: {e}")
 
-            # Create a README with model info
+            # Create a file with model info
             readme_path = output_dir / "MODEL_INFO.txt"
             with open(readme_path, 'w') as f:
                 f.write("Cellpose Model Training Info\n")
@@ -485,7 +539,14 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
                 f.write(f"Test Images: {len(test_images)}\n")
                 f.write(f"Epochs: {n_epochs}\n")
                 f.write(f"Final Train Loss: {train_losses[-1]:.4f}\n")
-                f.write(f"Final Test Loss: {test_losses[-1]:.4f}\n\n")
+                if test_loss_values:
+                    f.write(f"Final Test Loss: {test_loss_values[-1]:.4f}\n")
+                    f.write(
+                        f"Test evaluated at {len(test_loss_epochs)} "
+                        f"epochs: {test_loss_epochs}\n\n"
+                    )
+                else:
+                    f.write("No test loss data available\n\n")
 
                 if monitor and summary_stats:
                     f.write("System Resource Usage:\n")
@@ -509,8 +570,10 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
                         )
                         f.write(
                             "GPU Memory: avg="
-                            f"{summary_stats.get('gpu_memory_percent_avg', 0):.1f}%, "
-                            f"max={summary_stats.get('gpu_memory_percent_max', 0):.1f}%\n")
+                            f"{summary_stats.get(
+                                'gpu_memory_percent_avg', 0):.1f}%, "
+                            f"max={summary_stats.get(
+                                'gpu_memory_percent_max', 0):.1f}%\n")
 
                 f.write("\nModel Locations:\n")
                 f.write(f" - Output Dir: {model_path}\n")
@@ -518,13 +581,16 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
                 f.write("To load this model:\n")
                 f.write("from cellpose import models\n")
                 f.write("model = models.CellposeModel(\n")
-                f.write("gpu=True,\n")
-                f.write("pretrained_model='{cellpose_model_path}'\n")
+                f.write("    gpu=True,\n")
+                f.write(f"    pretrained_model='{cellpose_model_path}'\n")
                 f.write(")\n")
 
             mlflow.log_artifact(str(readme_path), artifact_path="info")
 
             # log and print final summary
+            final_test_loss_str = (
+                f"{test_loss_values[-1]:.4f}" if test_loss_values else "N/A"
+            )
             summary_msg = (
                 f"\n{'='*70}\n"
                 f"Training Complete!\n"
@@ -533,8 +599,9 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
                 f"Model saved to:\n"
                 f"  - Output: {model_path}\n"
                 f"  - .cellpose: {cellpose_model_path}\n"
-                f"Final Losses - Train: {train_losses[-1]:.4f}"
-                f"Test: {test_losses[-1]:.4f}\n"
+                f"Final Losses - Train: {train_losses[-1]:.4f}, "
+                f"Test: {final_test_loss_str}\n"
+                f"Test loss evaluated at {len(test_loss_epochs)} epochs\n"
                 f"{'='*70}\n"
             )
 
@@ -550,6 +617,6 @@ def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
             raise e
 
         finally:
-            # eleanup
+            # cleanup
             if monitor and monitor.monitoring:
                 monitor.stop()
