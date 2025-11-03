@@ -10,6 +10,7 @@ notebooks/synthetic_3d_inspection.ipynb
 
 side_scripts/*
 !side_scripts/augment_dataset.py
+!side_scripts/filter_magnifications.py
 
 outputs/
 mlruns/
