@@ -1766,7 +1766,7 @@ class PorousMaterialAnalyzer:
             raise
 
 
-# Example usage (commented out for production)
+# Example usage
 # if __name__ == "__main__":
 #     # Example: Analyze a single porous material sample
 #     mask_path = 'path/to/your/instance_mask.tif'
