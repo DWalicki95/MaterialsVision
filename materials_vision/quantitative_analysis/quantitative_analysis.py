@@ -202,27 +202,27 @@ class PoreMorphologyMetrics:
         return final_result
 
     def _calculate_circularity(
-        self, area: float, perim: float
+        self, area: float, ellipse_major_axis: float
     ) -> Dict[str, float]:
         """
         Calculate shape circularity.
 
-        Circularity is defined as 4π*area / perimeter².
+        Circularity is defined as 4π*area / ellipse_major_axis².
         A value of 1 indicates a perfect circle.
 
         Parameters
         ----------
         area : float
             Pore area in µm²
-        perim : float
-            Pore perimeter in µm
+        ellipse_major_axis : float
+            Major ellipse axis in µm
 
         Returns
         -------
         Dict[str, float]
             Dictionary with key 'circularity' and dimensionless value
         """
-        result = (4 * math.pi * area) / perim**2
+        result = (4 * math.pi * area) / ellipse_major_axis**2
         return {"circularity": result}
 
     def _calculate_solidity(self) -> Dict[str, float]:
@@ -240,13 +240,33 @@ class PoreMorphologyMetrics:
         return {"solidity": self.prop.solidity}
 
     def calculate_basic_morphology(self) -> Dict[str, float]:
+        """
+        Calculate basic morphology metrics for a pore.
+
+        Computes fundamental shape descriptors including area, perimeter,
+        circularity, and solidity. These metrics provide a comprehensive
+        characterization of pore size and shape.
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary containing:
+            - 'area': Pore area in µm²
+            - 'perimeter': Pore perimeter in µm
+            - 'circularity': Shape circularity (4πA/major_axis²), dimensionless
+            - 'solidity': Ratio of area to convex hull area (0-1)
+        """
         area_result = self._calculate_area()
         area = list(area_result.values())[0]
 
         perim_result = self._calculate_perimeter()
-        perim = list(perim_result.values())[0]
 
-        circ_result = self._calculate_circularity(area=area, perim=perim)
+        ellipse_major_axis_result = self._calculate_ellipse_major_axis()
+        ellipse_major_axis = list(ellipse_major_axis_result.values())[0]
+
+        circ_result = self._calculate_circularity(
+            area=area, ellipse_major_axis=ellipse_major_axis
+        )
 
         solidity_result = self._calculate_solidity()
 
