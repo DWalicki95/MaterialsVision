@@ -2,3 +2,4 @@ cellpose
 GPUtil
 mlflow
 psutil
+openpyxl

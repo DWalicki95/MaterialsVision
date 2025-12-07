@@ -26,7 +26,7 @@ class PoreMorphologyMetrics:
 
     This class computes various shape descriptors including:
     - Basic metrics: area, perimeter, circularity, solidity
-    - Feret diameters: min and max
+    - Feret diameters: min, max, and equivalent
     - Ellipse fitting: major/minor axes, aspect ratio, orientation angle
 
     Parameters
@@ -81,14 +81,107 @@ class PoreMorphologyMetrics:
 
     def calculate_min_feret(self) -> Dict[str, float]:
         """
-        Calculate minimum Feret diameter.
+        Calculate minimum Feret diameter using rotating calipers method on
+        convex hull.
+
+        The minimum Feret diameter (also called minimum caliper diameter) is
+        the smallest distance between two parallel supporting lines tangent to
+        the pore's convex hull. This metric represents the minimum width of the
+        pore when measured from all possible orientations.
+
+        Methodology
+        -----------
+        The algorithm implements a rotating calipers approach:
+
+        1. **Convex Hull Construction**: First, the convex hull of the pore
+           coordinates is computed. The convex hull is the smallest convex
+           polygon
+           that contains all pore pixels.
+
+        2. **Edge Iteration**: For each edge of the convex hull polygon, the
+           algorithm computes the width of the pore perpendicular to that edge.
+
+        3. **Perpendicular Width Calculation**: For each edge:
+           - A unit normal vector (perpendicular to the edge) is computed
+           - All convex hull vertices are projected onto this normal vector
+           - The width is calculated as the difference between maximum and
+             minimum projections
+           - This represents the distance between parallel supporting lines
+             perpendicular to the current edge
+
+        4. **Minimum Selection**: The minimum of all computed widths is the
+           minimum Feret diameter.
+
+        This approach is mathematically equivalent to rotating a pair of
+        parallel
+        calipers around the pore and finding the minimum separation distance.
+
+        Edge Cases
+        ----------
+        - Pores with fewer than 3 pixels cannot form a convex hull and return
+          0.0
+        - Zero-length edges (duplicate vertices) are skipped to avoid division
+          by zero
+        - Computational failures return NaN with a warning logged
 
         Returns
         -------
         Dict[str, float]
             Dictionary with key 'min_feret' and value in µm
+
+        Examples
+        --------
+        For a rectangular pore of 10×20 pixels:
+        - min_feret ≈ 10 pixels (the shorter dimension)
+        - This represents the minimum "shadow width" when viewing the pore
+          from different angles
         """
-        return {"min_feret": self.prop.feret_diameter_min * self.pixel_size}
+        coords = self.prop.coords
+
+        # Safety check for very small pores
+        # (< 3 pixels can't build convex hull)
+        if len(coords) < 3:
+            return {"min_feret": 0.0}
+
+        try:
+            hull = spatial.ConvexHull(coords)
+            hull_points = coords[hull.vertices]
+
+            min_width = float('inf')
+            num_vertices = len(hull_points)
+
+            for i in range(num_vertices):
+                # Two consecutive vertices that form an edge of the convex hull
+                p1 = hull_points[i]
+                p2 = hull_points[(i + 1) % num_vertices]
+
+                # Edge vector connecting the two vertices
+                edge = p2 - p1
+                norm = np.linalg.norm(edge)
+                if norm == 0:
+                    continue
+
+                # Unit normal vector perpendicular to the edge
+                normal = np.array([-edge[1], edge[0]]) / norm
+
+                # Project all convex hull vertices onto the normal vector
+                # The difference between max and min projections gives the
+                # width of the object in the direction perpendicular to this
+                # edge
+                projections = np.dot(hull_points, normal)
+                width = np.max(projections) - np.min(projections)
+
+                if width < min_width:
+                    min_width = width
+
+            return {"min_feret": min_width * self.pixel_size}
+
+        except Exception as e:
+            # In case of computational error, return NaN as a placeholder value
+            logger.warning(
+                f"Failed to calculate MinFeret for pore {self.prop.label}: {e}"
+            )
+            return {"min_feret": np.nan}
 
     def calculate_max_feret(self) -> Dict[str, float]:
         """
@@ -100,6 +193,21 @@ class PoreMorphologyMetrics:
             Dictionary with key 'max_feret' and value in µm
         """
         return {"max_feret": self.prop.feret_diameter_max * self.pixel_size}
+
+    def calculate_equivalent_diameter(self) -> Dict[str, float]:
+        """
+        Calculate equivalent diameter of the pore.
+
+        The equivalent diameter is the diameter of a circle with the same area
+        as the pore. Formula: d = 2 * sqrt(Area / π)
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary with key 'equivalent_diameter' and value in µm
+        """
+        equivalent_diameter = 2 * math.sqrt(self.prop_area / math.pi)
+        return {"equivalent_diameter": equivalent_diameter}
 
     def _calculate_ellipse_major_axis(self) -> Dict[str, float]:
         """
@@ -1550,6 +1658,9 @@ class PorousMaterialAnalyzer:
             "solidity": "Ratio of area to convex hull area",
             "min_feret": "Minimum Feret diameter",
             "max_feret": "Maximum Feret diameter",
+            "equivalent_diameter": (
+                "Equivalent diameter (diameter of circle with same area)"
+            ),
             "ellipse_major_axis": "Major axis of fitted ellipse",
             "ellipse_minor_axis": "Minor axis of fitted ellipse",
             "aspect_ratio": "Ratio of major to minor axis",
@@ -1564,6 +1675,7 @@ class PorousMaterialAnalyzer:
                 "perimeter" in metric_name
                 or "feret" in metric_name
                 or "axis" in metric_name
+                or "diameter" in metric_name
             ):
                 unit = "µm"
             elif "angle" in metric_name:
@@ -1787,33 +1899,33 @@ class PorousMaterialAnalyzer:
 
 
 # Example usage
-# if __name__ == "__main__":
-#     # Example: Analyze a single porous material sample
-#     mask_path = 'path/to/your/instance_mask.tif'
-#
-#     # Create analyzer instance
-#     analyzer = PorousMaterialAnalyzer(
-#         mask_path=mask_path,
-#         pixel_size=PIXEL_SIZE,  # from config.py
-#         generate_plots=True      # Generate visualization plots
-#     )
-#
-#     # Run complete analysis (automatically generates Excel report)
-#     results = analyzer.analyze_all()
-#
-#     # Alternatively, generate report separately
-#     # report_path = analyzer.generate_report()
-#     # print(f"Report saved to: {report_path}")
-#
-#     # Output structure:
-#     # OUTPUT_PATH/
-#     # └── {mask_filename}/
-#     #     ├── plots/
-#     #     │   ├── nearest_neighbor_distances.png
-#     #     │   ├── {mask_filename}_fractal_dimension.png
-#     #     │   └── {mask_filename}_coordination_number.png
-#     #     ├── data/
-#     #     └── reports/
-#     #         └── {mask_filename}_analysis_report.xlsx
-#     #             ├── Sheet 1: Analysis_Results (comprehensive metrics table)
-#     #             └── Sheet 2: Individual_Pores (per-pore data)
+if __name__ == "__main__":
+    # Example: Analyze a single porous material sample
+    mask_path = '/Volumes/ADATA SD620/Doktorat/semestr_4/analiza ilościowa/example_mask.tif'
+
+    # Create analyzer instance
+    analyzer = PorousMaterialAnalyzer(
+        mask_path=mask_path,
+        pixel_size=PIXEL_SIZE,  # from config.py
+        generate_plots=True      # Generate visualization plots
+    )
+
+    # Run complete analysis (automatically generates Excel report)
+    results = analyzer.analyze_all()
+
+    # Alternatively, generate report separately
+    # report_path = analyzer.generate_report()
+    # print(f"Report saved to: {report_path}")
+
+    # Output structure:
+    # OUTPUT_PATH/
+    # └── {mask_filename}/
+    #     ├── plots/
+    #     │   ├── nearest_neighbor_distances.png
+    #     │   ├── {mask_filename}_fractal_dimension.png
+    #     │   └── {mask_filename}_coordination_number.png
+    #     ├── data/
+    #     └── reports/
+    #         └── {mask_filename}_analysis_report.xlsx
+    #             ├── Sheet 1: Analysis_Results (comprehensive metrics table)
+    #             └── Sheet 2: Individual_Pores (per-pore data)
