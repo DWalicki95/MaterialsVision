@@ -995,6 +995,7 @@ class TopologyConnectivityAnalysis:
         scipy.spatial.Voronoi : Voronoi diagram computation
         """
         centroids = np.array([p.centroid for p in self.props])
+        centroids = centroids[:, ::-1]  # [y, x] -> x, y
         if len(centroids) < 4:
             logger.warning("Not enough points to generate Voronoi Diagram")
             return None
@@ -1054,8 +1055,8 @@ class TopologyConnectivityAnalysis:
                     line_width=1,
                     line_alpha=0.4,
                 )
-                all_y = centroids[:, 0]
-                all_x = centroids[:, 1]
+                all_y = centroids[:, 1]
+                all_x = centroids[:, 0]
                 mask_valid = np.zeros(len(centroids), dtype=bool)
                 mask_valid[valid_indices] = True
                 # Plot invalid (border) pores
