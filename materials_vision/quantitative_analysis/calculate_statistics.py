@@ -1,12 +1,13 @@
 import numpy as np
-from typing import List
+from typing import List, Dict
 
 
-def calculate_statistics(values: List) -> dict:
+def calculate_statistics(values: List) -> Dict[str, float]:
     """
     Calculate statistical metrics for a list of values.
 
-    Args:
+    Parameters
+    ----------
         values: List of numerical values
 
     Returns:
@@ -18,10 +19,10 @@ def calculate_statistics(values: List) -> dict:
     median = np.median(values)
     std = np.std(values)
     output = {
-        'mean': avg,
-        'median': median,
-        'min': min_,
-        'max': max_,
-        'std': std,
+        "mean": avg,
+        "median": median,
+        "min": min_,
+        "max": max_,
+        "std": std,
     }
     return output

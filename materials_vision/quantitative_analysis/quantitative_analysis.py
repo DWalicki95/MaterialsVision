@@ -12,8 +12,9 @@ import pandas as pd
 from datetime import datetime
 
 from config import PIXEL_SIZE, OUTPUT_PATH
-from materials_vision.quantitative_analysis.calculate_statistics import \
-    calculate_statistics
+from materials_vision.quantitative_analysis.calculate_statistics import (
+    calculate_statistics,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -27,55 +28,156 @@ class PoreMorphologyMetrics:
     - Basic metrics: area, perimeter, circularity, solidity
     - Feret diameters: min and max
     - Ellipse fitting: major/minor axes, aspect ratio, orientation angle
+
+    Parameters
+    ----------
+    prop : RegionProperties
+        Region properties object from skimage.measure.regionprops
+    pixel_size : float, optional
+        Physical size of one pixel in micrometers (default: PIXEL_SIZE from
+        config)
+
+    Attributes
+    ----------
+    prop : RegionProperties
+        Stored region properties object
+    pixel_size : float
+        Physical pixel size in µm
+    prop_area : float
+        Cached area value in µm²
+    prop_perim : float
+        Cached perimeter value in µm
     """
 
     def __init__(
-            self,
-            prop: RegionProperties,
-            pixel_size: float = PIXEL_SIZE
-    ):
+        self, prop: RegionProperties, pixel_size: float = PIXEL_SIZE
+    ) -> None:
         self.prop = prop
         self.pixel_size = pixel_size
         self.prop_area = list(self._calculate_area().values())[0]
         self.prop_perim = list(self._calculate_perimeter().values())[0]
 
     def _calculate_area(self) -> Dict[str, float]:
-        return {'area': self.prop.area * self.pixel_size**2}
+        """
+        Calculate pore area in µm².
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary with key 'area' and value in µm²
+        """
+        return {"area": self.prop.area * self.pixel_size**2}
 
     def _calculate_perimeter(self) -> Dict[str, float]:
-        return {'perimeter': self.prop.perimeter * self.pixel_size}
+        """
+        Calculate pore perimeter in µm.
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary with key 'perimeter' and value in µm
+        """
+        return {"perimeter": self.prop.perimeter * self.pixel_size}
 
     def calculate_min_feret(self) -> Dict[str, float]:
-        return {'min_feret': self.prop.feret_diameter_min * self.pixel_size}
+        """
+        Calculate minimum Feret diameter.
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary with key 'min_feret' and value in µm
+        """
+        return {"min_feret": self.prop.feret_diameter_min * self.pixel_size}
 
     def calculate_max_feret(self) -> Dict[str, float]:
-        return {'max_feret': self.prop.feret_diameter_max * self.pixel_size}
+        """
+        Calculate maximum Feret diameter.
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary with key 'max_feret' and value in µm
+        """
+        return {"max_feret": self.prop.feret_diameter_max * self.pixel_size}
 
     def _calculate_ellipse_major_axis(self) -> Dict[str, float]:
+        """
+        Calculate major axis of fitted ellipse.
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary with key 'ellipse_major_axis' and value in µm
+        """
         result = self.prop.axis_major_length * self.pixel_size
-        return {'ellipse_major_axis': result}
+        return {"ellipse_major_axis": result}
 
     def _calculate_ellipse_minor_axis(self) -> Dict[str, float]:
+        """
+        Calculate minor axis of fitted ellipse.
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary with key 'ellipse_minor_axis' and value in µm
+        """
         result = self.prop.axis_minor_length * self.pixel_size
-        return {'ellipse_minor_axis': result}
+        return {"ellipse_minor_axis": result}
 
     def _calculate_aspect_ratio(
-            self, ellipse_major_axis: float, ellipse_minor_axis: float
+        self, ellipse_major_axis: float, ellipse_minor_axis: float
     ) -> Dict[str, float]:
+        """
+        Calculate aspect ratio of fitted ellipse.
+
+        Parameters
+        ----------
+        ellipse_major_axis : float
+            Major axis length in µm
+        ellipse_minor_axis : float
+            Minor axis length in µm
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary with key 'aspect_ratio' and dimensionless value
+        """
         aspect_ratio = ellipse_major_axis / ellipse_minor_axis
-        return {'aspect_ratio': aspect_ratio}
+        return {"aspect_ratio": aspect_ratio}
 
     def _calculate_ellipse_angle(self) -> Dict[str, float]:
         """
-        Calculates ellipse angle (counter-clockwise) to X axis.
-        It is counted in radians, but this function converts it to degrees.
-        0 means object lays horizontally.
+        Calculate ellipse orientation angle.
+
+        The angle is measured counter-clockwise from the X-axis.
+        0 degrees means the object is oriented horizontally.
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary with key 'ellipse_angle' and value in degrees
         """
         ellipse_angle_rad = self.prop.orientation
         ellipse_angle_degree = math.degrees(ellipse_angle_rad)
-        return {'ellipse_angle': ellipse_angle_degree}
+        return {"ellipse_angle": ellipse_angle_degree}
 
     def calculate_ellipse_metrics(self) -> Dict[str, float]:
+        """
+        Calculate all ellipse-related metrics.
+
+        Computes major axis, minor axis, aspect ratio, and orientation angle
+        of the fitted ellipse.
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary containing:
+            - 'ellipse_major_axis': Major axis length in µm
+            - 'ellipse_minor_axis': Minor axis length in µm
+            - 'aspect_ratio': Ratio of major to minor axis (dimensionless)
+            - 'ellipse_angle': Orientation angle in degrees
+        """
         final_result = {}
 
         ellipse_major_axis_result = self._calculate_ellipse_major_axis()
@@ -86,7 +188,7 @@ class PoreMorphologyMetrics:
 
         aspect_ratio_result = self._calculate_aspect_ratio(
             ellipse_major_axis=ellipse_major_axis,
-            ellipse_minor_axis=ellipse_minor_axis
+            ellipse_minor_axis=ellipse_minor_axis,
         )
 
         ellipse_angle_result = self._calculate_ellipse_angle()
@@ -95,24 +197,47 @@ class PoreMorphologyMetrics:
             **ellipse_major_axis_result,
             **ellipse_minor_axis_result,
             **aspect_ratio_result,
-            **ellipse_angle_result
+            **ellipse_angle_result,
         }
         return final_result
 
-    def _calculate_circularity(self, area: float, perim: float) -> Dict[str, float]:
+    def _calculate_circularity(
+        self, area: float, perim: float
+    ) -> Dict[str, float]:
         """
-        Calculates circularity: 4π*area / perimeter²
-        Value of 1 indicates perfect circle.
+        Calculate shape circularity.
+
+        Circularity is defined as 4π*area / perimeter².
+        A value of 1 indicates a perfect circle.
+
+        Parameters
+        ----------
+        area : float
+            Pore area in µm²
+        perim : float
+            Pore perimeter in µm
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary with key 'circularity' and dimensionless value
         """
         result = (4 * math.pi * area) / perim**2
-        return {'circularity': result}
+        return {"circularity": result}
 
     def _calculate_solidity(self) -> Dict[str, float]:
         """
-        Solidity: ratio of area to convex hull area.
-        Measures how convex the pore is.
+        Calculate pore solidity.
+
+        Solidity is the ratio of pore area to its convex hull area.
+        Measures how convex the pore shape is (1 = perfectly convex).
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary with key 'solidity' and dimensionless value (0-1)
         """
-        return {'solidity': self.prop.solidity}
+        return {"solidity": self.prop.solidity}
 
     def calculate_basic_morphology(self) -> Dict[str, float]:
         area_result = self._calculate_area()
@@ -135,32 +260,63 @@ class PoreMorphologyMetrics:
 
     @staticmethod
     def aggregate_morphology_results(
-            morphology_results: List[Dict[str, float]]
+        morphology_results: List[Dict[str, float]],
     ) -> Dict[str, Dict[str, float]]:
         """
-        Aggregates morphology metrics across all pores.
+        Aggregate morphology metrics across all pores.
 
-        Args:
-            morphology_results: List of dictionaries containing morphology metrics
-                               for each pore
+        Computes statistical summaries (mean, median, std, min, max) for each
+        morphological metric across the entire pore population.
 
-        Returns:
-            Dictionary with aggregated statistics (mean, median, min, max, std)
-            for each morphology metric
+        Parameters
+        ----------
+        morphology_results : List[Dict[str, float]]
+            List of dictionaries, each containing morphology metrics for one
+            pore.
+            Each dictionary should have a 'pore_id' key and various metric keys
+            (e.g., 'area', 'perimeter', 'circularity').
+
+        Returns
+        -------
+        Dict[str, Dict[str, float]]
+            Nested dictionary where:
+            - Outer keys are metric names (e.g., 'area', 'perimeter')
+            - Inner dictionaries contain statistical measures:
+              - 'mean': Average value across all pores
+              - 'median': Median value
+              - 'std': Standard deviation
+              - 'min': Minimum value
+              - 'max': Maximum value
+
+        Examples
+        --------
+        >>> morphology_results = [
+        ...     {'pore_id': 1, 'area': 100.5, 'circularity': 0.95},
+        ...     {'pore_id': 2, 'area': 85.3, 'circularity': 0.87},
+        ...     {'pore_id': 3, 'area': 120.1, 'circularity': 0.92}
+        ... ]
+        >>> aggregated = PoreMorphologyMetrics.aggregate_morphology_results
+        (morphology_results)
+        >>> print(f"Mean area: {aggregated['area']['mean']:.2f} µm²")
+        Mean area: 101.97 µm²
         """
         if not morphology_results:
             return {}
 
         # Get all metric names (excluding 'pore_id')
-        metric_names = [key for key in morphology_results[0].keys()
-                       if key != 'pore_id']
+        metric_names = [
+            key for key in morphology_results[0].keys() if key != "pore_id"
+        ]
 
         aggregated_results = {}
 
         for metric_name in metric_names:
             # Extract values for this metric across all pores
-            values = [pore[metric_name] for pore in morphology_results
-                     if metric_name in pore]
+            values = [
+                pore[metric_name]
+                for pore in morphology_results
+                if metric_name in pore
+            ]
 
             if values:
                 # Calculate statistics
@@ -180,12 +336,12 @@ class GlobalMicrostructureDescriptors:
     """
 
     def __init__(
-            self,
-            mask: np.ndarray,
-            morphology_results: List[Dict],
-            pixel_size: float = PIXEL_SIZE,
-            n_rows: int = 2,
-            n_cols: int = 2
+        self,
+        mask: np.ndarray,
+        morphology_results: List[Dict],
+        pixel_size: float = PIXEL_SIZE,
+        n_rows: int = 2,
+        n_cols: int = 2,
     ):
         self.morphology_results = morphology_results
         self.mask = mask
@@ -198,28 +354,32 @@ class GlobalMicrostructureDescriptors:
         """Calculate total area of mask in µm²."""
         if mask_ is None:
             mask_ = self.mask
-        mask_area = mask_.shape[0] * mask_.shape[1] * (self.pixel_size ** 2)
+        mask_area = mask_.shape[0] * mask_.shape[1] * (self.pixel_size**2)
         return mask_area
 
     def _count_all_pores_area(self) -> float:
         """Sum of all pore areas from morphology results."""
-        return np.sum(pore['area'] for pore in self.morphology_results)
+        return np.sum(pore["area"] for pore in self.morphology_results)
 
     def _count_pores_area_in_mask(self, sub_mask: np.ndarray) -> float:
         """
         Count the total area of pores within a specific mask region.
 
-        Args:
-            sub_mask: A labeled mask array where each pore has a unique integer label
+        Parameters
+        ----------
+        sub_mask : np.ndarray
+            A labeled mask array where each pore has a unique integer label
 
-        Returns:
+        Returns
+        -------
+        float
             Total area of all pores in the sub-mask (in µm²)
         """
         # Count pixels for each label (excluding background label 0)
         pore_pixel_count = np.sum(sub_mask > 0)
 
         # Convert to area
-        pore_area = pore_pixel_count * (self.pixel_size ** 2)
+        pore_area = pore_pixel_count * (self.pixel_size**2)
 
         return pore_area
 
@@ -227,10 +387,14 @@ class GlobalMicrostructureDescriptors:
         """
         Calculate porosity (volume fraction of pores).
 
-        Args:
-            mask_: Optional sub-mask for local porosity calculation
+        Parameters
+        ----------
+        mask_ : np.ndarray, optional
+            Optional sub-mask for local porosity calculation
 
-        Returns:
+        Returns
+        -------
+        float
             Porosity value (0 to 1)
         """
         if mask_ is None:
@@ -245,27 +409,32 @@ class GlobalMicrostructureDescriptors:
         return pores_area / mask_area
 
     def _cut_mask_into_pieces(
-            self, n_rows: int = 2, n_cols: int = 2
+        self, n_rows: int = 2, n_cols: int = 2
     ) -> List[np.ndarray]:
         """
         Divide mask into equal rectangular pieces for local analysis.
 
-        Args:
-            n_rows: Number of rows to divide the mask
-            n_cols: Number of columns to divide the mask
+        Parameters
+        ----------
+        n_rows : int, optional
+            Number of rows to divide the mask (default: 2)
+        n_cols : int, optional
+            Number of columns to divide the mask (default: 2)
 
-        Returns:
+        Returns
+        -------
+        List[np.ndarray]
             List of mask pieces
         """
         if n_rows < 1 or n_cols < 1:
-            raise ValueError('n_rows and n_cols must be at least 1')
+            raise ValueError("n_rows and n_cols must be at least 1")
         height, width = self.mask.shape[:2]
         piece_height = height // n_rows
         piece_width = width // n_cols
         if piece_height == 0 or piece_width == 0:
             raise ValueError(
-                f'Image dimensions ({height}, {width}) are too small to cut '
-                f'into {n_rows}x{n_cols} pieces.'
+                f"Image dimensions ({height}, {width}) are too small to cut "
+                f"into {n_rows}x{n_cols} pieces."
             )
         usable_height = piece_height * n_rows
         usable_width = piece_width * n_cols
@@ -278,8 +447,7 @@ class GlobalMicrostructureDescriptors:
                 start_col = col * piece_width
                 end_col = start_col + piece_width
                 piece_mask = cropped_image[
-                    start_row: end_row,
-                    start_col: end_col
+                    start_row:end_row, start_col:end_col
                 ]
                 pieces.append(piece_mask.copy())
         return pieces
@@ -306,7 +474,8 @@ class GlobalMicrostructureDescriptors:
 
     def calculate_anisotropy(self) -> float:
         """
-        Calculate anisotropy of foam microstructure from ellipse orientation angles.
+        Calculate anisotropy of foam microstructure from ellipse orientation
+        angles.
 
         Anisotropy measures the degree of preferred orientation:
         - 0: random orientation (isotropic)
@@ -318,11 +487,11 @@ class GlobalMicrostructureDescriptors:
         # Extract ellipse angles from all pores
         angles = []
         for pore in self.morphology_results:
-            if 'ellipse_angle' in pore:
-                angles.append(pore['ellipse_angle'])
+            if "ellipse_angle" in pore:
+                angles.append(pore["ellipse_angle"])
 
         if not angles:
-            logger.warning('No ellipse angles found in morphology results')
+            logger.warning("No ellipse angles found in morphology results")
             return 0.0
 
         angles = np.array(angles)
@@ -350,9 +519,10 @@ class GlobalMicrostructureDescriptors:
             and anisotropy
         """
         results = {
-            'porosity': self.calculate_porosity(),
-            'local_porosity_variance': self.calculate_local_porosity_variance(),
-            'anisotropy': self.calculate_anisotropy()
+            "porosity": self.calculate_porosity(),
+            "local_porosity_variance": (
+                self.calculate_local_porosity_variance()),
+            "anisotropy": self.calculate_anisotropy(),
         }
         return results
 
@@ -365,24 +535,27 @@ class SpatialRelationMetrics:
     """
 
     def __init__(
-            self,
-            props: List[RegionProperties],
-            generate_plots: bool = True,
-            pixel_size: float = PIXEL_SIZE
+        self,
+        props: List[RegionProperties],
+        generate_plots: bool = True,
+        pixel_size: float = PIXEL_SIZE,
     ):
         self.props = props
         self.generate_plots = generate_plots
         self.pixel_size = pixel_size
 
     def plot_distribution(
-            self, values: List[float], output_path: Path,
-            title: str = 'Distribution', xlabel: str = 'Distance (µm)'
+        self,
+        values: List[float],
+        output_path: Path,
+        title: str = "Distribution",
+        xlabel: str = "Distance (µm)",
     ):
         """Plot histogram of value distribution."""
         plt.figure(figsize=(10, 6))
-        plt.hist(values, bins=30, edgecolor='black', linewidth=1.2)
+        plt.hist(values, bins=30, edgecolor="black", linewidth=1.2)
         plt.xlabel(xlabel)
-        plt.ylabel('Frequency')
+        plt.ylabel("Frequency")
         plt.title(title)
         plt.grid(True, alpha=0.3)
         plt.savefig(output_path)
@@ -406,15 +579,20 @@ class SpatialRelationMetrics:
         return nearest_neighbors_distances
 
     def calculate_spatial_metrics(
-            self, output_dir: Optional[Path] = None
+        self, output_dir: Optional[Path] = None
     ) -> Dict[str, float]:
         """
-        Calculate spatial relation metrics including nearest neighbor statistics.
+        Calculate spatial relation metrics including nearest neighbor
+        statistics.
 
-        Args:
-            output_dir: Directory to save plots (optional)
+        Parameters
+        ----------
+        output_dir : Path, optional
+            Directory to save plots
 
-        Returns:
+        Returns
+        -------
+        Dict[str, float]
             Dictionary containing mean, median, min, max, and std of
             nearest neighbor distances
         """
@@ -427,16 +605,24 @@ class SpatialRelationMetrics:
             try:
                 # Extract base filename from output_dir parent
                 base_name = output_dir.parent.name
-                output_path = output_dir / f'{base_name}_nearest_neighbor_distances.png'
+                output_path = (
+                    output_dir / f"{base_name}_nearest_neighbor_distances.png"
+                )
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 self.plot_distribution(
                     nearest_neighbors_distances,
                     output_path,
-                    title=f'Nearest Neighbor Distance Distribution\n{base_name}'
+                    title=(
+                        f"Nearest Neighbor Distance Distribution\n{base_name}"
+                    ),
                 )
-                logger.info(f"Saved nearest neighbor distance plot: {output_path}")
+                logger.info(
+                    f"Saved nearest neighbor distance plot: {output_path}"
+                )
             except Exception as e:
-                logger.error(f"Failed to save nearest neighbor distance plot: {e}")
+                logger.error(
+                    f"Failed to save nearest neighbor distance plot: {e}"
+                )
 
         return stats
 
@@ -451,40 +637,100 @@ class TopologyConnectivityAnalysis:
     """
 
     def __init__(
-            self,
-            mask: np.ndarray,
-            props: List[RegionProperties],
-            pixel_size: float = PIXEL_SIZE
+        self,
+        mask: np.ndarray,
+        props: List[RegionProperties],
+        pixel_size: float = PIXEL_SIZE,
     ):
         self.mask = mask
         self.props = props
         self.pixel_size = pixel_size
 
     def calculate_fractal_dimension(
-            self,
-            reject_huge_boxes: bool = True,
-            save_plot_path: Optional[Path] = OUTPUT_PATH,
-            filename: str = 'fractal_dimension_plot'
+        self,
+        reject_huge_boxes: bool = True,
+        save_plot_path: Optional[Path] = OUTPUT_PATH,
+        filename: str = "fractal_dimension_plot",
     ) -> Tuple[float, float]:
         """
-        Calculate fractal dimension using box-counting method
-        (Minkowski-Bouligand method).
+        Calculate fractal dimension using box-counting method.
 
-        Args:
-            reject_huge_boxes: Whether to reject large box sizes from fitting
-            save_plot_path: Path to save diagnostic plot
-            filename: Filename for the plot
+        Implements the Minkowski-Bouligand box-counting method to estimate
+        the fractal dimension of the porous structure. The method recursively
+        divides the binary mask into smaller boxes and counts how many boxes
+        contain part of the structure at each scale.
 
-        Returns:
-            Tuple of (fractal_dimension, r_squared)
+        The fractal dimension D is estimated from the relationship:
+        log(N(ε)) = -D * log(ε) + C
+
+        where N(ε) is the number of boxes of size ε needed to cover the
+        structure.
+
+        Parameters
+        ----------
+        reject_huge_boxes : bool, optional
+            Whether to reject large box sizes from linear fitting to improve
+            accuracy (default: True). When True, only intermediate scales are
+            used for fitting.
+        save_plot_path : Path, optional
+            Directory path to save diagnostic plot showing the log-log
+            relationship
+            and linear fit (default: OUTPUT_PATH)
+        filename : str, optional
+            Filename for the diagnostic plot (
+            default: 'fractal_dimension_plot')
+
+        Returns
+        -------
+        fractal_dim : float
+            Estimated fractal dimension (typically between 1 and 2 for 2D
+            structures)
+        r_squared : float
+            R² coefficient of determination for the linear fit, indicating
+            fit quality (closer to 1 is better)
+
+        Notes
+        -----
+        The box-counting method works by:
+        1. Converting the instance mask to binary
+        2. Cropping to largest square with size as power of 2
+        3. Iteratively doubling box size and counting occupied boxes
+        4. Fitting a line to log(box_size) vs log(count)
+        5. Fractal dimension is the negative slope of this line
+
+        Higher fractal dimensions indicate more complex, space-filling
+        structures.
+        For porous materials:
+        - D ≈ 1: Linear, simple structures
+        - D ≈ 1.5-1.7: Typical porous foams
+        - D ≈ 2: Highly complex, space-filling structures
+
+        Examples
+        --------
+        >>> from skimage.measure import regionprops
+        >>> import tifffile
+        >>> mask = tifffile.imread('porous_material.tif')
+        >>> props = regionprops(mask)
+        >>> analyzer = TopologyConnectivityAnalysis(mask, props,
+        pixel_size=1.5)
+        >>> fractal_dim, r_squared = analyzer.calculate_fractal_dimension()
+        >>> print(f"Fractal dimension: {fractal_dim:.3f}, R²: {r_squared:.3f}")
+        Fractal dimension: 1.652, R²: 0.987
+
+        References
+        ----------
+        .. [1] Mandelbrot, B. B. (1983). The Fractal Geometry of Nature.
+               W. H. Freeman and Company.
         """
-        logger.info("Calculating fractal dimension using box-counting method...")
+        logger.info(
+            "Calculating fractal dimension using box-counting method..."
+        )
 
         # Instance mask -> binary mask
-        Z = (self.mask > 0)
+        Z = self.mask > 0
         # Image cut for further split to equal squares
         p = np.min(Z.shape)
-        n = 2**int(np.floor(np.log2(p)))
+        n = 2 ** int(np.floor(np.log2(p)))
         Z = Z[:n, :n]
         box_sizes = []
         counts = []
@@ -497,9 +743,7 @@ class TopologyConnectivityAnalysis:
             counts.append(np.sum(curr_Z > 0))
 
             h, w = curr_Z.shape
-            curr_Z = (
-                curr_Z.reshape(h // 2, 2, w // 2, 2).sum(axis=(1, 3)) > 0
-            )
+            curr_Z = curr_Z.reshape(h // 2, 2, w // 2, 2).sum(axis=(1, 3)) > 0
             # Box size increased 2-times
             k *= 2
 
@@ -516,7 +760,7 @@ class TopologyConnectivityAnalysis:
         coeffs = np.polyfit(x_data, y_data, 1)
         fractal_dim = -coeffs[0]
 
-        # Calculate R^2 (determination coefficient) - how well straight line fits
+        # Calculate R^2 (determination coeff.) - how well straight line fits
         # R^2 helps us interpret if we can trust calculated D or if there
         # is something wrong
         y_pred = coeffs[0] * x_data + coeffs[1]
@@ -524,58 +768,107 @@ class TopologyConnectivityAnalysis:
         ss_tot = np.sum((y_data - np.mean(y_data)) ** 2)
         r_squared = 1 - (ss_res / ss_tot)
 
-        logger.info(f"Fractal dimension: {fractal_dim:.4f}, R²: {r_squared:.4f}")
+        logger.info(
+            f"Fractal dimension: {fractal_dim:.4f}, R²: {r_squared:.4f}"
+        )
 
         # Diagnostic plot
         if save_plot_path:
             try:
-                save_plot_path_fig = (
-                    OUTPUT_PATH / 'plots' / f'{filename}.png'
-                )
+                save_plot_path_fig = OUTPUT_PATH / "plots" / f"{filename}.png"
                 save_plot_path_fig.parent.mkdir(parents=True, exist_ok=True)
                 plt.figure(figsize=(10, 8))
-                plt.scatter(x_data, y_data, color='blue', label='Measured data')
+                plt.scatter(
+                    x_data, y_data, color="blue", label="Measured data"
+                )
                 plt.plot(
-                    x_data, y_pred, color='red', linestyle='--',
-                    label=f'Fit: D={fractal_dim:.3f}, $R^2$={r_squared:.3f}'
+                    x_data,
+                    y_pred,
+                    color="red",
+                    linestyle="--",
+                    label=f"Fit: D={fractal_dim:.3f}, $R^2$={r_squared:.3f}",
                 )
                 plt.title(
-                    f'Box-Counting Analysis: Fractal Dimension = {fractal_dim:.3f}\n{filename.replace("_fractal_dimension", "")}'
+                    "Box-Counting Analysis: Fractal Dimension = "
+                    f"{fractal_dim:.3f}\n"
+                    f"{filename.replace('_fractal_dimension', '')}"
                 )
-                plt.xlabel('log(Box size $\\epsilon$)')
-                plt.ylabel('log(Box count $N(\\epsilon)$)')
+                plt.xlabel("log(Box size $\\epsilon$)")
+                plt.ylabel("log(Box count $N(\\epsilon)$)")
                 plt.legend()
-                plt.grid(True, which='both', ls='-', alpha=0.5)
+                plt.grid(True, which="both", ls="-", alpha=0.5)
                 plt.savefig(save_plot_path_fig)
                 plt.close()
-                logger.info(f"Saved fractal dimension plot: {save_plot_path_fig}")
+                logger.info(
+                    f"Saved fractal dimension plot: {save_plot_path_fig}"
+                )
             except Exception as e:
                 logger.error(f"Failed to save fractal dimension plot: {e}")
 
         return fractal_dim, r_squared
 
     def calculate_coordination_number(
-            self,
-            save_plot_path: Optional[Path] = OUTPUT_PATH,
-            base_filename: str = 'analysis'
+        self,
+        save_plot_path: Optional[Path] = OUTPUT_PATH,
+        base_filename: str = "analysis",
     ) -> Optional[Dict[str, float]]:
         """
         Calculate coordination number using Voronoi tessellation.
 
-        Coordination number is the number of nearest neighbors for each pore.
-        Pores touching image boundaries are excluded from analysis.
+        The coordination number represents the number of nearest neighbors
+        for each pore, determined through Voronoi tessellation. This metric
+        describes the topological connectivity of the porous structure.
 
-        Args:
-            save_plot_path: Directory to save Voronoi diagram visualization
-            base_filename: Base filename for the plot
+        Pores touching image boundaries are excluded from analysis to avoid
+        edge effects that would underestimate their coordination number.
 
-        Returns:
-            Dictionary with statistics (mean, median, min, max, std) of
-            coordination numbers, or None if insufficient data
+        Parameters
+        ----------
+        save_plot_path : Path, optional
+            Directory path to save Voronoi diagram visualization with overlaid
+            mask and coordination numbers (default: OUTPUT_PATH)
+        base_filename : str, optional
+            Base filename for the output plot (default: 'analysis')
+
+        Returns
+        -------
+        Dict[str, float] or None
+            Dictionary containing statistical measures of coordination numbers:
+            - 'mean': Average coordination number
+            - 'median': Median coordination number
+            - 'std': Standard deviation
+            - 'min': Minimum coordination number
+            - 'max': Maximum coordination number
+            Returns None if insufficient pores (<4) or no valid interior pores.
+
+        Notes
+        -----
+        The Voronoi tessellation connects pore centroids to their natural
+        neighbors, where each Voronoi cell edge represents a neighbor
+        relationship.
+
+        Examples
+        --------
+        >>> from skimage.measure import regionprops
+        >>> import numpy as np
+        >>> # Create sample mask with labeled pores
+        >>> mask = np.array([[0, 1, 1, 0, 2, 2],
+        ...                  [0, 1, 1, 0, 2, 2],
+        ...                  [3, 3, 0, 0, 0, 0],
+        ...                  [3, 3, 0, 4, 4, 0]])
+        >>> props = regionprops(mask)
+        >>> analyzer = TopologyConnectivityAnalysis(mask, props)
+        >>> cn_stats = analyzer.calculate_coordination_number()
+        >>> print(f"Mean coordination number: {cn_stats['mean']:.2f}")
+        Mean coordination number: 2.50
+
+        See Also
+        --------
+        scipy.spatial.Voronoi : Voronoi diagram computation
         """
         centroids = np.array([p.centroid for p in self.props])
         if len(centroids) < 4:
-            logger.warning('Not enough points to generate Voronoi Diagram')
+            logger.warning("Not enough points to generate Voronoi Diagram")
             return None
 
         voronoi = spatial.Voronoi(points=centroids)
@@ -593,30 +886,45 @@ class TopologyConnectivityAnalysis:
         img_h, img_w = self.mask.shape
         for i, prop in enumerate(self.props):
             min_r, min_c, max_r, max_c = prop.bbox
-            touches_border = (min_r <= 0) or (min_c <= 0) or \
-                (max_r >= img_h) or (max_c >= img_w)
+            touches_border = (
+                (min_r <= 0)
+                or (min_c <= 0)
+                or (max_r >= img_h)
+                or (max_c >= img_w)
+            )
             if not touches_border:
                 valid_cn.append(neighbor_counts[i])
                 valid_indices.append(i)
 
         valid_cn = np.array(valid_cn)
         if len(valid_cn) == 0:
-            logger.warning('No valid pores for coordination number calculation')
+            logger.warning(
+                "No valid pores for coordination number calculation"
+            )
             return None
 
         stats = calculate_statistics(values=valid_cn)
-        logger.info(f"Coordination number: Mean={stats['mean']:.2f}, Std={stats['std']:.2f}")
+        logger.info(
+            f"Coordination number: Mean={stats['mean']:.2f},"
+            f"Std={stats['std']:.2f}"
+        )
 
         if save_plot_path:
             try:
-                save_plot_path_fig = save_plot_path / f'{base_filename}_coordination_number.png'
+                save_plot_path_fig = (
+                    save_plot_path / f"{base_filename}_coordination_number.png"
+                )
                 save_plot_path_fig.parent.mkdir(parents=True, exist_ok=True)
 
                 fig, ax = plt.subplots(figsize=(10, 10))
-                ax.imshow(self.mask, cmap='gray_r', alpha=0.3)
+                ax.imshow(self.mask, cmap="gray_r", alpha=0.3)
                 spatial.voronoi_plot_2d(
-                    voronoi, ax=ax, show_vertices=False,
-                    line_colors='blue', line_width=1, line_alpha=0.4
+                    voronoi,
+                    ax=ax,
+                    show_vertices=False,
+                    line_colors="blue",
+                    line_width=1,
+                    line_alpha=0.4,
                 )
                 all_y = centroids[:, 0]
                 all_x = centroids[:, 1]
@@ -624,68 +932,82 @@ class TopologyConnectivityAnalysis:
                 mask_valid[valid_indices] = True
                 # Plot invalid (border) pores
                 ax.scatter(
-                    all_x[~mask_valid], all_y[~mask_valid], c='red', marker='x',
-                    s=30, label='Rejected from analysis'
+                    all_x[~mask_valid],
+                    all_y[~mask_valid],
+                    c="red",
+                    marker="x",
+                    s=30,
+                    label="Rejected from analysis",
                 )
                 # Plot valid (inner) pores
-                ax.scatter(all_x[mask_valid], all_y[mask_valid], c='green', s=20)
+                ax.scatter(
+                    all_x[mask_valid], all_y[mask_valid], c="green", s=20
+                )
                 for idx in valid_indices:
                     ax.text(
-                        all_x[idx], all_y[idx], str(neighbor_counts[idx]),
-                        color='darkgreen', fontsize=8
+                        all_x[idx],
+                        all_y[idx],
+                        str(neighbor_counts[idx]),
+                        color="darkgreen",
+                        fontsize=8,
                     )
                 ax.legend()
                 ax.set_title(
-                    f'Topological Voronoi Analysis - {base_filename}\n'
-                    f'Mean CN: {stats["mean"]:.2f} ± {stats["std"]:.2f}'
+                    f"Topological Voronoi Analysis - {base_filename}\n"
+                    f"Mean CN: {stats['mean']:.2f} ± {stats['std']:.2f}"
                 )
                 plt.savefig(save_plot_path_fig)
                 plt.close()
-                logger.info(f"Saved coordination number plot: {save_plot_path_fig}")
+                logger.info(
+                    f"Saved coordination number plot: {save_plot_path_fig}"
+                )
             except Exception as e:
                 logger.error(f"Failed to save coordination number plot: {e}")
 
         return stats
 
     def calculate_all_topology_metrics(
-            self,
-            output_dir: Optional[Path] = None,
-            base_filename: str = 'analysis'
+        self,
+        output_dir: Optional[Path] = None,
+        base_filename: str = "analysis",
     ) -> Dict[str, any]:
         """
         Calculate all topology and connectivity metrics.
 
-        Args:
-            output_dir: Directory to save plots (optional)
-            base_filename: Base filename for output files
+        Parameters
+        ----------
+        output_dir : Path, optional
+            Directory to save plots
+        base_filename : str, optional
+            Base filename for output files (default: 'analysis')
 
-        Returns:
+        Returns
+        -------
+        Dict[str, any]
             Dictionary containing fractal dimension, r_squared,
             and coordination number statistics
         """
         # Update save paths if output_dir is provided
         if output_dir:
             fractal_plot_path = output_dir
-            fractal_filename = f'{base_filename}_fractal_dimension'
+            fractal_filename = f"{base_filename}_fractal_dimension"
             cn_plot_path = output_dir
         else:
             fractal_plot_path = OUTPUT_PATH
-            fractal_filename = 'fractal_dimension_plot'
+            fractal_filename = "fractal_dimension_plot"
             cn_plot_path = OUTPUT_PATH
 
         fractal_dim, r_squared = self.calculate_fractal_dimension(
-            save_plot_path=fractal_plot_path,
-            filename=fractal_filename
+            save_plot_path=fractal_plot_path, filename=fractal_filename
         )
         cn_stats = self.calculate_coordination_number(
-            save_plot_path=cn_plot_path,
-            base_filename=base_filename
+            save_plot_path=cn_plot_path, base_filename=base_filename
         )
 
         results = {
-            'fractal_dimension': fractal_dim,
-            'fractal_r_squared': r_squared,
-            'coordination_number_stats': cn_stats
+            "fractal_dimension": fractal_dim,
+            "fractal_r_squared": r_squared,
+            "coordination_number_stats": cn_stats,
         }
         return results
 
@@ -694,33 +1016,94 @@ class PorousMaterialAnalyzer:
     """
     Comprehensive analyzer for porous material microstructure.
 
-    This class integrates all analysis methods:
-    1. Pore morphology metrics (area, perimeter, shape descriptors)
-    2. Global microstructure descriptors (porosity, anisotropy)
-    3. Spatial relations (nearest neighbor distances)
-    4. Topology and connectivity (fractal dimension, coordination number)
+    This class provides a complete workflow for quantitative analysis of porous
+    materials from instance-segmented masks. It integrates multiple analysis
+    methods to characterize the morphology, topology, and spatial organization
+    of pores.
 
-    Usage:
-        analyzer = PorousMaterialAnalyzer(mask_path='path/to/mask.tif')
-        results = analyzer.analyze_all()
+    Analysis categories:
+    1. **Pore Morphology**: Individual pore metrics (area, perimeter, shape
+    descriptors)
+    2. **Global Descriptors**: Material-level properties (porosity, anisotropy)
+    3. **Spatial Relations**: Nearest neighbor distances and distributions
+    4. **Topology & Connectivity**: Fractal dimension, coordination number
+
+    Parameters
+    ----------
+    mask_path : str
+        Path to instance mask TIFF file where each pore has a unique integer
+        label
+        (0 = background, 1, 2, ... n = pore IDs)
+    pixel_size : float, optional
+        Physical size of one pixel in micrometers (default: PIXEL_SIZE from
+        config)
+    generate_plots : bool, optional
+        Whether to generate visualization plots (default: True)
+    output_base_dir : Path, optional
+        Base directory for all outputs (default: OUTPUT_PATH from config)
+
+    Attributes
+    ----------
+    mask : np.ndarray
+        Loaded instance mask array
+    props : List[RegionProperties]
+        Region properties for each detected pore
+    base_filename : str
+        Base filename extracted from mask path
+    output_dir : Dict[str, Path]
+        Dictionary of output directory paths ('base', 'plots', 'data',
+        'reports')
+    morphology_results : List[Dict[str, float]]
+        Individual pore morphology metrics
+    morphology_aggregated : Dict[str, Dict[str, float]]
+        Aggregated morphology statistics
+    global_descriptors : Dict[str, float]
+        Global microstructure descriptors
+    spatial_metrics : Dict[str, float]
+        Spatial relation metrics
+    topology_metrics : Dict[str, any]
+        Topology and connectivity metrics
+
+    Examples
+    --------
+    Basic usage:
+
+    >>> analyzer = PorousMaterialAnalyzer(
+    ...     mask_path='sample_foam.tif',
+    ...     pixel_size=1.5,  # µm/pixel
+    ...     generate_plots=True
+    ... )
+    >>> results = analyzer.analyze_all()
+    >>> print(f"Porosity: {results['global_descriptors']['porosity']:.2%}")
+    Porosity: 34.5%
+
+    Advanced usage with custom output directory:
+
+    >>> from pathlib import Path
+    >>> analyzer = PorousMaterialAnalyzer(
+    ...     mask_path='sample.tif',
+    ...     output_base_dir=Path('./my_results')
+    ... )
+    >>> # Run individual analyses
+    >>> morph = analyzer.calculate_morphology_metrics()
+    >>> global_desc = analyzer.calculate_global_descriptors()
+    >>> # Generate report
+    >>> report_path = analyzer.generate_report()
+
+    See Also
+    --------
+    PoreMorphologyMetrics : Individual pore morphology calculations
+    GlobalMicrostructureDescriptors : Global material properties
+    TopologyConnectivityAnalysis : Topology and connectivity analysis
     """
 
     def __init__(
-            self,
-            mask_path: str,
-            pixel_size: float = PIXEL_SIZE,
-            generate_plots: bool = True,
-            output_base_dir: Optional[Path] = None
-    ):
-        """
-        Initialize the analyzer.
-
-        Args:
-            mask_path: Path to instance mask TIFF file
-            pixel_size: Physical size of one pixel (in µm)
-            generate_plots: Whether to generate visualization plots
-            output_base_dir: Base directory for outputs (defaults to OUTPUT_PATH)
-        """
+        self,
+        mask_path: str,
+        pixel_size: float = PIXEL_SIZE,
+        generate_plots: bool = True,
+        output_base_dir: Optional[Path] = None,
+    ) -> None:
         self.mask_path = Path(mask_path)
         self.pixel_size = pixel_size
         self.generate_plots = generate_plots
@@ -749,17 +1132,19 @@ class PorousMaterialAnalyzer:
         base_output_dir = self.output_base_dir / self.base_filename
 
         output_dirs = {
-            'base': base_output_dir,
-            'plots': base_output_dir / 'plots',
-            'data': base_output_dir / 'data',
-            'reports': base_output_dir / 'reports'
+            "base": base_output_dir,
+            "plots": base_output_dir / "plots",
+            "data": base_output_dir / "data",
+            "reports": base_output_dir / "reports",
         }
 
         # Create all directories
         try:
             for dir_path in output_dirs.values():
                 dir_path.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Created output directory structure at: {base_output_dir}")
+            logger.info(
+                f"Created output directory structure at: {base_output_dir}"
+            )
         except Exception as e:
             logger.error(f"Failed to create output directories: {e}")
             raise
@@ -799,15 +1184,19 @@ class PorousMaterialAnalyzer:
         Returns:
             List of dictionaries, each containing metrics for one pore
         """
-        logger.info(f"Calculating morphology metrics for {len(self.props)} pores...")
+        logger.info(
+            f"Calculating morphology metrics for {len(self.props)} pores..."
+        )
         results = []
         for prop in self.props:
-            pore_result = {'pore_id': prop.label}
-            calculator = PoreMorphologyMetrics(prop, pixel_size=self.pixel_size)
+            pore_result = {"pore_id": prop.label}
+            calculator = PoreMorphologyMetrics(
+                prop, pixel_size=self.pixel_size
+            )
             for name, method in inspect.getmembers(
                 calculator, predicate=inspect.ismethod
             ):
-                if not name.startswith('_'):
+                if not name.startswith("_"):
                     result_dict = method()
                     pore_result.update(result_dict)
             results.append(pore_result)
@@ -832,7 +1221,9 @@ class PorousMaterialAnalyzer:
                 self.morphology_results
             )
         )
-        logger.info(f"Aggregated {len(self.morphology_aggregated)} morphology metrics")
+        logger.info(
+            f"Aggregated {len(self.morphology_aggregated)} morphology metrics"
+        )
         return self.morphology_aggregated
 
     def calculate_global_descriptors(self) -> Dict[str, float]:
@@ -850,11 +1241,14 @@ class PorousMaterialAnalyzer:
         calculator = GlobalMicrostructureDescriptors(
             mask=self.mask,
             morphology_results=self.morphology_results,
-            pixel_size=self.pixel_size
+            pixel_size=self.pixel_size,
         )
         self.global_descriptors = calculator.calculate_all_global_descriptors()
-        logger.info(f"Global descriptors calculated: Porosity={self.global_descriptors['porosity']:.4f}, "
-                   f"Anisotropy={self.global_descriptors['anisotropy']:.4f}")
+        logger.info(
+            "Global descriptors calculated: "
+            f"Porosity={self.global_descriptors['porosity']:.4f}, "
+            f"Anisotropy={self.global_descriptors['anisotropy']:.4f}"
+        )
         return self.global_descriptors
 
     def calculate_spatial_metrics(self) -> Dict[str, float]:
@@ -868,12 +1262,15 @@ class PorousMaterialAnalyzer:
         calculator = SpatialRelationMetrics(
             props=self.props,
             generate_plots=self.generate_plots,
-            pixel_size=self.pixel_size
+            pixel_size=self.pixel_size,
         )
         self.spatial_metrics = calculator.calculate_spatial_metrics(
-            output_dir=self.output_dir['plots']
+            output_dir=self.output_dir["plots"]
         )
-        logger.info(f"Spatial metrics calculated: Mean NN distance={self.spatial_metrics['mean']:.3f} µm")
+        logger.info(
+            "Spatial metrics calculated: "
+            f"Mean NN distance={self.spatial_metrics['mean']:.3f} µm"
+        )
         return self.spatial_metrics
 
     def calculate_topology_metrics(self) -> Dict[str, any]:
@@ -885,33 +1282,76 @@ class PorousMaterialAnalyzer:
         """
         logger.info("Calculating topology and connectivity metrics...")
         calculator = TopologyConnectivityAnalysis(
-            mask=self.mask,
-            props=self.props,
-            pixel_size=self.pixel_size
+            mask=self.mask, props=self.props, pixel_size=self.pixel_size
         )
         self.topology_metrics = calculator.calculate_all_topology_metrics(
-            output_dir=self.output_dir['plots'],
-            base_filename=self.base_filename
+            output_dir=self.output_dir["plots"],
+            base_filename=self.base_filename,
         )
-        logger.info(f"Topology metrics calculated: Fractal dimension={self.topology_metrics['fractal_dimension']:.4f}")
+        logger.info(
+            "Topology metrics calculated: Fractal dimension="
+            f"{self.topology_metrics['fractal_dimension']:.4f}"
+        )
         return self.topology_metrics
 
-    def analyze_all(self, generate_excel_report: bool = True) -> Dict[str, any]:
+    def analyze_all(
+        self, generate_excel_report: bool = True
+    ) -> Dict[str, any]:
         """
         Perform complete analysis of porous material microstructure.
 
-        This method runs all analyses:
-        - Individual pore morphology
-        - Aggregated morphology statistics
-        - Global descriptors
-        - Spatial relations
-        - Topology and connectivity
+        This is the main method that orchestrates all analyses and generates
+        comprehensive results. It runs morphology, global, spatial, and
+        topology analyses in sequence and optionally generates an Excel report.
 
-        Args:
-            generate_excel_report: Whether to automatically generate Excel report
+        Parameters
+        ----------
+        generate_excel_report : bool, optional
+            Whether to automatically generate and save Excel report
+            (default: True)
 
-        Returns:
-            Dictionary containing all analysis results
+        Returns
+        -------
+        Dict[str, any]
+            Comprehensive results dictionary containing:
+
+            - **morphology_individual** : List[Dict[str, float]]
+                Per-pore morphology metrics
+            - **morphology_aggregated** : Dict[str, Dict[str, float]]
+                Statistical summaries of morphology metrics
+            - **global_descriptors** : Dict[str, float]
+                Porosity, anisotropy, local porosity variance
+            - **spatial_metrics** : Dict[str, float]
+                Nearest neighbor distance statistics
+            - **topology_metrics** : Dict[str, any]
+                Fractal dimension and coordination number
+            - **metadata** : Dict[str, any]
+                Analysis metadata (mask path, pixel size, n_pores, shape)
+
+        Notes
+        -----
+        This method automatically:
+        - Logs progress at each step
+        - Generates and saves visualization plots
+        - Creates organized output directory structure
+        - Optionally generates Excel report
+
+        All results are also stored as class attributes for later access.
+
+        Examples
+        --------
+        >>> analyzer = PorousMaterialAnalyzer('foam_sample.tif')
+        >>> results = analyzer.analyze_all()
+        >>> # Access specific results
+        >>> porosity = results['global_descriptors']['porosity']
+        >>> mean_area = results['morphology_aggregated']['area']['mean']
+        >>> fractal_dim = results['topology_metrics']['fractal_dimension']
+
+        Run analysis without generating report:
+
+        >>> results = analyzer.analyze_all(generate_excel_report=False)
+        >>> # Generate report later
+        >>> report_path = analyzer.generate_report()
         """
         logger.info("Starting comprehensive porous material analysis...")
 
@@ -924,17 +1364,17 @@ class PorousMaterialAnalyzer:
 
         # Compile all results
         results = {
-            'morphology_individual': morphology_individual,
-            'morphology_aggregated': morphology_aggregated,
-            'global_descriptors': global_descriptors,
-            'spatial_metrics': spatial_metrics,
-            'topology_metrics': topology_metrics,
-            'metadata': {
-                'mask_path': str(self.mask_path),
-                'pixel_size': self.pixel_size,
-                'n_pores': len(self.props),
-                'mask_shape': self.mask.shape
-            }
+            "morphology_individual": morphology_individual,
+            "morphology_aggregated": morphology_aggregated,
+            "global_descriptors": global_descriptors,
+            "spatial_metrics": spatial_metrics,
+            "topology_metrics": topology_metrics,
+            "metadata": {
+                "mask_path": str(self.mask_path),
+                "pixel_size": self.pixel_size,
+                "n_pores": len(self.props),
+                "mask_shape": self.mask.shape,
+            },
         }
 
         logger.info("Analysis complete!")
@@ -949,261 +1389,375 @@ class PorousMaterialAnalyzer:
         """
         Generate a comprehensive Excel report of the analysis.
 
-        Creates an Excel file with two sheets:
-        - Sheet 1: Comprehensive metrics table (all aggregated results)
-        - Sheet 2: Individual pore morphology data
+        Creates a multi-sheet Excel workbook containing all analysis results
+        in a structured, filterable format suitable for further analysis or
+        publication.
 
-        Returns:
-            Path to the generated Excel report
+        Returns
+        -------
+        Path
+            Path object pointing to the generated Excel report
+
+        Notes
+        -----
+        The Excel report contains two sheets:
+
+        **Sheet 1: Analysis_Results**
+            Comprehensive metrics table with columns:
+            - Category: Analysis category (Metadata, Morphology, Global
+            Descriptors, etc.)
+            - Metric: Specific metric name
+            - Value: Numerical value
+            - Unit: Measurement unit (µm, µm², degrees, or dimensionless)
+            - Description: Detailed explanation of the metric
+
+            This format allows easy filtering by category and searching for
+            specific metrics.
+
+        **Sheet 2: Individual_Pores**
+            Raw data for each detected pore with columns:
+            - pore_id: Unique pore identifier
+            - area, perimeter, circularity, solidity
+            - min_feret, max_feret
+            - ellipse_major_axis, ellipse_minor_axis, aspect_ratio,
+            ellipse_angle
+
+        The report filename follows the pattern:
+        `{input_filename}_analysis_report.xlsx`
+
+        Examples
+        --------
+        >>> analyzer = PorousMaterialAnalyzer('foam_sample.tif')
+        >>> analyzer.analyze_all(generate_excel_report=False)
+        >>> report_path = analyzer.generate_report()
+        >>> print(f"Report saved to: {report_path}")
+        Report saved to:
+        /output/foam_sample/reports/foam_sample_analysis_report.xlsx
+
+        See Also
+        --------
+        analyze_all : Main analysis method that can auto-generate report
         """
         logger.info("Generating Excel report...")
 
         # Ensure analysis has been run
         if self.morphology_aggregated is None:
-            logger.warning("Analysis not yet run. Running complete analysis first...")
+            logger.warning(
+                "Analysis not yet run. Running complete analysis first..."
+            )
             self.analyze_all(generate_excel_report=False)
 
         # Create report filename
-        report_filename = f'{self.base_filename}_analysis_report.xlsx'
-        report_path = self.output_dir['reports'] / report_filename
+        report_filename = f"{self.base_filename}_analysis_report.xlsx"
+        report_path = self.output_dir["reports"] / report_filename
 
         # ===== Prepare Sheet 1: Comprehensive Analysis Results =====
         logger.info("Preparing comprehensive analysis results...")
         report_data = []
 
         # --- METADATA ---
-        report_data.append({
-                'Category': 'Metadata',
-                'Metric': 'Analysis Date',
-                'Value': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'Unit': '',
-                'Description': 'Date and time of analysis'
-            })
-        report_data.append({
-            'Category': 'Metadata',
-            'Metric': 'Mask File',
-            'Value': str(self.mask_path.name),
-            'Unit': '',
-            'Description': 'Input mask filename'
-        })
-        report_data.append({
-            'Category': 'Metadata',
-            'Metric': 'Number of Pores',
-            'Value': len(self.props),
-            'Unit': '',
-            'Description': 'Total number of detected pores'
-        })
-        report_data.append({
-            'Category': 'Metadata',
-            'Metric': 'Pixel Size',
-            'Value': self.pixel_size,
-            'Unit': 'µm',
-            'Description': 'Physical size of one pixel'
-        })
-        report_data.append({
-            'Category': 'Metadata',
-            'Metric': 'Image Width',
-            'Value': self.mask.shape[1],
-            'Unit': 'pixels',
-            'Description': 'Image width in pixels'
-        })
-        report_data.append({
-            'Category': 'Metadata',
-            'Metric': 'Image Height',
-            'Value': self.mask.shape[0],
-            'Unit': 'pixels',
-            'Description': 'Image height in pixels'
-        })
-        report_data.append({
-            'Category': 'Metadata',
-            'Metric': 'Total Image Area',
-            'Value': self.mask.shape[0] * self.mask.shape[1] * (self.pixel_size ** 2),
-            'Unit': 'µm²',
-            'Description': 'Total area of the analyzed region'
-        })
+        report_data.append(
+            {
+                "Category": "Metadata",
+                "Metric": "Analysis Date",
+                "Value": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "Unit": "",
+                "Description": "Date and time of analysis",
+            }
+        )
+        report_data.append(
+            {
+                "Category": "Metadata",
+                "Metric": "Mask File",
+                "Value": str(self.mask_path.name),
+                "Unit": "",
+                "Description": "Input mask filename",
+            }
+        )
+        report_data.append(
+            {
+                "Category": "Metadata",
+                "Metric": "Number of Pores",
+                "Value": len(self.props),
+                "Unit": "",
+                "Description": "Total number of detected pores",
+            }
+        )
+        report_data.append(
+            {
+                "Category": "Metadata",
+                "Metric": "Pixel Size",
+                "Value": self.pixel_size,
+                "Unit": "µm",
+                "Description": "Physical size of one pixel",
+            }
+        )
+        report_data.append(
+            {
+                "Category": "Metadata",
+                "Metric": "Image Width",
+                "Value": self.mask.shape[1],
+                "Unit": "pixels",
+                "Description": "Image width in pixels",
+            }
+        )
+        report_data.append(
+            {
+                "Category": "Metadata",
+                "Metric": "Image Height",
+                "Value": self.mask.shape[0],
+                "Unit": "pixels",
+                "Description": "Image height in pixels",
+            }
+        )
+        report_data.append(
+            {
+                "Category": "Metadata",
+                "Metric": "Total Image Area",
+                "Value": self.mask.shape[0]
+                * self.mask.shape[1]
+                * (self.pixel_size**2),
+                "Unit": "µm²",
+                "Description": "Total area of the analyzed region",
+            }
+        )
 
         # --- MORPHOLOGY (AGGREGATED) ---
         metric_descriptions = {
-            'area': 'Pore area',
-            'perimeter': 'Pore perimeter',
-            'circularity': 'Shape circularity (4πA/P²)',
-            'solidity': 'Ratio of area to convex hull area',
-            'min_feret': 'Minimum Feret diameter',
-            'max_feret': 'Maximum Feret diameter',
-            'ellipse_major_axis': 'Major axis of fitted ellipse',
-            'ellipse_minor_axis': 'Minor axis of fitted ellipse',
-            'aspect_ratio': 'Ratio of major to minor axis',
-            'ellipse_angle': 'Orientation angle of fitted ellipse'
+            "area": "Pore area",
+            "perimeter": "Pore perimeter",
+            "circularity": "Shape circularity (4πA/P²)",
+            "solidity": "Ratio of area to convex hull area",
+            "min_feret": "Minimum Feret diameter",
+            "max_feret": "Maximum Feret diameter",
+            "ellipse_major_axis": "Major axis of fitted ellipse",
+            "ellipse_minor_axis": "Minor axis of fitted ellipse",
+            "aspect_ratio": "Ratio of major to minor axis",
+            "ellipse_angle": "Orientation angle of fitted ellipse",
         }
 
         for metric_name, stats in self.morphology_aggregated.items():
             # Determine unit
-            if 'area' in metric_name:
-                unit = 'µm²'
-            elif 'perimeter' in metric_name or 'feret' in metric_name or 'axis' in metric_name:
-                unit = 'µm'
-            elif 'angle' in metric_name:
-                unit = 'degrees'
+            if "area" in metric_name:
+                unit = "µm²"
+            elif (
+                "perimeter" in metric_name
+                or "feret" in metric_name
+                or "axis" in metric_name
+            ):
+                unit = "µm"
+            elif "angle" in metric_name:
+                unit = "degrees"
             else:
-                unit = ''
+                unit = ""
 
-            description = metric_descriptions.get(metric_name, f'{metric_name} of pores')
+            description = metric_descriptions.get(
+                metric_name, f"{metric_name} of pores"
+            )
 
             # Add mean
-            report_data.append({
-                'Category': 'Morphology',
-                'Metric': f'{metric_name} (mean)',
-                'Value': stats['mean'],
-                'Unit': unit,
-                'Description': f'Mean {description}'
-            })
+            report_data.append(
+                {
+                    "Category": "Morphology",
+                    "Metric": f"{metric_name} (mean)",
+                    "Value": stats["mean"],
+                    "Unit": unit,
+                    "Description": f"Mean {description}",
+                }
+            )
             # Add std
-            report_data.append({
-                'Category': 'Morphology',
-                'Metric': f'{metric_name} (std)',
-                'Value': stats['std'],
-                'Unit': unit,
-                'Description': f'Standard deviation of {description}'
-            })
+            report_data.append(
+                {
+                    "Category": "Morphology",
+                    "Metric": f"{metric_name} (std)",
+                    "Value": stats["std"],
+                    "Unit": unit,
+                    "Description": f"Standard deviation of {description}",
+                }
+            )
             # Add median
-            report_data.append({
-                'Category': 'Morphology',
-                'Metric': f'{metric_name} (median)',
-                'Value': stats['median'],
-                'Unit': unit,
-                'Description': f'Median {description}'
-            })
+            report_data.append(
+                {
+                    "Category": "Morphology",
+                    "Metric": f"{metric_name} (median)",
+                    "Value": stats["median"],
+                    "Unit": unit,
+                    "Description": f"Median {description}",
+                }
+            )
             # Add min
-            report_data.append({
-                'Category': 'Morphology',
-                'Metric': f'{metric_name} (min)',
-                'Value': stats['min'],
-                'Unit': unit,
-                'Description': f'Minimum {description}'
-            })
+            report_data.append(
+                {
+                    "Category": "Morphology",
+                    "Metric": f"{metric_name} (min)",
+                    "Value": stats["min"],
+                    "Unit": unit,
+                    "Description": f"Minimum {description}",
+                }
+            )
             # Add max
-            report_data.append({
-                'Category': 'Morphology',
-                'Metric': f'{metric_name} (max)',
-                'Value': stats['max'],
-                'Unit': unit,
-                'Description': f'Maximum {description}'
-            })
+            report_data.append(
+                {
+                    "Category": "Morphology",
+                    "Metric": f"{metric_name} (max)",
+                    "Value": stats["max"],
+                    "Unit": unit,
+                    "Description": f"Maximum {description}",
+                }
+            )
 
             # --- GLOBAL DESCRIPTORS ---
-            report_data.append({
-                'Category': 'Global Descriptors',
-                'Metric': 'Porosity',
-                'Value': self.global_descriptors['porosity'],
-                'Unit': '',
-                'Description': 'Volume fraction of pores (0-1)'
-            })
-            report_data.append({
-                'Category': 'Global Descriptors',
-                'Metric': 'Local Porosity Variance',
-                'Value': self.global_descriptors['local_porosity_variance'],
-                'Unit': '',
-                'Description': 'Variance of porosity across local regions'
-            })
-            report_data.append({
-                'Category': 'Global Descriptors',
-                'Metric': 'Anisotropy',
-                'Value': self.global_descriptors['anisotropy'],
-                'Unit': '',
-                'Description': 'Degree of preferred orientation (0=isotropic, 1=aligned)'
-            })
+            report_data.append(
+                {
+                    "Category": "Global Descriptors",
+                    "Metric": "Porosity",
+                    "Value": self.global_descriptors["porosity"],
+                    "Unit": "",
+                    "Description": "Volume fraction of pores (0-1)",
+                }
+            )
+            report_data.append(
+                {
+                    "Category": "Global Descriptors",
+                    "Metric": "Local Porosity Variance",
+                    "Value": self.global_descriptors[
+                        "local_porosity_variance"
+                    ],
+                    "Unit": "",
+                    "Description": "Variance of porosity across local regions",
+                }
+            )
+            report_data.append(
+                {
+                    "Category": "Global Descriptors",
+                    "Metric": "Anisotropy",
+                    "Value": self.global_descriptors["anisotropy"],
+                    "Unit": "",
+                    "Description": (
+                        "Degree of preferred orientation "
+                        "(0=isotropic, 1=aligned)",
+                    )
+                }
+            )
 
             # --- SPATIAL METRICS ---
             for key, value in self.spatial_metrics.items():
-                report_data.append({
-                    'Category': 'Spatial Metrics',
-                    'Metric': f'Nearest Neighbor Distance ({key})',
-                    'Value': value,
-                    'Unit': 'µm',
-                    'Description': f'{key.capitalize()} nearest neighbor distance between pore centroids'
-                })
+                report_data.append(
+                    {
+                        "Category": "Spatial Metrics",
+                        "Metric": f"Nearest Neighbor Distance ({key})",
+                        "Value": value,
+                        "Unit": "µm",
+                        "Description": (
+                            f"{key.capitalize()} nearest neighbor distance "
+                            "between pore centroids",
+                        )
+                    }
+                )
 
             # --- TOPOLOGY & CONNECTIVITY ---
-            report_data.append({
-                'Category': 'Topology & Connectivity',
-                'Metric': 'Fractal Dimension',
-                'Value': self.topology_metrics['fractal_dimension'],
-                'Unit': '',
-                'Description': 'Fractal dimension from box-counting method'
-            })
-            report_data.append({
-                'Category': 'Topology & Connectivity',
-                'Metric': 'Fractal R²',
-                'Value': self.topology_metrics['fractal_r_squared'],
-                'Unit': '',
-                'Description': 'R² coefficient for fractal dimension fit'
-            })
+            report_data.append(
+                {
+                    "Category": "Topology & Connectivity",
+                    "Metric": "Fractal Dimension",
+                    "Value": self.topology_metrics["fractal_dimension"],
+                    "Unit": "",
+                    "Description": (
+                        "Fractal dimension from box-counting method"
+                    ),
+                }
+            )
+            report_data.append(
+                {
+                    "Category": "Topology & Connectivity",
+                    "Metric": "Fractal R²",
+                    "Value": self.topology_metrics["fractal_r_squared"],
+                    "Unit": "",
+                    "Description": "R² coefficient for fractal dimension fit",
+                }
+            )
 
-            if self.topology_metrics['coordination_number_stats']:
-                cn_stats = self.topology_metrics['coordination_number_stats']
-                report_data.append({
-                    'Category': 'Topology & Connectivity',
-                    'Metric': 'Coordination Number (mean)',
-                    'Value': cn_stats['mean'],
-                    'Unit': '',
-                    'Description': 'Mean number of nearest neighbors per pore'
-                })
-                report_data.append({
-                    'Category': 'Topology & Connectivity',
-                    'Metric': 'Coordination Number (std)',
-                    'Value': cn_stats['std'],
-                    'Unit': '',
-                    'Description': 'Standard deviation of coordination number'
-                })
-                report_data.append({
-                    'Category': 'Topology & Connectivity',
-                    'Metric': 'Coordination Number (median)',
-                    'Value': cn_stats['median'],
-                    'Unit': '',
-                    'Description': 'Median coordination number'
-                })
-                report_data.append({
-                    'Category': 'Topology & Connectivity',
-                    'Metric': 'Coordination Number (min)',
-                    'Value': cn_stats['min'],
-                    'Unit': '',
-                    'Description': 'Minimum coordination number'
-                })
-                report_data.append({
-                    'Category': 'Topology & Connectivity',
-                    'Metric': 'Coordination Number (max)',
-                    'Value': cn_stats['max'],
-                    'Unit': '',
-                    'Description': 'Maximum coordination number'
-                })
+            if self.topology_metrics["coordination_number_stats"]:
+                cn_stats = self.topology_metrics["coordination_number_stats"]
+                report_data.append(
+                    {
+                        "Category": "Topology & Connectivity",
+                        "Metric": "Coordination Number (mean)",
+                        "Value": cn_stats["mean"],
+                        "Unit": "",
+                        "Description": (
+                            "Mean number of nearest neighbors per pore"
+                        ),
+                    }
+                )
+                report_data.append(
+                    {
+                        "Category": "Topology & Connectivity",
+                        "Metric": "Coordination Number (std)",
+                        "Value": cn_stats["std"],
+                        "Unit": "",
+                        "Description": (
+                            "Standard deviation of coordination number"
+                        ),
+                    }
+                )
+                report_data.append(
+                    {
+                        "Category": "Topology & Connectivity",
+                        "Metric": "Coordination Number (median)",
+                        "Value": cn_stats["median"],
+                        "Unit": "",
+                        "Description": "Median coordination number",
+                    }
+                )
+                report_data.append(
+                    {
+                        "Category": "Topology & Connectivity",
+                        "Metric": "Coordination Number (min)",
+                        "Value": cn_stats["min"],
+                        "Unit": "",
+                        "Description": "Minimum coordination number",
+                    }
+                )
+                report_data.append(
+                    {
+                        "Category": "Topology & Connectivity",
+                        "Metric": "Coordination Number (max)",
+                        "Value": cn_stats["max"],
+                        "Unit": "",
+                        "Description": "Maximum coordination number",
+                    }
+                )
 
         # Prepare DataFrames
         df_report = pd.DataFrame(report_data)
         df_individual = pd.DataFrame(self.morphology_results)
 
         logger.info(f"Prepared {len(report_data)} metrics for export")
-        logger.info(f"Prepared {len(self.morphology_results)} individual pore records")
+        logger.info(
+            f"Prepared {len(self.morphology_results)} individual pore records"
+        )
 
         # Write to Excel file
         try:
-            with pd.ExcelWriter(report_path, engine='openpyxl') as writer:
+            with pd.ExcelWriter(report_path, engine="openpyxl") as writer:
                 # Sheet 1: Analysis Results
                 df_report.to_excel(
-                    writer, sheet_name='Analysis_Results', index=False
+                    writer, sheet_name="Analysis_Results", index=False
                 )
                 logger.info("Written 'Analysis_Results' sheet")
 
                 # Sheet 2: Individual Pores
                 df_individual.to_excel(
-                    writer, sheet_name='Individual_Pores', index=False
+                    writer, sheet_name="Individual_Pores", index=False
                 )
                 logger.info("Written 'Individual_Pores' sheet")
 
             logger.info(f"Excel report saved to: {report_path}")
             logger.info(f"All plots saved in: {self.output_dir['plots']}")
-            logger.info("="*70)
+            logger.info("=" * 70)
             logger.info("ANALYSIS COMPLETE!")
-            logger.info("="*70)
+            logger.info("=" * 70)
 
             return report_path
 
