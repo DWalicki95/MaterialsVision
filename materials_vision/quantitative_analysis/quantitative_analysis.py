@@ -1589,7 +1589,7 @@ class PorousMaterialAnalyzer:
                 "Category": "Metadata",
                 "Metric": "Analysis Date",
                 "Value": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Unit": "",
+                "Unit": "-",
                 "Description": "Date and time of analysis",
             }
         )
@@ -1598,7 +1598,7 @@ class PorousMaterialAnalyzer:
                 "Category": "Metadata",
                 "Metric": "Mask File",
                 "Value": str(self.mask_path.name),
-                "Unit": "",
+                "Unit": "-",
                 "Description": "Input mask filename",
             }
         )
@@ -1607,7 +1607,7 @@ class PorousMaterialAnalyzer:
                 "Category": "Metadata",
                 "Metric": "Number of Pores",
                 "Value": len(self.props),
-                "Unit": "",
+                "Unit": "pcs",
                 "Description": "Total number of detected pores",
             }
         )
@@ -1681,7 +1681,7 @@ class PorousMaterialAnalyzer:
             elif "angle" in metric_name:
                 unit = "degrees"
             else:
-                unit = ""
+                unit = "-"
 
             description = metric_descriptions.get(
                 metric_name, f"{metric_name} of pores"
@@ -1738,128 +1738,128 @@ class PorousMaterialAnalyzer:
                 }
             )
 
-            # --- GLOBAL DESCRIPTORS ---
+        # --- GLOBAL DESCRIPTORS ---
+        report_data.append(
+            {
+                "Category": "Global Descriptors",
+                "Metric": "Porosity",
+                "Value": self.global_descriptors["porosity"],
+                "Unit": "-",
+                "Description": "Volume fraction of pores (0-1)",
+            }
+        )
+        report_data.append(
+            {
+                "Category": "Global Descriptors",
+                "Metric": "Local Porosity Variance",
+                "Value": self.global_descriptors[
+                    "local_porosity_variance"
+                ],
+                "Unit": "-",
+                "Description": "Variance of porosity across local regions",
+            }
+        )
+        report_data.append(
+            {
+                "Category": "Global Descriptors",
+                "Metric": "Anisotropy",
+                "Value": self.global_descriptors["anisotropy"],
+                "Unit": "-",
+                "Description": (
+                    "Degree of preferred orientation "
+                    "(0=isotropic, 1=aligned)",
+                )
+            }
+        )
+
+        # --- SPATIAL METRICS ---
+        for key, value in self.spatial_metrics.items():
             report_data.append(
                 {
-                    "Category": "Global Descriptors",
-                    "Metric": "Porosity",
-                    "Value": self.global_descriptors["porosity"],
-                    "Unit": "",
-                    "Description": "Volume fraction of pores (0-1)",
-                }
-            )
-            report_data.append(
-                {
-                    "Category": "Global Descriptors",
-                    "Metric": "Local Porosity Variance",
-                    "Value": self.global_descriptors[
-                        "local_porosity_variance"
-                    ],
-                    "Unit": "",
-                    "Description": "Variance of porosity across local regions",
-                }
-            )
-            report_data.append(
-                {
-                    "Category": "Global Descriptors",
-                    "Metric": "Anisotropy",
-                    "Value": self.global_descriptors["anisotropy"],
-                    "Unit": "",
+                    "Category": "Spatial Metrics",
+                    "Metric": f"Nearest Neighbor Distance ({key})",
+                    "Value": value,
+                    "Unit": "µm",
                     "Description": (
-                        "Degree of preferred orientation "
-                        "(0=isotropic, 1=aligned)",
+                        f"{key.capitalize()} nearest neighbor distance "
+                        "between pore centroids",
                     )
                 }
             )
 
-            # --- SPATIAL METRICS ---
-            for key, value in self.spatial_metrics.items():
-                report_data.append(
-                    {
-                        "Category": "Spatial Metrics",
-                        "Metric": f"Nearest Neighbor Distance ({key})",
-                        "Value": value,
-                        "Unit": "µm",
-                        "Description": (
-                            f"{key.capitalize()} nearest neighbor distance "
-                            "between pore centroids",
-                        )
-                    }
-                )
+        # --- TOPOLOGY & CONNECTIVITY ---
+        report_data.append(
+            {
+                "Category": "Topology & Connectivity",
+                "Metric": "Fractal Dimension",
+                "Value": self.topology_metrics["fractal_dimension"],
+                "Unit": "-",
+                "Description": (
+                    "Fractal dimension from box-counting method"
+                ),
+            }
+        )
+        report_data.append(
+            {
+                "Category": "Topology & Connectivity",
+                "Metric": "Fractal R²",
+                "Value": self.topology_metrics["fractal_r_squared"],
+                "Unit": "-",
+                "Description": "R² coefficient for fractal dimension fit",
+            }
+        )
 
-            # --- TOPOLOGY & CONNECTIVITY ---
+        if self.topology_metrics["coordination_number_stats"]:
+            cn_stats = self.topology_metrics["coordination_number_stats"]
             report_data.append(
                 {
                     "Category": "Topology & Connectivity",
-                    "Metric": "Fractal Dimension",
-                    "Value": self.topology_metrics["fractal_dimension"],
-                    "Unit": "",
+                    "Metric": "Coordination Number (mean)",
+                    "Value": cn_stats["mean"],
+                    "Unit": "-",
                     "Description": (
-                        "Fractal dimension from box-counting method"
+                        "Mean number of nearest neighbors per pore"
                     ),
                 }
             )
             report_data.append(
                 {
                     "Category": "Topology & Connectivity",
-                    "Metric": "Fractal R²",
-                    "Value": self.topology_metrics["fractal_r_squared"],
-                    "Unit": "",
-                    "Description": "R² coefficient for fractal dimension fit",
+                    "Metric": "Coordination Number (std)",
+                    "Value": cn_stats["std"],
+                    "Unit": "-",
+                    "Description": (
+                        "Standard deviation of coordination number"
+                    ),
                 }
             )
-
-            if self.topology_metrics["coordination_number_stats"]:
-                cn_stats = self.topology_metrics["coordination_number_stats"]
-                report_data.append(
-                    {
-                        "Category": "Topology & Connectivity",
-                        "Metric": "Coordination Number (mean)",
-                        "Value": cn_stats["mean"],
-                        "Unit": "",
-                        "Description": (
-                            "Mean number of nearest neighbors per pore"
-                        ),
-                    }
-                )
-                report_data.append(
-                    {
-                        "Category": "Topology & Connectivity",
-                        "Metric": "Coordination Number (std)",
-                        "Value": cn_stats["std"],
-                        "Unit": "",
-                        "Description": (
-                            "Standard deviation of coordination number"
-                        ),
-                    }
-                )
-                report_data.append(
-                    {
-                        "Category": "Topology & Connectivity",
-                        "Metric": "Coordination Number (median)",
-                        "Value": cn_stats["median"],
-                        "Unit": "",
-                        "Description": "Median coordination number",
-                    }
-                )
-                report_data.append(
-                    {
-                        "Category": "Topology & Connectivity",
-                        "Metric": "Coordination Number (min)",
-                        "Value": cn_stats["min"],
-                        "Unit": "",
-                        "Description": "Minimum coordination number",
-                    }
-                )
-                report_data.append(
-                    {
-                        "Category": "Topology & Connectivity",
-                        "Metric": "Coordination Number (max)",
-                        "Value": cn_stats["max"],
-                        "Unit": "",
-                        "Description": "Maximum coordination number",
-                    }
-                )
+            report_data.append(
+                {
+                    "Category": "Topology & Connectivity",
+                    "Metric": "Coordination Number (median)",
+                    "Value": cn_stats["median"],
+                    "Unit": "-",
+                    "Description": "Median coordination number",
+                }
+            )
+            report_data.append(
+                {
+                    "Category": "Topology & Connectivity",
+                    "Metric": "Coordination Number (min)",
+                    "Value": cn_stats["min"],
+                    "Unit": "-",
+                    "Description": "Minimum coordination number",
+                }
+            )
+            report_data.append(
+                {
+                    "Category": "Topology & Connectivity",
+                    "Metric": "Coordination Number (max)",
+                    "Value": cn_stats["max"],
+                    "Unit": "-",
+                    "Description": "Maximum coordination number",
+                }
+            )
 
         # Prepare DataFrames
         df_report = pd.DataFrame(report_data)
