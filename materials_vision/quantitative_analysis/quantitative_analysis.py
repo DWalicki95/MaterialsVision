@@ -274,8 +274,8 @@ class PoreMorphologyMetrics:
         """
         Calculate all ellipse-related metrics.
 
-        Computes major axis, minor axis, aspect ratio, and orientation angle
-        of the fitted ellipse.
+        Computes major axis, minor axis, aspect ratio, orientation angle,
+        and roundness of the fitted ellipse.
 
         Returns
         -------
@@ -285,6 +285,7 @@ class PoreMorphologyMetrics:
             - 'ellipse_minor_axis': Minor axis length in µm
             - 'aspect_ratio': Ratio of major to minor axis (dimensionless)
             - 'ellipse_angle': Orientation angle in degrees
+            - 'roundness': Roundness metric (4*Area / (π*MajorAxis²))
         """
         final_result = {}
 
@@ -301,21 +302,27 @@ class PoreMorphologyMetrics:
 
         ellipse_angle_result = self._calculate_ellipse_angle()
 
+        roundness_result = self._calculate_roundness(
+            area=self.prop_area,
+            ellipse_major_axis=ellipse_major_axis,
+        )
+
         final_result = {
             **ellipse_major_axis_result,
             **ellipse_minor_axis_result,
             **aspect_ratio_result,
             **ellipse_angle_result,
+            **roundness_result,
         }
         return final_result
 
     def _calculate_circularity(
-        self, area: float, ellipse_major_axis: float
+        self, area: float, perimeter: float
     ) -> Dict[str, float]:
         """
         Calculate shape circularity.
 
-        Circularity is defined as 4π*area / ellipse_major_axis².
+        Circularity is defined as 4π*area / perimeter².
         A value of 1 indicates a perfect circle.
 
         Parameters
@@ -330,8 +337,29 @@ class PoreMorphologyMetrics:
         Dict[str, float]
             Dictionary with key 'circularity' and dimensionless value
         """
-        result = (4 * math.pi * area) / ellipse_major_axis**2
+        if perimeter == 0:
+            return {"circularity": 0.0}
+        result = (4 * math.pi * area) / perimeter**2
         return {"circularity": result}
+
+    def _calculate_roundness(
+            self,
+            area: float,
+            ellipse_major_axis: float
+    ) -> Dict[str, float]:
+        """
+        Calculate Roundness
+
+        Formula: 4 * Area / (π * MajorAxis²)
+
+        - 1.0 indicates a perfect circle.
+        - Unlike Circularity, Roundness is INSENSITIVE to irregular borders.
+        - It mostly measures how elongated the shape is.
+        """
+        if ellipse_major_axis == 0:
+            return {"roundness": 0.0}
+        roundness = (4 * area) / (math.pi * ellipse_major_axis**2)
+        return {"roundness": roundness}
 
     def _calculate_solidity(self) -> Dict[str, float]:
         """
@@ -368,12 +396,10 @@ class PoreMorphologyMetrics:
         area = list(area_result.values())[0]
 
         perim_result = self._calculate_perimeter()
-
-        ellipse_major_axis_result = self._calculate_ellipse_major_axis()
-        ellipse_major_axis = list(ellipse_major_axis_result.values())[0]
+        perimeter = list(perim_result.values())[0]
 
         circ_result = self._calculate_circularity(
-            area=area, ellipse_major_axis=ellipse_major_axis
+            area=area, perimeter=perimeter
         )
 
         solidity_result = self._calculate_solidity()
@@ -845,10 +871,6 @@ class TopologyConnectivityAnalysis:
         >>> print(f"Fractal dimension: {fractal_dim:.3f}, R²: {r_squared:.3f}")
         Fractal dimension: 1.652, R²: 0.987
 
-        References
-        ----------
-        .. [1] Mandelbrot, B. B. (1983). The Fractal Geometry of Nature.
-               W. H. Freeman and Company.
         """
         logger.info(
             "Calculating fractal dimension using box-counting method..."
@@ -947,8 +969,8 @@ class TopologyConnectivityAnalysis:
         for each pore, determined through Voronoi tessellation. This metric
         describes the topological connectivity of the porous structure.
 
-        Pores touching image boundaries are excluded from analysis to avoid
-        edge effects that would underestimate their coordination number.
+        Note: If boundary pores were filtered during PorousMaterialAnalyzer
+        initialization, they are automatically excluded from this analysis.
 
         Parameters
         ----------
@@ -967,28 +989,13 @@ class TopologyConnectivityAnalysis:
             - 'std': Standard deviation
             - 'min': Minimum coordination number
             - 'max': Maximum coordination number
-            Returns None if insufficient pores (<4) or no valid interior pores.
+            Returns None if insufficient pores (<4).
 
         Notes
         -----
         The Voronoi tessellation connects pore centroids to their natural
         neighbors, where each Voronoi cell edge represents a neighbor
         relationship.
-
-        Examples
-        --------
-        >>> from skimage.measure import regionprops
-        >>> import numpy as np
-        >>> # Create sample mask with labeled pores
-        >>> mask = np.array([[0, 1, 1, 0, 2, 2],
-        ...                  [0, 1, 1, 0, 2, 2],
-        ...                  [3, 3, 0, 0, 0, 0],
-        ...                  [3, 3, 0, 4, 4, 0]])
-        >>> props = regionprops(mask)
-        >>> analyzer = TopologyConnectivityAnalysis(mask, props)
-        >>> cn_stats = analyzer.calculate_coordination_number()
-        >>> print(f"Mean coordination number: {cn_stats['mean']:.2f}")
-        Mean coordination number: 2.50
 
         See Also
         --------
@@ -1008,31 +1015,12 @@ class TopologyConnectivityAnalysis:
             neighbor_counts[p1] += 1
             neighbor_counts[p2] += 1
 
-        # Handle edge effect - pores at the boundaries of an image
-        valid_cn = []
-        valid_indices = []
+        # Convert to array for statistics calculation
+        coordination_numbers = np.array(
+            [neighbor_counts[i] for i in range(len(centroids))]
+        )
 
-        img_h, img_w = self.mask.shape
-        for i, prop in enumerate(self.props):
-            min_r, min_c, max_r, max_c = prop.bbox
-            touches_border = (
-                (min_r <= 0)
-                or (min_c <= 0)
-                or (max_r >= img_h)
-                or (max_c >= img_w)
-            )
-            if not touches_border:
-                valid_cn.append(neighbor_counts[i])
-                valid_indices.append(i)
-
-        valid_cn = np.array(valid_cn)
-        if len(valid_cn) == 0:
-            logger.warning(
-                "No valid pores for coordination number calculation"
-            )
-            return None
-
-        stats = calculate_statistics(values=valid_cn)
+        stats = calculate_statistics(values=coordination_numbers)
         logger.info(
             f"Coordination number: Mean={stats['mean']:.2f},"
             f"Std={stats['std']:.2f}"
@@ -1057,22 +1045,14 @@ class TopologyConnectivityAnalysis:
                 )
                 all_y = centroids[:, 1]
                 all_x = centroids[:, 0]
-                mask_valid = np.zeros(len(centroids), dtype=bool)
-                mask_valid[valid_indices] = True
-                # Plot invalid (border) pores
+
+                # Plot all pores (boundary pores already filtered if enabled)
                 ax.scatter(
-                    all_x[~mask_valid],
-                    all_y[~mask_valid],
-                    c="red",
-                    marker="x",
-                    s=30,
-                    label="Rejected from analysis",
+                    all_x, all_y, c="green", s=20, label="Analyzed pores"
                 )
-                # Plot valid (inner) pores
-                ax.scatter(
-                    all_x[mask_valid], all_y[mask_valid], c="green", s=20
-                )
-                for idx in valid_indices:
+
+                # Annotate with coordination numbers
+                for idx in range(len(centroids)):
                     ax.text(
                         all_x[idx],
                         all_y[idx],
@@ -1170,18 +1150,36 @@ class PorousMaterialAnalyzer:
         Whether to generate visualization plots (default: True)
     output_base_dir : Path, optional
         Base directory for all outputs (default: OUTPUT_PATH from config)
+    reject_boundary_pores : bool, optional
+        Whether to exclude pores that touch image boundaries from analysis
+        (default: True). Boundary pores may have incomplete measurements.
+    boundary_tolerance : int, optional
+        Tolerance in pixels for boundary detection (default: 3).
+        Pores within this distance from boundaries will be rejected.
+        Useful when annotators might not be precise at edges.
+    plot_boundary_rejection : bool, optional
+        Whether to generate a visualization showing which pores were analyzed
+        vs rejected (default: True). Only generated if boundary rejection is
+        enabled and pores were actually rejected.
 
     Attributes
     ----------
     mask : np.ndarray
         Loaded instance mask array
     props : List[RegionProperties]
-        Region properties for each detected pore
+        Region properties for each detected pore (filtered by boundary
+        rejection if enabled)
+    props_all : List[RegionProperties]
+        All region properties before boundary filtering
     base_filename : str
         Base filename extracted from mask path
     output_dir : Dict[str, Path]
         Dictionary of output directory paths ('base', 'plots', 'data',
         'reports')
+    reject_boundary_pores : bool
+        Whether boundary pores are rejected
+    boundary_tolerance : int
+        Tolerance in pixels for boundary detection
     morphology_results : List[Dict[str, float]]
         Individual pore morphology metrics
     morphology_aggregated : Dict[str, Dict[str, float]]
@@ -1218,12 +1216,6 @@ class PorousMaterialAnalyzer:
     >>> global_desc = analyzer.calculate_global_descriptors()
     >>> # Generate report
     >>> report_path = analyzer.generate_report()
-
-    See Also
-    --------
-    PoreMorphologyMetrics : Individual pore morphology calculations
-    GlobalMicrostructureDescriptors : Global material properties
-    TopologyConnectivityAnalysis : Topology and connectivity analysis
     """
 
     def __init__(
@@ -1232,13 +1224,36 @@ class PorousMaterialAnalyzer:
         pixel_size: float = PIXEL_SIZE,
         generate_plots: bool = True,
         output_base_dir: Optional[Path] = None,
+        reject_boundary_pores: bool = True,
+        boundary_tolerance: int = 3,
+        plot_boundary_rejection: bool = True,
     ) -> None:
         self.mask_path = Path(mask_path)
         self.pixel_size = pixel_size
         self.generate_plots = generate_plots
         self.output_base_dir = output_base_dir or OUTPUT_PATH
+        self.reject_boundary_pores = reject_boundary_pores
+        self.boundary_tolerance = boundary_tolerance
+        self.plot_boundary_rejection = plot_boundary_rejection
+
         self.mask = self._load_mask()
-        self.props = self._extract_regionprops_from_mask()
+        self.props_all = self._extract_regionprops_from_mask()
+
+        # Filter boundary pores if requested
+        if self.reject_boundary_pores:
+            self.props = self._filter_boundary_pores(
+                self.props_all,
+                self.mask.shape,
+                self.boundary_tolerance
+            )
+            logger.info(
+                f"Filtered boundary pores: {len(self.props_all)} -> "
+                f"{len(self.props)} pores "
+                f"(rejected {len(self.props_all) - len(self.props)})"
+            )
+        else:
+            self.props = self.props_all
+            logger.info("Boundary pores NOT rejected - using all pores")
 
         # Create organized output directories
         self.base_filename = self.mask_path.stem
@@ -1305,6 +1320,212 @@ class PorousMaterialAnalyzer:
         except Exception as e:
             logger.error(f"Failed to extract region properties: {e}")
             raise
+
+    @staticmethod
+    def _filter_boundary_pores(
+        props: List[RegionProperties],
+        mask_shape: Tuple[int, int],
+        tolerance: int = 3,
+    ) -> List[RegionProperties]:
+        """
+        Filter out pores that touch or are near image boundaries.
+
+        This method excludes pores whose bounding boxes touch or are within
+        a specified tolerance distance from any image boundary. Boundary pores
+        often have incomplete measurements and can skew statistical analyses.
+
+        Parameters
+        ----------
+        props : List[RegionProperties]
+            List of region properties to filter
+        mask_shape : Tuple[int, int]
+            Shape of the mask (height, width)
+        tolerance : int, optional
+            Distance in pixels from boundary within which pores are rejected
+            (default: 3). A tolerance of 0 means only pores directly touching
+            boundaries are rejected. Higher values account for imprecise
+            annotations near boundaries.
+
+        Returns
+        -------
+        List[RegionProperties]
+            Filtered list of region properties excluding boundary pores
+
+        Notes
+        -----
+        A pore is considered a boundary pore if any part of its bounding box
+        satisfies:
+        - min_row <= tolerance
+        - min_col <= tolerance
+        - max_row >= height - tolerance
+        - max_col >= width - tolerance
+
+        Examples
+        --------
+        >>> props_filtered = PorousMaterialAnalyzer._filter_boundary_pores(
+        ...     props, mask_shape=(512, 512), tolerance=5
+        ... )
+        >>> print(f"Kept {len(props_filtered)} of {len(props)} pores")
+        """
+        img_h, img_w = mask_shape
+        filtered_props = []
+
+        for prop in props:
+            min_r, min_c, max_r, max_c = prop.bbox
+            touches_border = (
+                (min_r <= tolerance)
+                or (min_c <= tolerance)
+                or (max_r >= img_h - tolerance)
+                or (max_c >= img_w - tolerance)
+            )
+            if not touches_border:
+                filtered_props.append(prop)
+
+        return filtered_props
+
+    def plot_boundary_rejection_visualization(
+        self, save_to_plots_dir: bool = True
+    ) -> Optional[Path]:
+        """
+        Visualize which pores are analyzed vs rejected due to boundary
+        proximity.
+
+        Creates a plot showing the mask with color-coded pore centroids:
+        - Green: Pores included in analysis
+        - Red: Pores rejected due to boundary proximity
+
+        This visualization is only generated if boundary rejection was enabled
+        and at least one pore was rejected.
+
+        Parameters
+        ----------
+        save_to_plots_dir : bool, optional
+            Whether to save the plot to the plots directory (default: True)
+
+        Returns
+        -------
+        Path or None
+            Path to the saved plot, or None if no plot was generated
+        """
+        # Only create plot if boundary rejection was used and pores were rejec.
+        if not self.reject_boundary_pores:
+            logger.info("Boundary rejection disabled - skipping visualization")
+            return None
+
+        n_rejected = len(self.props_all) - len(self.props)
+        if n_rejected == 0:
+            logger.info("No pores rejected - skipping visualization")
+            return None
+
+        logger.info(
+            f"Generating boundary rejection visualization "
+            f"({n_rejected} pores rejected)..."
+        )
+
+        # Get rejected pores (difference between all and filtered)
+        analyzed_labels = {prop.label for prop in self.props}
+        rejected_props = [
+            prop for prop in self.props_all if
+            prop.label not in analyzed_labels
+        ]
+
+        # Extract centroids
+        analyzed_centroids = np.array(
+            [prop.centroid for prop in self.props]
+        )
+        rejected_centroids = np.array(
+            [prop.centroid for prop in rejected_props]
+        )
+
+        # Create figure
+        fig, ax = plt.subplots(figsize=(12, 10))
+        ax.imshow(self.mask, cmap="gray_r", alpha=0.5)
+
+        # Plot rejected pores (red X markers)
+        if len(rejected_centroids) > 0:
+            ax.scatter(
+                rejected_centroids[:, 1],  # x coordinate (column)
+                rejected_centroids[:, 0],  # y coordinate (row)
+                c="red",
+                marker="x",
+                s=100,
+                linewidths=2,
+                label=f"Rejected boundary pores (n={len(rejected_props)})",
+                zorder=3,
+            )
+
+        # Plot analyzed pores (green circles)
+        if len(analyzed_centroids) > 0:
+            ax.scatter(
+                analyzed_centroids[:, 1],
+                analyzed_centroids[:, 0],
+                c="green",
+                marker="o",
+                s=50,
+                alpha=0.7,
+                label=f"Analyzed pores (n={len(self.props)})",
+                zorder=2,
+            )
+
+        # Draw boundary tolerance zone
+        img_h, img_w = self.mask.shape
+        tolerance = self.boundary_tolerance
+
+        # Draw tolerance zone as dashed rectangles
+        from matplotlib.patches import Rectangle
+
+        # Outer boundary (image edge)
+        outer_rect = Rectangle(
+            (0, 0),
+            img_w,
+            img_h,
+            linewidth=2,
+            edgecolor="blue",
+            facecolor="none",
+            linestyle="--",
+            label="Image boundary",
+        )
+        ax.add_patch(outer_rect)
+
+        # Inner boundary (tolerance zone)
+        if tolerance > 0:
+            inner_rect = Rectangle(
+                (tolerance, tolerance),
+                img_w - 2 * tolerance,
+                img_h - 2 * tolerance,
+                linewidth=2,
+                edgecolor="orange",
+                facecolor="none",
+                linestyle="--",
+                label=f"Tolerance zone ({tolerance}px)",
+            )
+            ax.add_patch(inner_rect)
+
+        ax.legend(loc="upper right", fontsize=10)
+        ax.set_title(
+            f"Boundary Pore Rejection Visualization - {self.base_filename}\n"
+            f"Tolerance: {tolerance} pixels | "
+            f"Analyzed: {len(self.props)} | Rejected: {n_rejected}",
+            fontsize=12,
+        )
+        ax.set_xlabel("X (pixels)")
+        ax.set_ylabel("Y (pixels)")
+
+        # Save plot
+        if save_to_plots_dir:
+            plot_path = (
+                self.output_dir["plots"]
+                / f"{self.base_filename}_boundary_rejection.png"
+            )
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+            plt.close()
+            logger.info(f"Saved boundary rejection plot: {plot_path}")
+            return plot_path
+        else:
+            plt.show()
+            plt.close()
+            return None
 
     def calculate_morphology_metrics(self) -> List[Dict[str, float]]:
         """
@@ -1491,6 +1712,10 @@ class PorousMaterialAnalyzer:
         spatial_metrics = self.calculate_spatial_metrics()
         topology_metrics = self.calculate_topology_metrics()
 
+        # Generate boundary rejection visualization if enabled
+        if self.plot_boundary_rejection and self.generate_plots:
+            self.plot_boundary_rejection_visualization()
+
         # Compile all results
         results = {
             "morphology_individual": morphology_individual,
@@ -1553,19 +1778,6 @@ class PorousMaterialAnalyzer:
 
         The report filename follows the pattern:
         `{input_filename}_analysis_report.xlsx`
-
-        Examples
-        --------
-        >>> analyzer = PorousMaterialAnalyzer('foam_sample.tif')
-        >>> analyzer.analyze_all(generate_excel_report=False)
-        >>> report_path = analyzer.generate_report()
-        >>> print(f"Report saved to: {report_path}")
-        Report saved to:
-        /output/foam_sample/reports/foam_sample_analysis_report.xlsx
-
-        See Also
-        --------
-        analyze_all : Main analysis method that can auto-generate report
         """
         logger.info("Generating Excel report...")
 
@@ -1650,6 +1862,38 @@ class PorousMaterialAnalyzer:
                 "Description": "Total area of the analyzed region",
             }
         )
+        report_data.append(
+            {
+                "Category": "Metadata",
+                "Metric": "Boundary Pores Rejected",
+                "Value": "Yes" if self.reject_boundary_pores else "No",
+                "Unit": "-",
+                "Description": (
+                    "Whether pores touching boundaries were excluded"
+                ),
+            }
+        )
+        if self.reject_boundary_pores:
+            report_data.append(
+                {
+                    "Category": "Metadata",
+                    "Metric": "Boundary Tolerance",
+                    "Value": self.boundary_tolerance,
+                    "Unit": "pixels",
+                    "Description": "Distance from boundary for pore rejection",
+                }
+            )
+            report_data.append(
+                {
+                    "Category": "Metadata",
+                    "Metric": "Pores Rejected",
+                    "Value": len(self.props_all) - len(self.props),
+                    "Unit": "pcs",
+                    "Description": (
+                        "Number of boundary pores excluded from analysis"
+                    ),
+                }
+            )
 
         # --- MORPHOLOGY (AGGREGATED) ---
         metric_descriptions = {
@@ -1657,6 +1901,7 @@ class PorousMaterialAnalyzer:
             "perimeter": "Pore perimeter",
             "circularity": "Shape circularity (4πA/P²)",
             "solidity": "Ratio of area to convex hull area",
+            "roundness": "Roundness (4*Area / (π*MajorAxis²))",
             "min_feret": "Minimum Feret diameter",
             "max_feret": "Maximum Feret diameter",
             "equivalent_diameter": (
@@ -1862,7 +2107,6 @@ class PorousMaterialAnalyzer:
                 }
             )
 
-        # Prepare DataFrames
         df_report = pd.DataFrame(report_data)
         df_individual = pd.DataFrame(self.morphology_results)
 
@@ -1870,8 +2114,6 @@ class PorousMaterialAnalyzer:
         logger.info(
             f"Prepared {len(self.morphology_results)} individual pore records"
         )
-
-        # Write to Excel file
         try:
             with pd.ExcelWriter(report_path, engine="openpyxl") as writer:
                 # Sheet 1: Analysis Results
@@ -1902,14 +2144,23 @@ class PorousMaterialAnalyzer:
 # Example usage
 if __name__ == "__main__":
     # Example: Analyze a single porous material sample
-    mask_path = '/Volumes/ADATA SD620/Doktorat/semestr_4/analiza ilościowa/example_mask.tif'
+    mask_path = '/Volumes/ADATA SD620/Doktorat/semestr_4/analiza ilościowa/DG/do_oceny/train/401_jpg.rf.208cbf760d266850b64cc7d9347856c1_train_0000_masks.tif'
 
-    # Create analyzer instance
+    # Create analyzer instance with boundary pore rejection (default behavior)
     analyzer = PorousMaterialAnalyzer(
         mask_path=mask_path,
-        pixel_size=PIXEL_SIZE,  # from config.py
-        generate_plots=True      # Generate visualization plots
+        pixel_size=PIXEL_SIZE,
+        generate_plots=True,
+        reject_boundary_pores=True,
+        boundary_tolerance=3,
+        plot_boundary_rejection=True
     )
+
+    # To include boundary pores in analysis, set reject_boundary_pores=False:
+    # analyzer = PorousMaterialAnalyzer(
+    #     mask_path=mask_path,
+    #     reject_boundary_pores=False
+    # )
 
     # Run complete analysis (automatically generates Excel report)
     results = analyzer.analyze_all()
