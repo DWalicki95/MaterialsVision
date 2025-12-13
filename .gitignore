@@ -15,3 +15,4 @@ side_scripts/*
 
 outputs/
 mlruns/
+logs/
