@@ -452,13 +452,45 @@ class BatchPorousMaterialAnalyzer:
             values = [
                 img['global_descriptors'][key] for img in all_image_results
             ]
-            combined_global[key] = np.mean(values)
+            # Filter out non-numeric values and convert to float
+            numeric_values = []
+            for v in values:
+                try:
+                    numeric_values.append(float(v))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        f"Non-numeric value '{v}' found for global "
+                        f"descriptor '{key}', skipping"
+                    )
+            if numeric_values:
+                combined_global[key] = np.mean(numeric_values)
+            else:
+                combined_global[key] = np.nan
+                logger.warning(
+                    f"No valid numeric values for global descriptor '{key}'"
+                )
 
         # Combine spatial metrics (averaging across images)
         combined_spatial = {}
         for key in all_image_results[0]['spatial_metrics'].keys():
             values = [img['spatial_metrics'][key] for img in all_image_results]
-            combined_spatial[key] = np.mean(values)
+            # Filter out non-numeric values and convert to float
+            numeric_values = []
+            for v in values:
+                try:
+                    numeric_values.append(float(v))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        f"Non-numeric value '{v}' found for spatial "
+                        f"metric '{key}', skipping"
+                    )
+            if numeric_values:
+                combined_spatial[key] = np.mean(numeric_values)
+            else:
+                combined_spatial[key] = np.nan
+                logger.warning(
+                    f"No valid numeric values for spatial metric '{key}'"
+                )
 
         # Combine topology metrics (averaging where appropriate)
         combined_topology = {}
@@ -468,14 +500,46 @@ class BatchPorousMaterialAnalyzer:
             img['topology_metrics']['fractal_dimension']
             for img in all_image_results
         ]
-        combined_topology['fractal_dimension'] = np.mean(fractal_dims)
+        # Filter out non-numeric values
+        numeric_fractal_dims = []
+        for v in fractal_dims:
+            try:
+                numeric_fractal_dims.append(float(v))
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Non-numeric value '{v}' found for fractal_dimension, "
+                    "skipping"
+                )
+        if numeric_fractal_dims:
+            combined_topology['fractal_dimension'] = np.mean(
+                numeric_fractal_dims
+            )
+        else:
+            combined_topology['fractal_dimension'] = np.nan
+            logger.warning("No valid numeric values for fractal_dimension")
 
         # Fractal R² - average
         fractal_r2s = [
             img['topology_metrics']['fractal_r_squared']
             for img in all_image_results
         ]
-        combined_topology['fractal_r_squared'] = np.mean(fractal_r2s)
+        # Filter out non-numeric values
+        numeric_fractal_r2s = []
+        for v in fractal_r2s:
+            try:
+                numeric_fractal_r2s.append(float(v))
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Non-numeric value '{v}' found for fractal_r_squared, "
+                    "skipping"
+                )
+        if numeric_fractal_r2s:
+            combined_topology['fractal_r_squared'] = np.mean(
+                numeric_fractal_r2s
+            )
+        else:
+            combined_topology['fractal_r_squared'] = np.nan
+            logger.warning("No valid numeric values for fractal_r_squared")
 
         # Coordination number - recalculate from ALL individual values
         all_cn_values = []
@@ -675,6 +739,7 @@ class BatchPorousMaterialAnalyzer:
         # --- SPATIAL METRICS ---
         for key, value in combined_results['spatial_metrics'].items():
             report_data.append({
+                "Category": "Spatial Metrics",
                 "Metric": f"Nearest Neighbor Distance ({key}, averaged)",
                 "Value": value,
                 "Unit": "µm",

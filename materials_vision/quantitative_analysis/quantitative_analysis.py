@@ -457,9 +457,15 @@ class PoreMorphologyMetrics:
         if not morphology_results:
             return {}
 
-        # Get all metric names (excluding 'pore_id')
+        # Get all metric names (excluding 'pore_id' and metadata fields)
+        # Metadata fields added by batch analysis should not be aggregated
+        excluded_fields = {
+            'pore_id', 'filename', 'magnification', 'pixel_size',
+            'coordination_number'
+        }
         metric_names = [
-            key for key in morphology_results[0].keys() if key != "pore_id"
+            key for key in morphology_results[0].keys()
+            if key not in excluded_fields
         ]
 
         aggregated_results = {}
