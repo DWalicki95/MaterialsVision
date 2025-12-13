@@ -961,7 +961,7 @@ class TopologyConnectivityAnalysis:
         self,
         save_plot_path: Optional[Path] = OUTPUT_PATH,
         base_filename: str = "analysis",
-    ) -> Optional[Dict[str, float]]:
+    ) -> Tuple[Optional[Dict[int, int]], Optional[Dict[str, float]]]:
         """
         Calculate coordination number using Voronoi tessellation.
 
@@ -982,14 +982,13 @@ class TopologyConnectivityAnalysis:
 
         Returns
         -------
-        Dict[str, float] or None
-            Dictionary containing statistical measures of coordination numbers:
-            - 'mean': Average coordination number
-            - 'median': Median coordination number
-            - 'std': Standard deviation
-            - 'min': Minimum coordination number
-            - 'max': Maximum coordination number
-            Returns None if insufficient pores (<4).
+        Tuple[Optional[Dict[int, int]], Optional[Dict[str, float]]]
+            Tuple containing:
+            - First element: Dictionary mapping pore_id to coordination number
+              (e.g., {1: 5, 2: 6, 3: 4}). None if insufficient pores.
+            - Second element: Dictionary containing statistical measures
+              (mean, median, std, min, max). None if insufficient pores.
+            Returns (None, None) if insufficient pores (<4).
 
         Notes
         -----
@@ -1005,7 +1004,7 @@ class TopologyConnectivityAnalysis:
         centroids = centroids[:, ::-1]  # [y, x] -> x, y
         if len(centroids) < 4:
             logger.warning("Not enough points to generate Voronoi Diagram")
-            return None
+            return None, None
 
         voronoi = spatial.Voronoi(points=centroids)
         neighbor_counts = {i: 0 for i in range(len(centroids))}
@@ -1025,6 +1024,12 @@ class TopologyConnectivityAnalysis:
             f"Coordination number: Mean={stats['mean']:.2f},"
             f"Std={stats['std']:.2f}"
         )
+
+        # Create mapping from pore_id to coordination number
+        cn_by_pore_id = {
+            self.props[i].label: neighbor_counts[i]
+            for i in range(len(centroids))
+        }
 
         if save_plot_path:
             try:
@@ -1073,7 +1078,7 @@ class TopologyConnectivityAnalysis:
             except Exception as e:
                 logger.error(f"Failed to save coordination number plot: {e}")
 
-        return stats
+        return cn_by_pore_id, stats
 
     def calculate_all_topology_metrics(
         self,
@@ -1093,8 +1098,11 @@ class TopologyConnectivityAnalysis:
         Returns
         -------
         Dict[str, any]
-            Dictionary containing fractal dimension, r_squared,
-            and coordination number statistics
+            Dictionary containing:
+            - fractal_dimension
+            - fractal_r_squared
+            - coordination_number_stats (aggregated statistics)
+            - coordination_number_individual (dict mapping pore_id to CN)
         """
         # Update save paths if output_dir is provided
         if output_dir:
@@ -1109,7 +1117,7 @@ class TopologyConnectivityAnalysis:
         fractal_dim, r_squared = self.calculate_fractal_dimension(
             save_plot_path=fractal_plot_path, filename=fractal_filename
         )
-        cn_stats = self.calculate_coordination_number(
+        cn_individual, cn_stats = self.calculate_coordination_number(
             save_plot_path=cn_plot_path, base_filename=base_filename
         )
 
@@ -1117,6 +1125,7 @@ class TopologyConnectivityAnalysis:
             "fractal_dimension": fractal_dim,
             "fractal_r_squared": r_squared,
             "coordination_number_stats": cn_stats,
+            "coordination_number_individual": cn_individual,
         }
         return results
 
@@ -1711,6 +1720,17 @@ class PorousMaterialAnalyzer:
         global_descriptors = self.calculate_global_descriptors()
         spatial_metrics = self.calculate_spatial_metrics()
         topology_metrics = self.calculate_topology_metrics()
+
+        # Add individual coordination numbers to morphology results
+        if (topology_metrics
+            and topology_metrics.get('coordination_number_individual')):
+
+            cn_by_pore_id = topology_metrics['coordination_number_individual']
+
+            # Add CN to each pore in morphology_individual
+            for pore in morphology_individual:
+                pore_id = pore['pore_id']
+                pore['coordination_number'] = cn_by_pore_id.get(pore_id, None)
 
         # Generate boundary rejection visualization if enabled
         if self.plot_boundary_rejection and self.generate_plots:
