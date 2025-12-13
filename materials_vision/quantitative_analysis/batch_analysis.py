@@ -56,6 +56,15 @@ class BatchPorousMaterialAnalyzer:
         Whether to generate boundary rejection visualizations (default: True)
     file_pattern : str, optional
         Glob pattern to match image files (default: "*.tif")
+    batch_variance_mode : str, optional
+        Method for calculating batch porosity variance
+        (default: "across_images").
+        Options:
+        - "across_images": Calculate variance of porosity across complete
+        images
+          (measures heterogeneity between different material samples)
+        - "within_images": Average of within-image variances
+          (average of 2x2 sub-region variances from each image)
 
     Attributes
     ----------
@@ -146,6 +155,7 @@ class BatchPorousMaterialAnalyzer:
         boundary_tolerance: int = 3,
         plot_boundary_rejection: bool = True,
         file_pattern: str = "*.tif",
+        batch_variance_mode: str = "across_images",
     ) -> None:
         self.parent_dir = Path(parent_dir)
         self.pixel_size = pixel_size
@@ -155,6 +165,7 @@ class BatchPorousMaterialAnalyzer:
         self.boundary_tolerance = boundary_tolerance
         self.plot_boundary_rejection = plot_boundary_rejection
         self.file_pattern = file_pattern
+        self.batch_variance_mode = batch_variance_mode
 
         # Validate parent directory exists
         if not self.parent_dir.exists():
@@ -446,29 +457,101 @@ class BatchPorousMaterialAnalyzer:
             )
         )
 
-        # Combine global descriptors (averaging across images)
+        # Combine global descriptors
         combined_global = {}
-        for key in all_image_results[0]['global_descriptors'].keys():
-            values = [
-                img['global_descriptors'][key] for img in all_image_results
+
+        # Extract porosity values from all images (needed for both averaging
+        # and variance calculation)
+        porosity_values = [
+            img['global_descriptors']['porosity'] for img in all_image_results
+        ]
+        numeric_porosity_values = []
+        for v in porosity_values:
+            try:
+                numeric_porosity_values.append(float(v))
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Non-numeric porosity value '{v}' found, skipping"
+                )
+
+        # Average porosity across images
+        if numeric_porosity_values:
+            combined_global['porosity'] = np.mean(numeric_porosity_values)
+        else:
+            combined_global['porosity'] = np.nan
+            logger.warning("No valid numeric values for porosity")
+
+        # Average anisotropy across images
+        anisotropy_values = [
+            img[
+                'global_descriptors'
+            ]['anisotropy'] for img in all_image_results
+        ]
+        numeric_anisotropy_values = []
+        for v in anisotropy_values:
+            try:
+                numeric_anisotropy_values.append(float(v))
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Non-numeric anisotropy value '{v}' found, skipping"
+                )
+
+        if numeric_anisotropy_values:
+            combined_global['anisotropy'] = np.mean(numeric_anisotropy_values)
+        else:
+            combined_global['anisotropy'] = np.nan
+            logger.warning("No valid numeric values for anisotropy")
+
+        # Calculate batch_porosity_variance based on mode
+        if self.batch_variance_mode == "across_images":
+            # NEW: Variance of porosity across complete images
+            if len(numeric_porosity_values) > 1:
+                combined_global['batch_porosity_variance'] = np.var(
+                    numeric_porosity_values
+                )
+                logger.info(
+                    "Calculated batch_porosity_variance as variance across "
+                    f"{len(numeric_porosity_values)} images"
+                )
+            else:
+                combined_global['batch_porosity_variance'] = 0.0
+                logger.warning(
+                    "Only one image - batch_porosity_variance set to 0.0"
+                )
+        elif self.batch_variance_mode == "within_images":
+            # OLD: Average of within-image variances
+            lpv_values = [
+                img['global_descriptors']['local_porosity_variance']
+                for img in all_image_results
             ]
-            # Filter out non-numeric values and convert to float
-            numeric_values = []
-            for v in values:
+            numeric_lpv_values = []
+            for v in lpv_values:
                 try:
-                    numeric_values.append(float(v))
+                    numeric_lpv_values.append(float(v))
                 except (TypeError, ValueError):
                     logger.warning(
-                        f"Non-numeric value '{v}' found for global "
-                        f"descriptor '{key}', skipping"
+                        f"Non-numeric local_porosity_variance '{v}' found, "
+                        "skipping"
                     )
-            if numeric_values:
-                combined_global[key] = np.mean(numeric_values)
-            else:
-                combined_global[key] = np.nan
-                logger.warning(
-                    f"No valid numeric values for global descriptor '{key}'"
+
+            if numeric_lpv_values:
+                combined_global['batch_porosity_variance'] = np.mean(
+                    numeric_lpv_values
                 )
+                logger.info(
+                    "Calculated batch_porosity_variance as average of "
+                    "within-image variances"
+                )
+            else:
+                combined_global['batch_porosity_variance'] = np.nan
+                logger.warning(
+                    "No valid numeric values for local_porosity_variance"
+                )
+        else:
+            raise ValueError(
+                f"Invalid batch_variance_mode: '{self.batch_variance_mode}'. "
+                "Must be 'across_images' or 'within_images'"
+            )
 
         # Combine spatial metrics (averaging across images)
         combined_spatial = {}
@@ -720,13 +803,17 @@ class BatchPorousMaterialAnalyzer:
         })
         report_data.append({
             "Category": "Global Descriptors",
-            "Metric": "Local Porosity Variance (averaged)",
+            "Metric": "Batch Porosity Variance",
             "Value": (
                 combined_results[
-                    'global_descriptors']['local_porosity_variance']
+                    'global_descriptors']['batch_porosity_variance']
             ),
             "Unit": "-",
-            "Description": "Average local porosity variance across all images",
+            "Description": (
+                "Variance of porosity across images"
+                if self.batch_variance_mode == "across_images"
+                else "Average within-image porosity variance"
+            ),
         })
         report_data.append({
             "Category": "Global Descriptors",

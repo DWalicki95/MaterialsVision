@@ -1728,9 +1728,10 @@ class PorousMaterialAnalyzer:
         topology_metrics = self.calculate_topology_metrics()
 
         # Add individual coordination numbers to morphology results
-        if (topology_metrics
-            and topology_metrics.get('coordination_number_individual')):
-
+        if (
+            topology_metrics
+            and topology_metrics.get('coordination_number_individual')
+        ):
             cn_by_pore_id = topology_metrics['coordination_number_individual']
 
             # Add CN to each pore in morphology_individual
