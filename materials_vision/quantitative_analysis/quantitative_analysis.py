@@ -931,7 +931,7 @@ class TopologyConnectivityAnalysis:
         # Diagnostic plot
         if save_plot_path:
             try:
-                save_plot_path_fig = OUTPUT_PATH / "plots" / f"{filename}.png"
+                save_plot_path_fig = save_plot_path / f"{filename}.png"
                 save_plot_path_fig.parent.mkdir(parents=True, exist_ok=True)
                 plt.figure(figsize=(10, 8))
                 plt.scatter(
