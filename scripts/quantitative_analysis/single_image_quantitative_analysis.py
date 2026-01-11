@@ -1,3 +1,14 @@
+"""
+Script to run quantitative analysis on a single porous material image.
+
+This script analyzes a single mask image and generates comprehensive
+morphological metrics and visualizations.
+
+Usage:
+    python scripts/quantitative_analysis/single_image_quantitative_analysis.py
+"""
+import logging
+from materials_vision.logging_config import setup_logging
 from config import PIXEL_SIZE
 from materials_vision.quantitative_analysis.quantitative_analysis import \
     PorousMaterialAnalyzer
@@ -5,6 +16,9 @@ from materials_vision.quantitative_analysis.quantitative_analysis import \
 
 # Example usage
 if __name__ == "__main__":
+    # Setup logging
+    setup_logging(level=logging.INFO)
+    logger = logging.getLogger(__name__)
     # Example: Analyze a single porous material sample
     mask_path = '/Volumes/ADATA SD620/Doktorat/semestr_4/analiza ilościowa/DG/do_oceny/train/401_jpg.rf.208cbf760d266850b64cc7d9347856c1_train_0000_masks.tif'
 
