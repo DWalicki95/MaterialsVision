@@ -1,10 +1,12 @@
 *.env
+*.venv
 
 */.ipynb_checkpoints/
 .zshrce
 .DS_Store
 *.log
 *.pyc
+*.png
 
 notebooks/synthetic_3d_inspection.ipynb
 
