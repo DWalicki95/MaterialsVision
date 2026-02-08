@@ -18,8 +18,10 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from scipy.stats import entropy, skew
 
 from materials_vision.logging_config import setup_logging
@@ -70,6 +72,12 @@ def parse_args() -> argparse.Namespace:
         "-v", "--verbose",
         action="store_true",
         help="Enable verbose (DEBUG) logging"
+    )
+
+    parser.add_argument(
+        "-p", "--generate-plots",
+        action="store_true",
+        help="Generate visualization plots for each material"
     )
 
     return parser.parse_args()
@@ -499,6 +507,201 @@ def calculate_all_metrics(df: pd.DataFrame) -> Dict[str, float]:
     return metrics
 
 
+def plot_orientation_rose(
+    ax: plt.Axes,
+    angles: np.ndarray,
+    num_bins: int = 36
+) -> None:
+    """
+    Create polar rose plot with correct bin centering.
+
+    Parameters
+    ----------
+    ax : plt.Axes
+        Matplotlib polar axes to plot on
+    angles : np.ndarray
+        Array of orientation angles in degrees (-90 to 90)
+    num_bins : int, optional
+        Number of bins for the histogram (default: 36, i.e. 5 deg per bin)
+
+    Notes
+    -----
+    CRITICAL: 0 degrees is positioned at 3 o'clock (East).
+    Bins are centered using (edge_left + edge_right) / 2.
+    The plot mirrors the -90 to 90 range to create a full 360 degree view.
+    """
+    angles = np.array(angles)
+    angles = angles[~np.isnan(angles)]
+
+    if len(angles) == 0:
+        return
+
+    # Compute histogram with range -90 to 90
+    counts, bin_edges = np.histogram(angles, bins=num_bins, range=(-90, 90))
+
+    # Calculate bin CENTERS: (left_edge + right_edge) / 2
+    bin_centers_deg = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+    # Convert to radians
+    bin_centers_rad = np.deg2rad(bin_centers_deg)
+
+    # Duplicate for 180-degree symmetry (ellipse orientation is symmetric)
+    theta = np.concatenate([bin_centers_rad, bin_centers_rad + np.pi])
+    radii = np.concatenate([counts, counts])
+
+    # Bar width in radians (bins touch each other)
+    width = np.deg2rad(180 / num_bins)
+
+    # Plot bars
+    ax.bar(
+        theta, radii, width=width, bottom=0.0,
+        color='#457b9d', alpha=0.8, edgecolor='white', linewidth=0.5
+    )
+
+    # Set 0 degrees at 3 o'clock (East), counterclockwise direction
+    ax.set_theta_zero_location('E')
+    ax.set_theta_direction(1)
+
+    ax.set_title("Orientation Rose Plot", fontsize=10, pad=15)
+
+
+def generate_material_visualization(
+    df: pd.DataFrame,
+    material_name: str,
+    output_path: Path
+) -> Path:
+    """
+    Generate a 3x2 grid visualization for a material's pore analysis.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing individual pore data
+    material_name : str
+        Name of the material for the title
+    output_path : Path
+        Path to save the output figure
+
+    Returns
+    -------
+    Path
+        Path to the saved figure
+
+    Notes
+    -----
+    Layout:
+    - Row 1: Network Topology (coordination_number), Size Distribution
+    - Row 2: Elongation Degree (aspect_ratio), Shape Quality scatter
+    - Row 3: Linear Orientation Histogram, Polar Rose Plot
+    """
+    sns.set_style("whitegrid")
+
+    # Create figure with 3x2 grid, last subplot is polar
+    fig = plt.figure(figsize=(14, 12))
+
+    # Row 1, Col 1: Network Topology - coordination_number histogram
+    ax1 = fig.add_subplot(3, 2, 1)
+    coord_data = df['coordination_number'].dropna()
+    if len(coord_data) > 0:
+        sns.histplot(
+            coord_data, ax=ax1, kde=False, color='teal',
+            edgecolor='black', linewidth=0.5
+        )
+    ax1.set_xlabel("Coordination Number")
+    ax1.set_ylabel("Frequency")
+    ax1.set_title("Network Topology")
+
+    # Row 1, Col 2: Size Distribution - equivalent_diameter KDE filled
+    ax2 = fig.add_subplot(3, 2, 2)
+    diameter_data = df['equivalent_diameter'].dropna()
+    if len(diameter_data) > 0:
+        sns.kdeplot(
+            diameter_data, ax=ax2, color='steelblue',
+            fill=True, alpha=0.6, linewidth=2
+        )
+        median_val = np.median(diameter_data)
+        ax2.axvline(
+            median_val, color='red', linestyle='--', linewidth=2,
+            label=f'Median: {median_val:.1f}'
+        )
+        ax2.legend()
+    ax2.set_xlabel("Equivalent Diameter (um)")
+    ax2.set_ylabel("Density")
+    ax2.set_title("Size Distribution")
+
+    # Row 2, Col 1: Elongation Degree - aspect_ratio KDE filled
+    ax3 = fig.add_subplot(3, 2, 3)
+    ar_data = df['aspect_ratio'].dropna()
+    if len(ar_data) > 0:
+        sns.kdeplot(
+            ar_data, ax=ax3, color='darkorange',
+            fill=True, alpha=0.6, linewidth=2
+        )
+        ax3.axvline(
+            2.0, color='red', linestyle='--', linewidth=2,
+            label='Threshold: 2.0'
+        )
+        ax3.legend()
+    ax3.set_xlabel("Aspect Ratio")
+    ax3.set_ylabel("Density")
+    ax3.set_title("Elongation Degree")
+
+    # Row 2, Col 2: Shape Quality - overlapped KDE for circularity & solidity
+    ax4 = fig.add_subplot(3, 2, 4)
+    circ_data = df['circularity'].dropna()
+    solid_data = df['solidity'].dropna() if 'solidity' in df.columns else None
+    if len(circ_data) > 0:
+        sns.kdeplot(
+            circ_data, ax=ax4, color='purple',
+            fill=True, alpha=0.5, linewidth=2, label='Circularity'
+        )
+    if solid_data is not None and len(solid_data) > 0:
+        sns.kdeplot(
+            solid_data, ax=ax4, color='teal',
+            fill=True, alpha=0.5, linewidth=2, label='Solidity'
+        )
+    ax4.set_xlabel("Value")
+    ax4.set_ylabel("Density")
+    ax4.set_title("Shape Quality")
+    ax4.set_xlim(0, 1.1)
+    ax4.legend()
+
+    # Row 3, Col 1: Linear Orientation Histogram (-90 to 90 range)
+    ax5 = fig.add_subplot(3, 2, 5)
+    angle_data = df['ellipse_angle'].dropna()
+    if len(angle_data) > 0:
+        sns.histplot(
+            angle_data, ax=ax5, bins=36, kde=False, color='forestgreen',
+            edgecolor='black', linewidth=0.5
+        )
+    ax5.set_xlabel("Ellipse Angle (degrees)")
+    ax5.set_ylabel("Frequency")
+    ax5.set_title("Orientation Distribution (Linear)")
+    ax5.set_xlim(-90, 90)
+    ax5.axvline(0, color='red', linestyle='--', linewidth=1, alpha=0.7)
+
+    # Row 3, Col 2: Polar Rose Plot
+    ax6 = fig.add_subplot(3, 2, 6, projection='polar')
+    if len(angle_data) > 0:
+        plot_orientation_rose(ax6, angle_data.values)
+
+    # Overall title
+    fig.suptitle(
+        f"Macroscopic Pore Analysis: {material_name}",
+        fontsize=14, fontweight='bold', y=0.98
+    )
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    # Save figure
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+    logger.info(f"Visualization saved to: {output_path}")
+    return output_path
+
+
 def export_results_to_excel(
     results: List[Dict],
     output_path: Path
@@ -608,6 +811,14 @@ def main() -> int:
         logger.info(
             f"  Processed {len(df)} pores for {material_name}"
         )
+
+        # Generate visualization if requested
+        if args.generate_plots:
+            plot_path = (
+                report_path.parent /
+                f"{material_name}_macroscopic_visualization.png"
+            )
+            generate_material_visualization(df, material_name, plot_path)
 
     if not results:
         logger.error("No materials were successfully processed")
