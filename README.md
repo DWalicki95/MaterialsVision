@@ -4,9 +4,9 @@
 
 MaterialsVision is a comprehensive Python package for quantitative analysis of
 foam material microstructures from scanning electron microscopy (SEM) images.
-It combines state-of-the-art deep learning pore segmentation (Cellpose) with
-advanced morphological, topological, and spatial analysis methods from
-materials science.
+It combines state-of-the-art deep learning pore segmentation (Cellpose-SAM,
+StarDist) with advanced morphological, topological, and spatial analysis
+methods from materials science.
 
 ## Research Goals
 
@@ -20,9 +20,9 @@ image analysis requires extensive manual labeling by domain experts, which is:
 - **Prone to inconsistency**: Inter-annotator variability and fatigue affect results
 - **Not scalable**: Large-scale materials characterization studies are impractical
 
-By leveraging deep learning (Cellpose-SAM) fine-tuned on foam materials,
-MaterialsVision aims to **automate the segmentation pipeline**, enabling
-researchers to:
+By leveraging deep learning (Cellpose-SAM and StarDist) fine-tuned on foam
+materials, MaterialsVision aims to **automate the segmentation pipeline**,
+enabling researchers to:
 - Analyze hundreds of samples in the time it previously took to process one
 - Reduce costs associated with manual annotation
 - Ensure consistent, reproducible segmentation across datasets
@@ -31,13 +31,26 @@ researchers to:
 ## Features
 
 ### AI-Powered Segmentation
-- **Cellpose-SAM Integration**: Instance segmentation for automated pore detection
+
+**Cellpose-SAM**:
+- **Cellpose-SAM Integration**: Instance segmentation for automated pore
+  detection
 - **Custom Model Training**: Fine-tune pretrained models on your foam datasets
   with MLflow experiment tracking
 - **Hyperparameter Grid Search**: Systematic search over training and inference
   parameters with full MLflow logging
-- **Multi-Magnification Support**: Handles 40x, 50x, 100x, 250x, 500x, and
-  1000x SEM images
+
+**StarDist**:
+- **StarDist2D Training**: Star-convex polygon instance segmentation with
+  U-Net backbone (32 rays, 400 epochs) fine-tuned on foam SEM images
+- **Threshold Optimization**: Automatic optimization of probability and NMS
+  thresholds on the validation set
+- **Quantitative Evaluation**: IoU-based and boundary-score metrics across
+  the full test set (128 images)
+
+**General**:
+- **Multi-Magnification Support**: Handles 40x, 50x SEM images, but others
+are experimentally possible
 - **GPU Acceleration**: CUDA support with automatic CPU fallback
 
 ### Comprehensive Quantitative Analysis
@@ -98,7 +111,9 @@ pip install -r requirements.txt
 ```
 
 ### Key Dependencies
-- `cellpose`: Deep learning segmentation
+- `cellpose`: Cellpose-SAM deep learning segmentation
+- `stardist`: StarDist2D star-convex polygon segmentation
+- `tensorflow` / `keras`: StarDist backend
 - `mlflow`: Experiment tracking
 - `GPUtil`: GPU monitoring
 - `psutil`: System monitoring
@@ -378,6 +393,7 @@ MaterialsVision/
 │   ├── cellpose_finetuned_evaluation.ipynb
 │   ├── cellpose_finetuned_inferece.ipynb
 │   ├── cellpose_sensitivity_analysis.ipynb
+│   ├── stardist_training.ipynb
 │   ├── stardist_finetuned_evaulation_.ipynb
 │   ├── SAM_tests.ipynb
 │   └── preprocessing.ipynb
@@ -491,7 +507,8 @@ Explore example workflows in [notebooks/](notebooks/):
 | [cellpose_finetuned_evaluation.ipynb](notebooks/cellpose_finetuned_evaluation.ipynb) | Evaluate fine-tuned Cellpose model (IoU, boundary scores) |
 | [cellpose_finetuned_inferece.ipynb](notebooks/cellpose_finetuned_inferece.ipynb) | Run inference with a fine-tuned model |
 | [cellpose_sensitivity_analysis.ipynb](notebooks/cellpose_sensitivity_analysis.ipynb) | Analyze sensitivity of metrics to inference parameters |
-| [stardist_finetuned_evaulation_.ipynb](notebooks/stardist_finetuned_evaulation_.ipynb) | Evaluate StarDist as an alternative segmentation model |
+| [stardist_training.ipynb](notebooks/stardist_training.ipynb) | Train StarDist2D (U-Net backbone, 32 rays, 400 epochs) on foam SEM images with data augmentation and threshold optimization |
+| [stardist_finetuned_evaulation_.ipynb](notebooks/stardist_finetuned_evaulation_.ipynb) | Evaluate fine-tuned StarDist model (IoU micro F1 ~0.794, boundary F1 ~0.824) |
 | [SAM_tests.ipynb](notebooks/SAM_tests.ipynb) | Experiments with Segment Anything Model (SAM) |
 | [preprocessing.ipynb](notebooks/preprocessing.ipynb) | Preprocessing experiments and parameter tuning |
 
@@ -499,7 +516,10 @@ Explore example workflows in [notebooks/](notebooks/):
 
 ### Algorithms Implemented
 
-- **Cellpose-SAM**: Generalist deep learning segmentation (cpsam model architecture)
+- **Cellpose-SAM**: Generalist deep learning segmentation (cpsam model
+  architecture)
+- **StarDist2D**: Star-convex polygon segmentation via U-Net backbone;
+  radial distance regression with 32 rays, trained with TensorFlow/Keras
 - **Voronoi Tessellation**: Coordination number and spatial connectivity
 - **Box-Counting Method**: Fractal dimension estimation with R² quality metric
 - **Rotating Calipers**: Efficient O(n) minimum Feret diameter on convex hull
