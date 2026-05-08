@@ -19,3 +19,5 @@ logs/
 .claude/
 
 mlflow.db
+
+CLAUDE.md
