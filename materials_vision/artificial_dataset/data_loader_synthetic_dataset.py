@@ -2,7 +2,6 @@ from torch.utils.data import Dataset
 from pathlib import Path
 import torch
 import numpy as np
-from materials_vision.config import SYNTHETIC_DATASET_PATH_CLOUD
 import logging
 
 
@@ -12,12 +11,19 @@ logger = logging.getLogger(__name__)
 class SynthteticMicrostructuresDataset(Dataset):
     def __init__(
             self,
-            root_dir: Path = (
-                SYNTHETIC_DATASET_PATH_CLOUD / 'synthetic_dataset_'
-            ),
+            root_dir: Path,
             transform: bool = None
     ):
-        self.root_dir = root_dir
+        """
+        Parameters
+        ----------
+        root_dir : Path
+            Directory holding ``sample_<idx>_image.npy`` and
+            ``sample_<idx>_combined_mask.npy`` files.
+        transform : callable, optional
+            Optional transform applied to each loaded sample.
+        """
+        self.root_dir = Path(root_dir)
         self.transform = transform
         # for evaluating dataset size
         self.mask_name_pattern = '*combined_mask.npy'

@@ -1,0 +1,91 @@
+# =============================================================
+# Grid Search Configuration for Cellpose-SAM Fine-Tuning
+# =============================================================
+
+# === GENERAL EXPERIMENT SETTINGS ===
+experiment:
+  name: "cellpose_cpsam_grid_search"
+  description: >
+    Grid search of CPSAM fine-tuning hyperparameters
+    on SEM images of polyurethane foam pores.
+
+# === MODE ===
+# training    - grid search over training params,
+#               eval with default eval params
+# evaluation  - grid search over eval params for a
+#               pre-trained model (requires --model-path)
+# full        - training grid first, then eval grid
+#               for top N models
+mode: "full"
+
+# Number of best training models to evaluate in
+# "full" mode eval grid phase
+top_n_models: 3
+
+# === DATA PATHS ===
+data:
+  train_dir: "/home/dwalicki/dane/dane_treningowe/AS_GRUPA1/train_aug"
+  test_dir: "/home/dwalicki/dane/dane_treningowe/AS_GRUPA1/test"
+  img_filter: "_image"
+  mask_filter: "_masks"
+
+# === OUTPUT ===
+output:
+  base_dir: "outputs/grid_search"
+
+# === TRAINING HYPERPARAMETER GRID ===
+# Each key can be a list (searched) or a single value
+# (constant). All list combinations are explored via
+# cartesian product.
+training_grid:
+  # --- Searched parameters ---
+  learning_rate: [0.01]
+  weight_decay: [0.0001, 0.01]
+  n_epochs: [160]
+  batch_size: [1, 8]
+
+  # Normalization variants:
+  #   true           -> default percentile [1, 99]
+  #   {percentile: [3, 98]} -> aggressive clipping
+  #   {tile_norm_blocksize: 128} -> tile normalization
+  normalize:
+    - true
+    - {"percentile": [3, 98]}
+    - {"tile_norm_blocksize": 128}
+
+  # --- Constant parameters (not searched) ---
+  min_train_masks: 5
+  rescale: false
+  save_every: 10
+  save_each: true
+
+# === EVALUATION HYPERPARAMETER GRID ===
+# Searched AFTER training to find best post-processing
+# settings for the best model(s).
+eval_grid:
+  flow_threshold: [0.2, 0.4, 0.6, 0.8]
+  cellprob_threshold: [-2.0, -1.0, 0.0, 1.0, 2.0]
+  min_size: [5, 15, 30]
+  diameter: [null]
+  invert: [true, false]
+
+# === EVALUATION DEFAULTS ===
+# Used during training grid phase (mode=training).
+eval_defaults:
+  flow_threshold: 0.4
+  cellprob_threshold: 0.0
+  min_size: 15
+  diameter: null
+  invert: false
+  batch_size: 8
+
+# === VISUALIZATION ===
+visualization:
+  n_samples: 8
+  seed: 42
+  alpha: 0.35
+  dpi: 150
+
+# === HEURISTICS ===
+# Rough estimate of minutes per epoch (for --dry-run)
+time_estimate_min_per_epoch: 0.5

@@ -48,14 +48,16 @@ from pathlib import Path
 from typing import Dict, Optional
 import logging
 
-from config import PIXEL_SIZE, OUTPUT_PATH
+from materials_vision.utils import load_pixel_sizes
 from materials_vision.quantitative_analysis.quantitative_analysis import (
     PorousMaterialAnalyzer,
 )
 from materials_vision.quantitative_analysis.batch_analysis import (
     BatchPorousMaterialAnalyzer,
 )
-from materials_vision.utils import extract_magnification_from_filename
+from materials_vision.quantitative_analysis.file_utils import (
+    extract_magnification_from_filename,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +87,9 @@ class PorousMaterialAnalyzerRandomRemoval(PorousMaterialAnalyzer):
     def __init__(
         self,
         mask_path: str,
-        pixel_size: float = PIXEL_SIZE,
+        pixel_size: float,
+        output_base_dir: Path,
         generate_plots: bool = True,
-        output_base_dir: Optional[Path] = None,
         reject_boundary_pores: bool = True,
         boundary_tolerance: int = 3,
         plot_boundary_rejection: bool = True,
@@ -99,8 +101,8 @@ class PorousMaterialAnalyzerRandomRemoval(PorousMaterialAnalyzer):
         super().__init__(
             mask_path=mask_path,
             pixel_size=pixel_size,
-            generate_plots=generate_plots,
             output_base_dir=output_base_dir,
+            generate_plots=generate_plots,
             reject_boundary_pores=reject_boundary_pores,
             boundary_tolerance=boundary_tolerance,
             plot_boundary_rejection=plot_boundary_rejection,
@@ -256,9 +258,9 @@ class BatchPorousMaterialAnalyzerRandomRemoval(BatchPorousMaterialAnalyzer):
     def __init__(
         self,
         parent_dir: str | Path,
-        pixel_size: float = PIXEL_SIZE,
+        pixel_size: float,
+        output_base_dir: Path,
         generate_plots: bool = True,
-        output_base_dir: Optional[Path] = None,
         reject_boundary_pores: bool = True,
         boundary_tolerance: int = 3,
         plot_boundary_rejection: bool = True,
@@ -271,8 +273,8 @@ class BatchPorousMaterialAnalyzerRandomRemoval(BatchPorousMaterialAnalyzer):
         super().__init__(
             parent_dir=parent_dir,
             pixel_size=pixel_size,
-            generate_plots=generate_plots,
             output_base_dir=output_base_dir,
+            generate_plots=generate_plots,
             reject_boundary_pores=reject_boundary_pores,
             boundary_tolerance=boundary_tolerance,
             plot_boundary_rejection=plot_boundary_rejection,
@@ -501,18 +503,18 @@ class BatchPorousMaterialAnalyzerRandomRemoval(BatchPorousMaterialAnalyzer):
                 # Get the exact number of pores to keep for this image
                 pores_to_keep = pores_to_keep_per_image.get(image_file.name, 0)
 
-                # Create CUSTOM analyzer for this image (with exact pore count to keep)
+                # Create CUSTOM analyzer (with exact pore count to keep)
                 analyzer = PorousMaterialAnalyzerRandomRemoval(
                     mask_path=str(image_file),
                     pixel_size=image_pixel_size,
-                    generate_plots=self.generate_plots,
                     output_base_dir=self.output_base_dir / material_name,
+                    generate_plots=self.generate_plots,
                     reject_boundary_pores=self.reject_boundary_pores,
                     boundary_tolerance=self.boundary_tolerance,
                     plot_boundary_rejection=self.plot_boundary_rejection,
                     pore_removal_percentage=self.pore_removal_percentage,
                     random_seed=self.random_seed,
-                    pores_to_keep=pores_to_keep,  # Use exact count from proportional distribution
+                    pores_to_keep=pores_to_keep,
                 )
 
                 # Run analysis (without generating individual report)
@@ -607,8 +609,13 @@ if __name__ == "__main__":
     # Random seed for reproducibility (set to None for different results each time)
     random_seed = 42
 
-    # Base output directory (will be modified for each percentage)
-    base_output_path = OUTPUT_PATH
+    # Base output directory for all removal percentage runs
+    # Update this path to match your environment
+    base_output_path = Path("/home/dwalicki/results/pore_removal_sensitivity")
+
+    # Fallback pixel size when magnification cannot be determined from filename
+    pixel_sizes = load_pixel_sizes()
+    fallback_pixel_size = pixel_sizes[40]
 
     # =========================================================================
     # RUN ANALYSIS FOR EACH PERCENTAGE
@@ -630,14 +637,14 @@ if __name__ == "__main__":
         print("#" * 80 + "\n")
 
         # Create output directory with suffix
-        output_dir = Path(base_output_path) / f"removed_{removal_percentage}_pores"
+        output_dir = base_output_path / f"removed_{removal_percentage}_pores"
 
         # Create batch analyzer with current removal percentage
         batch_analyzer = BatchPorousMaterialAnalyzerRandomRemoval(
             parent_dir=parent_directory,
-            pixel_size=PIXEL_SIZE,
-            generate_plots=True,
+            pixel_size=fallback_pixel_size,
             output_base_dir=output_dir,
+            generate_plots=True,
             reject_boundary_pores=True,
             boundary_tolerance=3,
             file_pattern=file_pattern,

@@ -9,8 +9,7 @@ from scipy.spatial import Voronoi
 from shapely import affinity
 from shapely.geometry import Point, Polygon
 
-from materials_vision.data_loader import DataLoader
-from materials_vision.preprocessing_utils import crop_image
+from materials_vision.artificial_dataset.data_loader_real_dataset import DataLoader
 
 
 def generate_artifical_images(
@@ -67,7 +66,7 @@ def generate_artifical_images(
         random.seed(42)
         np.random.seed(42)
     real_img = load_sample_real_img()
-    real_img_cropped = crop_image(real_img)
+    real_img_cropped = real_img[:960]
     real_img_shape = real_img_cropped.shape
     # assumed other important parameters
     margin = 1

@@ -10,7 +10,7 @@ Usage:
 import logging
 from pathlib import Path
 from materials_vision.logging_config import setup_logging
-from materials_vision.cellpose.training import retrain_cyto
+from materials_vision.experiments.cellpose.retraining.training import retrain_cyto
 
 
 if __name__ == '__main__':
@@ -18,7 +18,7 @@ if __name__ == '__main__':
     setup_logging(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
-    config_path = Path("materials_vision/experiments/experiment_config.yaml")
+    config_path = Path("materials_vision/experiments/cellpose/retraining/cellpose_retraining_config.yaml")
 
     model_path, train_losses, test_losses, run_id = retrain_cyto(
         config_path=config_path,

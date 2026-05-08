@@ -8,8 +8,9 @@ Usage:
     python scripts/quantitative_analysis/single_image_quantitative_analysis.py
 """
 import logging
+from pathlib import Path
 from materials_vision.logging_config import setup_logging
-from config import PIXEL_SIZE
+from materials_vision.utils import load_pixel_sizes
 from materials_vision.quantitative_analysis.quantitative_analysis import \
     PorousMaterialAnalyzer
 
@@ -19,41 +20,35 @@ if __name__ == "__main__":
     # Setup logging
     setup_logging(level=logging.INFO)
     logger = logging.getLogger(__name__)
-    # Example: Analyze a single porous material sample
-    mask_path = '/Volumes/ADATA SD620/Doktorat/semestr_4/analiza ilościowa/DG/do_oceny/train/401_jpg.rf.208cbf760d266850b64cc7d9347856c1_train_0000_masks.tif'
 
-    # Create analyzer instance with boundary pore rejection (default behavior)
+    mask_path = (
+        '/Volumes/ADATA SD620/Doktorat/semestr_4/analiza ilościowa/DG/'
+        'do_oceny/train/'
+        '401_jpg.rf.208cbf760d266850b64cc7d9347856c1_train_0000_masks.tif'
+    )
+    output_directory = Path("/home/dwalicki/results/single_analysis")
+
+    # Set magnification matching the SEM image (40, 50, 100, 250, 500, 1000)
+    magnification = 40
+    pixel_size = load_pixel_sizes()[magnification]
+
     analyzer = PorousMaterialAnalyzer(
         mask_path=mask_path,
-        pixel_size=PIXEL_SIZE,
+        pixel_size=pixel_size,
+        output_base_dir=output_directory,
         generate_plots=True,
         reject_boundary_pores=True,
         boundary_tolerance=3,
         plot_boundary_rejection=True
     )
 
-    # To include boundary pores in analysis, set reject_boundary_pores=False:
-    # analyzer = PorousMaterialAnalyzer(
-    #     mask_path=mask_path,
-    #     reject_boundary_pores=False
-    # )
-
     # Run complete analysis (automatically generates Excel report)
     results = analyzer.analyze_all()
 
-    # Alternatively, generate report separately
-    # report_path = analyzer.generate_report()
-    # print(f"Report saved to: {report_path}")
-
     # Output structure:
-    # OUTPUT_PATH/
+    # output_directory/
     # └── {mask_filename}/
     #     ├── plots/
-    #     │   ├── nearest_neighbor_distances.png
-    #     │   ├── {mask_filename}_fractal_dimension.png
-    #     │   └── {mask_filename}_coordination_number.png
     #     ├── data/
     #     └── reports/
     #         └── {mask_filename}_analysis_report.xlsx
-    #             ├── Sheet 1: Analysis_Results (comprehensive metrics table)
-    #             └── Sheet 2: Individual_Pores (per-pore data)

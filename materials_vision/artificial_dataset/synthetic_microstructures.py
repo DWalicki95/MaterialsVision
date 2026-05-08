@@ -11,7 +11,6 @@ from tqdm import tqdm
 
 from materials_vision.artificial_dataset.create_voronoi_diagrams import \
     generate_artifical_images
-from materials_vision.config import SYNTHETIC_DATASET_PATH_LOCAL_DRIVE
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +30,16 @@ class SyntheticMicrostructuresGenerator():
 
     def generate_artificial_microstructures(
             self,
+            save_path: Path,
             save: bool = False,
-            save_path: Path = SYNTHETIC_DATASET_PATH_LOCAL_DRIVE
     ) -> dict:
         """
         Generates synthetic microstructures and store them in dictionary.
 
         Parameters
         ----------
+        save_path : Path
+            Directory where the dataset is stored when ``save=True``.
         save : bool, optional
             Saves dataset if True else False, by default False
 
@@ -195,8 +196,8 @@ class SyntheticMicrostructuresGenerator():
             metadata: List[dict],
             combined_mask: np.ndarray,
             params: dict,
+            dataset_path: Path,
             dataset_name: str = '',
-            dataset_path: Path = SYNTHETIC_DATASET_PATH_LOCAL_DRIVE
     ) -> None:
         '''
         Saves synthetic image and pores mask as array (npy) and fially metadata

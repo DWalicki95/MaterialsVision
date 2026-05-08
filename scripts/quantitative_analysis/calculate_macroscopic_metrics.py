@@ -12,6 +12,9 @@ Usage:
     python scripts/quantitative_analysis/calculate_macroscopic_metrics.py \
         --input-dir /path/to/output_dir \
         --output-file /custom/path/macroscopic_metrics.xlsx
+
+    python scripts/quantitative_analysis/calculate_macroscopic_metrics.py \
+        --input-dir /path/to/output_dir --merge-only
 """
 import argparse
 import logging
@@ -65,6 +68,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Path for output Excel file. Default: "
             "<input_dir>/macroscopic_pore_metrics.xlsx"
+        )
+    )
+
+    parser.add_argument(
+        "--merge-only",
+        action="store_true",
+        help=(
+            "Skip metric calculations and merge all "
+            "Individual_Pores sheets into one dataset"
         )
     )
 
@@ -471,6 +483,71 @@ def calculate_topology_metrics(df: pd.DataFrame) -> Dict[str, float]:
     }
 
 
+def merge_individual_pores(
+    reports: List[Tuple[str, Path]]
+) -> Optional[pd.DataFrame]:
+    """
+    Merge Individual_Pores sheets from all materials into one DataFrame.
+
+    Parameters
+    ----------
+    reports : List[Tuple[str, Path]]
+        List of (material_name, report_path) tuples
+
+    Returns
+    -------
+    Optional[pd.DataFrame]
+        Combined DataFrame with a 'material_name' column,
+        or None if no data could be read
+    """
+    frames = []
+    for material_name, report_path in reports:
+        df = read_individual_pores_sheet(report_path)
+        if df is None:
+            continue
+        df = df.copy()
+        df.insert(0, 'material_name', material_name)
+        frames.append(df)
+        logger.info(
+            f"  Loaded {len(df)} pores from {material_name}"
+        )
+
+    if not frames:
+        return None
+
+    merged = pd.concat(frames, ignore_index=True)
+    logger.info(
+        f"Merged dataset: {len(merged)} total pores "
+        f"from {len(frames)} material(s)"
+    )
+    return merged
+
+
+def export_merged_dataset(
+    df: pd.DataFrame,
+    output_path: Path
+) -> Path:
+    """
+    Export merged individual pores dataset to Excel.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Merged DataFrame with all individual pore data
+    output_path : Path
+        Path for the output Excel file
+
+    Returns
+    -------
+    Path
+        Path to the created Excel file
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_excel(output_path, index=False, engine="openpyxl")
+    logger.info(f"Merged dataset exported to: {output_path}")
+    return output_path
+
+
 def calculate_all_metrics(df: pd.DataFrame) -> Dict[str, float]:
     """
     Calculate all macroscopic metrics for a material.
@@ -793,6 +870,29 @@ def main() -> int:
         return 1
 
     logger.info(f"Found {len(reports)} material report(s)")
+
+    # Merge-only mode: combine raw datasets without calculations
+    if args.merge_only:
+        logger.info("Merge-only mode: combining raw datasets")
+        merged_df = merge_individual_pores(reports)
+        if merged_df is None:
+            logger.error("No data could be merged")
+            return 1
+
+        if args.output_file:
+            output_path = Path(args.output_file)
+        else:
+            output_path = (
+                input_dir / "merged_individual_pores.xlsx"
+            )
+
+        export_merged_dataset(merged_df, output_path)
+        logger.info(
+            f"Merged {len(merged_df)} pores from "
+            f"{merged_df['material_name'].nunique()} material(s). "
+            f"Results saved to: {output_path}"
+        )
+        return 0
 
     # Process each material
     results = []

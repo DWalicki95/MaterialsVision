@@ -13,9 +13,9 @@ import argparse
 import logging
 from pathlib import Path
 from materials_vision.logging_config import setup_logging
-from materials_vision.cellpose.inference import CellposeInferenceEvaluation
-from config import MODEL_PATH_INFERENCE, OUTPUT_PATH_INFERENCE, \
-    PATH_TO_FILES_INFERENCE
+from materials_vision.experiments.cellpose.inference import (
+    CellposeInferenceEvaluation,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,31 +35,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--path-to-files",
         type=str,
-        default=PATH_TO_FILES_INFERENCE,
-        help=(
-            "Path to directory containing input images "
-            f"(default: {PATH_TO_FILES_INFERENCE})"
-        )
+        required=True,
+        help="Path to directory containing input images",
     )
 
     parser.add_argument(
         "--model-path",
         type=str,
-        default=MODEL_PATH_INFERENCE,
-        help=(
-            "Path to pretrained Cellpose model "
-            f"(default: {MODEL_PATH_INFERENCE})"
-        )
+        required=True,
+        help="Path to pretrained Cellpose model",
     )
 
     parser.add_argument(
         "--output-path",
         type=str,
-        default=OUTPUT_PATH_INFERENCE,
-        help=(
-            "Directory to save inference outputs "
-            f"(default: {OUTPUT_PATH_INFERENCE})"
-        )
+        required=True,
+        help="Directory to save inference outputs",
     )
 
     parser.add_argument(

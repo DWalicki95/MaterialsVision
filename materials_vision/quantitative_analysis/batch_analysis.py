@@ -5,16 +5,20 @@ import pandas as pd
 from datetime import datetime
 import logging
 
-from config import PIXEL_SIZE, OUTPUT_PATH, PIXEL_SIZES
+from materials_vision.utils import load_pixel_sizes
 from materials_vision.quantitative_analysis.quantitative_analysis import (
     PorousMaterialAnalyzer, PoreMorphologyMetrics,
 )
 from materials_vision.quantitative_analysis.calculate_statistics import (
     calculate_statistics,
 )
-from materials_vision.utils import extract_magnification_from_filename
+from materials_vision.quantitative_analysis.file_utils import (
+    extract_magnification_from_filename,
+)
 
 logger = logging.getLogger(__name__)
+
+PIXEL_SIZES = load_pixel_sizes()
 
 
 class BatchPorousMaterialAnalyzer:
@@ -41,13 +45,13 @@ class BatchPorousMaterialAnalyzer:
     ----------
     parent_dir : str or Path
         Path to parent directory containing subdirectories with mask images
-    pixel_size : float, optional
-        Physical size of one pixel in micrometers (default: PIXEL_SIZE from
-        config)
+    pixel_size : float
+        Fallback pixel size in µm/px used when magnification cannot be
+        determined from the filename.
     generate_plots : bool, optional
         Whether to generate visualization plots for each image (default: True)
-    output_base_dir : Path, optional
-        Base directory for all outputs (default: OUTPUT_PATH from config)
+    output_base_dir : Path
+        Base directory for all outputs.
     reject_boundary_pores : bool, optional
         Whether to exclude pores that touch image boundaries (default: True)
     boundary_tolerance : int, optional
@@ -90,9 +94,9 @@ class BatchPorousMaterialAnalyzer:
     - ``sample_250_1_jpg.rf.abc_masks.tif`` (magnification: 250x)
 
     The magnification value is used to lookup the pixel size from the
-    ``PIXEL_SIZES`` dictionary in config.py. If magnification cannot be
-    extracted or is not found in the config, the default ``pixel_size``
-    parameter is used.
+    ``PIXEL_SIZES`` dictionary from ``sem_calibration.yaml``. If magnification
+    cannot be extracted or is not found there, the ``pixel_size`` parameter
+    is used as fallback.
 
     Examples
     --------
@@ -128,7 +132,7 @@ class BatchPorousMaterialAnalyzer:
 
     Output structure:
     ```
-    OUTPUT_PATH/
+    output_base_dir/
     ├── material_A/
     │   ├── plots/
     │   │   ├── image_001_*.png
@@ -148,9 +152,9 @@ class BatchPorousMaterialAnalyzer:
     def __init__(
         self,
         parent_dir: str | Path,
-        pixel_size: float = PIXEL_SIZE,
+        pixel_size: float,
+        output_base_dir: Path,
         generate_plots: bool = True,
-        output_base_dir: Optional[Path] = None,
         reject_boundary_pores: bool = True,
         boundary_tolerance: int = 3,
         plot_boundary_rejection: bool = True,
@@ -160,7 +164,7 @@ class BatchPorousMaterialAnalyzer:
         self.parent_dir = Path(parent_dir)
         self.pixel_size = pixel_size
         self.generate_plots = generate_plots
-        self.output_base_dir = output_base_dir or OUTPUT_PATH
+        self.output_base_dir = output_base_dir
         self.reject_boundary_pores = reject_boundary_pores
         self.boundary_tolerance = boundary_tolerance
         self.plot_boundary_rejection = plot_boundary_rejection
@@ -204,7 +208,7 @@ class BatchPorousMaterialAnalyzer:
     @staticmethod
     def _get_pixel_size_for_magnification(
         magnification: Optional[int],
-        default_pixel_size: float = PIXEL_SIZE
+        default_pixel_size: float,
     ) -> float:
         """
         Get pixel size for a given magnification.
@@ -213,9 +217,8 @@ class BatchPorousMaterialAnalyzer:
         ----------
         magnification : Optional[int]
             Magnification value
-        default_pixel_size : float, optional
-            Default pixel size to use if magnification not found
-            (default: PIXEL_SIZE from config)
+        default_pixel_size : float
+            Fallback pixel size to use if magnification not found.
 
         Returns
         -------
@@ -348,8 +351,8 @@ class BatchPorousMaterialAnalyzer:
                 analyzer = PorousMaterialAnalyzer(
                     mask_path=str(image_file),
                     pixel_size=image_pixel_size,
-                    generate_plots=self.generate_plots,
                     output_base_dir=self.output_base_dir / material_name,
+                    generate_plots=self.generate_plots,
                     reject_boundary_pores=self.reject_boundary_pores,
                     boundary_tolerance=self.boundary_tolerance,
                     plot_boundary_rejection=self.plot_boundary_rejection,

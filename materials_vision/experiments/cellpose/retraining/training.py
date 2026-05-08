@@ -1,0 +1,692 @@
+import logging
+import shutil
+import threading
+import time
+from pathlib import Path
+from typing import Tuple, Optional
+
+import mlflow
+import psutil
+from cellpose import io, models, train
+
+try:
+    import GPUtil
+    GPU_AVAILABLE = True
+except ImportError:
+    GPU_AVAILABLE = False
+    logging.warning(
+        "GPUtil not installed. GPU monitoring disabled. "
+        "Install with: pip install gputil"
+    )
+
+from materials_vision.experiments.cellpose.utils import (
+    filter_by_min_masks,
+    get_train_test_file_paths,
+    patch_cellpose_get_batch,
+    precompute_flows_batched,
+)
+from materials_vision.experiments.helpers import (
+    load_experiment_config,
+)
+from materials_vision.experiments.plots import plot_loss
+from materials_vision.utils import (
+    create_current_time_output_directory,
+)
+
+
+class SystemMonitor:
+    """Monitor system resources (CPU, RAM, GPU) during training."""
+
+    def __init__(self, interval: float = 10.0, log_to_mlflow: bool = True):
+        """
+        Initialize system monitor.
+
+        Parameters
+        ----------
+        interval : float
+            Monitoring interval in seconds (default: 10s)
+        log_to_mlflow : bool
+            Whether to log metrics to MLflow
+        """
+        self.interval = interval
+        self.log_to_mlflow = log_to_mlflow
+        self.monitoring = False
+        self.thread: Optional[threading.Thread] = None
+        self.metrics_history = {
+            'cpu_percent': [],
+            'ram_percent': [],
+            'ram_used_gb': [],
+            'gpu_percent': [],
+            'gpu_memory_percent': [],
+            'gpu_memory_used_gb': [],
+            'timestamp': []
+        }
+
+    def _monitor_loop(self):
+        """Internal monitoring loop."""
+        step = 0
+        while self.monitoring:
+            try:
+                timestamp = time.time()
+
+                # CPU metrics
+                cpu_percent = psutil.cpu_percent(interval=1)
+
+                # RAM metrics
+                ram = psutil.virtual_memory()
+                ram_percent = ram.percent
+                ram_used_gb = ram.used / (1024 ** 3)
+
+                # Store metrics
+                self.metrics_history['cpu_percent'].append(cpu_percent)
+                self.metrics_history['ram_percent'].append(ram_percent)
+                self.metrics_history['ram_used_gb'].append(ram_used_gb)
+                self.metrics_history['timestamp'].append(timestamp)
+
+                # GPU metrics (if available)
+                gpu_percent = 0
+                gpu_memory_percent = 0
+                gpu_memory_used_gb = 0
+
+                if GPU_AVAILABLE:
+                    try:
+                        gpus = GPUtil.getGPUs()
+                        if gpus:
+                            gpu = gpus[0]  # use first GPU
+                            gpu_percent = gpu.load * 100
+                            gpu_memory_percent = gpu.memoryUtil * 100
+                            gpu_memory_used_gb = gpu.memoryUsed / 1024
+
+                            self.metrics_history['gpu_percent'].append(
+                                gpu_percent)
+                            self.metrics_history['gpu_memory_percent'].append(
+                                gpu_memory_percent)
+                            self.metrics_history['gpu_memory_used_gb'].append(
+                                gpu_memory_used_gb)
+                    except Exception as e:
+                        logging.debug(f"GPU monitoring error: {e}")
+
+                # Log to MLflow
+                if self.log_to_mlflow and mlflow.active_run():
+                    mlflow.log_metrics({
+                        'system/cpu_percent': cpu_percent,
+                        'system/ram_percent': ram_percent,
+                        'system/ram_used_gb': ram_used_gb,
+                        'system/gpu_percent': gpu_percent,
+                        'system/gpu_memory_percent': gpu_memory_percent,
+                        'system/gpu_memory_used_gb': gpu_memory_used_gb,
+                    }, step=step)
+
+                step += 1
+                time.sleep(self.interval)
+
+            except Exception as e:
+                logging.error(f"System monitoring error: {e}")
+                time.sleep(self.interval)
+
+    def start(self):
+        """Start monitoring in background thread."""
+        if self.monitoring:
+            logging.warning("Monitor already running!")
+            return
+
+        self.monitoring = True
+        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.thread.start()
+        logging.info(f"System monitoring started (interval: {self.interval}s)")
+
+    def stop(self):
+        """Stop monitoring."""
+        self.monitoring = False
+        if self.thread:
+            self.thread.join(timeout=5)
+        logging.info("System monitoring stopped")
+
+    def get_summary_stats(self) -> dict:
+        """Get summary statistics of monitored metrics."""
+        stats = {}
+
+        for metric_name, values in self.metrics_history.items():
+            if metric_name == 'timestamp' or not values:
+                continue
+
+            stats[f'{metric_name}_avg'] = sum(values) / len(values)
+            stats[f'{metric_name}_max'] = max(values)
+            stats[f'{metric_name}_min'] = min(values)
+
+        return stats
+
+
+def filter_test_losses(train_losses, test_losses):
+    """
+    Filter out zero test losses (epochs where test wasn't evaluated).
+
+    Cellpose only evaluates test loss at epoch 5 and every 10 epochs.
+    This function extracts only the valid test loss values.
+
+    Parameters
+    ----------
+    train_losses : np.ndarray
+        Training losses for all epochs
+    test_losses : np.ndarray
+        Test losses for all epochs (contains zeros for non-evaluated epochs)
+
+    Returns
+    -------
+    tuple
+        (test_loss_epochs, test_loss_values, train_loss_at_test_epochs)
+    """
+    # Find epochs where test loss was actually evaluated (non-zero)
+    test_loss_epochs = [
+        i for i, loss in enumerate(test_losses) if loss > 0]
+    test_loss_values = [test_losses[i] for i in test_loss_epochs]
+    train_loss_at_test_epochs = [train_losses[i] for i in test_loss_epochs]
+
+    logging.info(
+        f"Valid test loss evaluations at epochs: {test_loss_epochs} "
+        f"({len(test_loss_epochs)} out of {len(test_losses)} total epochs)"
+    )
+
+    return test_loss_epochs, test_loss_values, train_loss_at_test_epochs
+
+
+def retrain_cyto(config_path) -> Tuple[str, float, float, str]:
+    """
+    Retrain cyto3 model with proper MLflow tracking and system monitoring.
+
+    Returns
+    -------
+    Tuple
+        (cellpose_model_path, train_losses, test_losses, run_id)
+    """
+    # load config
+    config = load_experiment_config(config_path=config_path)
+
+    # logging configuration
+    logging.root.handlers.clear()
+    io.logger_setup()
+
+    # end any active MLflow runs
+    if mlflow.active_run():
+        mlflow.end_run()
+
+    # load variables
+    output_dir_base = config['general']['output_dir']
+    output_dir = create_current_time_output_directory(output_dir_base)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    gpu = config['general']['gpu']
+    save_every = config['general']['save_every']
+
+    train_dir = config['dataset']['train_dir']
+    test_dir = config['dataset']['test_dir']
+    image_filter = config['dataset']['image_filter']
+    mask_filter = config['dataset']['mask_filter']
+    dataset_name = config['dataset']['name']
+    look_one_level_down = config['dataset']['look_one_level_down']
+    ds_version = config['dataset']['version']
+
+    model_name = config['training']['model_name']
+    weight_decay = config['training']['weight_decay']
+    normalize = config['training']['normalize']
+    learning_rate = float(config['training']['learning_rate'])
+    n_epochs = config['training']['epochs']
+    batch_size = config['input']['batch_size']
+    compute_flows = config['training']['compute_flows']
+    min_train_mask = config['training'].get('min_train_masks', 1)
+
+    # System monitoring configuration
+    enable_monitoring = config.get("logging", {}).get(
+        "enable_system_monitoring", True)
+    monitoring_interval = config.get("logging", {}).get(
+        "monitoring_interval", 10.0)
+
+    mlflow.set_experiment(config["logging"]["experiment_name"])
+
+    with mlflow.start_run() as run:
+        run_id = run.info.run_id
+        experiment_id = run.info.experiment_id
+        experiment_name = mlflow.get_experiment(experiment_id).name
+
+        logging.info(f"Experiment Name: {experiment_name}")
+        logging.info(f"Experiment ID: {experiment_id}")
+        logging.info(f"Run ID: {run_id}")
+        logging.info(f"Output directory: {output_dir}")
+
+        # initialize system monitor
+        monitor = None
+        if enable_monitoring:
+            monitor = SystemMonitor(
+                interval=monitoring_interval,
+                log_to_mlflow=True
+            )
+            monitor.start()
+            logging.info(
+                f"System monitoring enabled (interval: {monitoring_interval}s)"
+            )
+
+        try:
+            # log system info at start
+            cpu_count = psutil.cpu_count()
+            ram_total_gb = psutil.virtual_memory().total / (1024 ** 3)
+
+            mlflow.log_params({
+                'system/cpu_count': cpu_count,
+                'system/ram_total_gb': round(ram_total_gb, 2),
+            })
+
+            if GPU_AVAILABLE and gpu:
+                try:
+                    gpus = GPUtil.getGPUs()
+                    if gpus:
+                        gpu_info = gpus[0]
+                        mlflow.log_params({
+                            'system/gpu_name': gpu_info.name,
+                            'system/gpu_memory_total_gb': round(
+                                gpu_info.memoryTotal / 1024, 2),
+                        })
+                        logging.info(
+                            f"GPU: {gpu_info.name} "
+                            f"({gpu_info.memoryTotal / 1024:.1f} GB)")
+                except Exception as e:
+                    logging.warning(f"Could not log GPU info: {e}")
+
+            # Enable MLflow system metrics (built-in)
+            if config.get("logging", {}).get("log_system_metrics", False):
+                mlflow.enable_system_metrics_logging()
+                logging.info("MLflow system metrics logging enabled")
+
+            # log tags
+            mlflow.set_tag('Dataset Name', dataset_name)
+            mlflow.set_tag('Dataset Version', ds_version)
+            mlflow.set_tag('Model Name', model_name)
+            mlflow.set_tag('Output Directory', str(output_dir))
+            mlflow.set_tag('Run ID', run_id)
+
+            # log all parameters from config
+            mlflow.log_params({
+                'gpu': gpu,
+                'save_every': save_every,
+                'weight_decay': weight_decay,
+                'normalize': normalize,
+                'learning_rate': learning_rate,
+                'n_epochs': n_epochs,
+                'batch_size': batch_size,
+                'compute_flows': compute_flows,
+                'look_one_level_down': look_one_level_down,
+                'output_dir': str(output_dir)
+            })
+
+            # log config file as artifact
+            if config_path and Path(config_path).exists():
+                mlflow.log_artifact(str(config_path), artifact_path="config")
+            else:
+                config_file_path = output_dir / "cellpose_retraining_config.yaml"
+                import yaml
+                with open(config_file_path, 'w') as f:
+                    yaml.dump(config, f)
+                mlflow.log_artifact(
+                    str(config_file_path), artifact_path="config")
+
+            logging.info(
+                'Gathering file paths for training data...'
+            )
+            (
+                train_img_files,
+                train_label_files,
+                test_img_files,
+                test_label_files,
+            ) = get_train_test_file_paths(
+                train_dir=train_dir,
+                test_dir=test_dir,
+                image_filter=image_filter,
+                mask_filter=mask_filter,
+                look_one_level_down=look_one_level_down,
+            )
+
+            n_train = len(train_img_files)
+            n_test = (
+                len(test_img_files)
+                if test_img_files else 0
+            )
+
+            mlflow.log_params({
+                'n_train_images': n_train,
+                'n_test_images': n_test,
+            })
+
+            if n_train == 0:
+                raise ValueError('No training images found!')
+
+            sample_shape = io.imread(
+                train_img_files[0]
+            ).shape
+            mlflow.log_param(
+                'image_shape', str(sample_shape)
+            )
+
+            logging.info(f'Initializing {model_name} model')
+            model = models.CellposeModel(
+                gpu=gpu, model_type=model_name
+            )
+
+            logging.info(
+                'Pre-computing flows in batches...'
+            )
+            train_flow_files = precompute_flows_batched(
+                train_label_files,
+                train_img_files,
+                batch_size=10,
+                device=model.net.device,
+            )
+            test_flow_files = None
+            if test_img_files and test_label_files:
+                test_flow_files = precompute_flows_batched(
+                    test_label_files,
+                    test_img_files,
+                    batch_size=10,
+                    device=model.net.device,
+                )
+
+            # Filter images with too few masks
+            # (workaround for Cellpose file-mode bug)
+            if min_train_mask > 0:
+                (
+                    train_img_files,
+                    train_label_files,
+                    train_flow_files,
+                ) = filter_by_min_masks(
+                    train_img_files,
+                    train_label_files,
+                    train_flow_files,
+                    min_train_masks=min_train_mask,
+                )
+                n_train = len(train_img_files)
+
+            logging.info('Starting training...')
+            patch_cellpose_get_batch()
+            model_path, train_losses, test_losses = (
+                train.train_seg(
+                    model.net,
+                    train_files=train_img_files,
+                    train_labels_files=train_flow_files,
+                    test_files=test_img_files,
+                    test_labels_files=test_flow_files,
+                    load_files=False,
+                    normalize=normalize,
+                    weight_decay=weight_decay,
+                    learning_rate=learning_rate,
+                    n_epochs=n_epochs,
+                    batch_size=batch_size,
+                    save_path=str(output_dir),
+                    save_every=save_every,
+                    min_train_masks=0,
+                    model_name=model_name,
+                )
+            )
+
+            logging.info(f'Training complete. Model saved to: {model_path}')
+
+            # Filter test losses to only valid evaluations
+            test_loss_epochs, test_loss_values, train_loss_at_test_epochs = \
+                filter_test_losses(train_losses, test_losses)
+
+            # CRITICAL: Copy model to .cellpose/models/ directory
+            cellpose_models_dir = Path.home() / '.cellpose' / 'models'
+            cellpose_models_dir.mkdir(parents=True, exist_ok=True)
+
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            cellpose_model_name = f"{model_name}_{dataset_name}_{timestamp}"
+            cellpose_model_path = cellpose_models_dir / cellpose_model_name
+
+            if Path(model_path).exists():
+                shutil.copy2(model_path, cellpose_model_path)
+                logging.info(
+                    'Model copied to .cellpose directory: '
+                    f'{cellpose_model_path}'
+                )
+                mlflow.log_param(
+                    'cellpose_model_path', str(cellpose_model_path))
+            else:
+                logging.warning(f"Model file {model_path} not found!")
+
+            logging.info('Logging training metrics...')
+
+            # Log train losses for all epochs
+            for epoch, train_loss in enumerate(train_losses):
+                mlflow.log_metrics({
+                    'training/train_loss': train_loss,
+                }, step=epoch)
+
+            # Log test losses only for evaluated epochs
+            for idx, epoch in enumerate(test_loss_epochs):
+                mlflow.log_metrics({
+                    'training/test_loss': test_loss_values[idx],
+                    'training/loss_diff': abs(
+                        train_loss_at_test_epochs[idx] - test_loss_values[idx])
+                }, step=epoch)
+
+            # log summary metrics (using only valid test losses)
+            if test_loss_values:  # Check if we have any test losses
+                mlflow.log_metrics({
+                    'summary/final_train_loss': train_losses[-1],
+                    'summary/final_test_loss': test_loss_values[-1],
+                    'summary/best_train_loss': min(train_losses),
+                    'summary/best_test_loss': min(test_loss_values),
+                    'summary/avg_train_loss': sum(
+                        train_losses) / len(train_losses),
+                    'summary/avg_test_loss': sum(
+                        test_loss_values) / len(test_loss_values),
+                })
+
+            # Stop monitoring and log summary stats
+            if monitor:
+                monitor.stop()
+                summary_stats = monitor.get_summary_stats()
+
+                # Log system resource summary
+                mlflow.log_metrics({
+                    f'system_summary/{k}': v
+                    for k, v in summary_stats.items()
+                })
+
+                logging.info("System Resource Summary:")
+                logging.info(f"  CPU: avg="
+                             f"{summary_stats.get('cpu_percent_avg', 0):.1f}%,"
+                             "max="
+                             f"{summary_stats.get('cpu_percent_max', 0):.1f}%")
+                logging.info(f"RAM: avg="
+                             f"{summary_stats.get('ram_percent_avg', 0):.1f}%,"
+                             f"max="
+                             f"{summary_stats.get('ram_percent_max', 0):.1f}%")
+                if GPU_AVAILABLE:
+                    logging.info(
+                          "GPU: avg="
+                          f"{summary_stats.get('gpu_percent_avg', 0):.1f}%, "
+                          "max="
+                          f"{summary_stats.get('gpu_percent_max', 0):.1f}%")
+                    logging.info(
+                       "GPU Memory: avg="
+                       f"{summary_stats.get('gpu_memory_percent_avg', 0):.1f}%"
+                       ",max="
+                       f"{summary_stats.get('gpu_memory_percent_max', 0):.1f}%"
+                    )
+
+            logging.info("Creating and logging loss plots...")
+
+            # Plot train losses (all epochs)
+            train_losses_plot = plot_loss(n_epochs, train_losses, 'Train')
+
+            # Plot test losses (only evaluated epochs with markers)
+            test_losses_plot = plot_loss(
+                test_loss_epochs,  # x-values
+                test_loss_values,   # y-values
+                'Test',
+                x_label='Epoch'
+            )
+
+            # save plots locally
+            train_plot_path = output_dir / 'train_losses.png'
+            test_plot_path = output_dir / 'test_losses.png'
+            train_losses_plot.savefig(
+                train_plot_path, dpi=150, bbox_inches='tight')
+            test_losses_plot.savefig(
+                test_plot_path, dpi=150, bbox_inches='tight')
+
+            # log figures to MLflow (only via log_figure)
+            mlflow.log_figure(train_losses_plot, 'plots/train_losses.png')
+            mlflow.log_figure(test_losses_plot, 'plots/test_losses.png')
+            
+            # Close figures to free memory
+            train_losses_plot.clf()
+            test_losses_plot.clf()
+
+            logging.info("Logging model artifacts...")
+            model_path_obj = Path(model_path)
+
+            # log the main model file (as artifact)
+            if model_path_obj.exists():
+                mlflow.log_artifact(str(model_path), artifact_path="models")
+                mlflow.log_param(
+                    'model_path', str(model_path))
+                mlflow.log_param(
+                    'model_size_mb',
+                    round(model_path_obj.stat().st_size / 1024 / 1024, 2)
+                )
+
+                # log the .cellpose copy
+                if cellpose_model_path.exists():
+                    mlflow.log_artifact(
+                        str(cellpose_model_path), artifact_path="models")
+
+                # log checkpoints if they exist
+                checkpoint_dir = output_dir / "models"
+                if checkpoint_dir.exists():
+                    for checkpoint in checkpoint_dir.glob("*.pth"):
+                        if checkpoint != model_path_obj:
+                            mlflow.log_artifact(
+                                str(checkpoint),
+                                artifact_path="models/checkpoints"
+                            )
+            else:
+                logging.error(f"Model path {model_path} does not exist!")
+                raise FileNotFoundError(
+                    f"Trained model not found at {model_path}")
+
+            # log additional artifacts from output directory
+            # FIXED: Exclude files already logged via mlflow.log_figure()
+            logging.info("Logging additional artifacts...")
+            already_logged_files = {train_plot_path, test_plot_path}
+            
+            for file_path in output_dir.rglob('*'):
+                if (file_path.is_file() and 
+                    file_path != model_path_obj and 
+                    file_path not in already_logged_files):
+                    
+                    relative_path = file_path.relative_to(output_dir)
+                    artifact_subpath = str(
+                        relative_path.parent) if relative_path.parent != Path(
+                            '.') else "outputs"
+
+                    try:
+                        mlflow.log_artifact(
+                            str(file_path), artifact_path=artifact_subpath)
+                    except Exception as e:
+                        logging.warning(
+                            f"Could not log artifact {file_path}: {e}")
+
+            # Create a file with model info
+            readme_path = output_dir / "MODEL_INFO.txt"
+            with open(readme_path, 'w') as f:
+                f.write("Cellpose Model Training Info\n")
+                f.write("="*60 + "\n\n")
+                f.write(f"Run ID: {run_id}\n")
+                f.write(f"Model Name: {model_name}\n")
+                f.write(f"Dataset: {dataset_name} (v{ds_version})\n")
+                f.write(f"Training Images: {n_train}\n")
+                f.write(f"Test Images: {n_test}\n")
+                f.write(f"Epochs: {n_epochs}\n")
+                f.write(f"Final Train Loss: {train_losses[-1]:.4f}\n")
+                if test_loss_values:
+                    f.write(f"Final Test Loss: {test_loss_values[-1]:.4f}\n")
+                    f.write(
+                        f"Test evaluated at {len(test_loss_epochs)} "
+                        f"epochs: {test_loss_epochs}\n\n"
+                    )
+                else:
+                    f.write("No test loss data available\n\n")
+
+                if monitor and summary_stats:
+                    f.write("System Resource Usage:\n")
+                    f.write(
+                        "CPU: avg="
+                        f"{summary_stats.get('cpu_percent_avg', 0):.1f}%,"
+                        f"max={summary_stats.get('cpu_percent_max', 0):.1f}"
+                        "%\n"
+                    )
+                    f.write(
+                        "RAM: avg="
+                        f"{summary_stats.get('ram_percent_avg', 0):.1f}%, "
+                        "max="
+                        f"{summary_stats.get('ram_percent_max', 0):.1f}%\n")
+                    if GPU_AVAILABLE:
+                        f.write(
+                            "GPU: avg="
+                            f"{summary_stats.get('gpu_percent_avg', 0):.1f}%, "
+                            "max="
+                            f"{summary_stats.get('gpu_percent_max', 0):.1f}%\n"
+                        )
+                        f.write(
+                            "GPU Memory: avg="
+                            f"{summary_stats.get(
+                                'gpu_memory_percent_avg', 0):.1f}%, "
+                            f"max={summary_stats.get(
+                                'gpu_memory_percent_max', 0):.1f}%\n")
+
+                f.write("\nModel Locations:\n")
+                f.write(f" - Output Dir: {model_path}\n")
+                f.write(f" - .cellpose Dir: {cellpose_model_path}\n\n")
+                f.write("To load this model:\n")
+                f.write("from cellpose import models\n")
+                f.write("model = models.CellposeModel(\n")
+                f.write("    gpu=True,\n")
+                f.write(f"    pretrained_model='{cellpose_model_path}'\n")
+                f.write(")\n")
+
+            mlflow.log_artifact(str(readme_path), artifact_path="info")
+
+            # log and print final summary
+            final_test_loss_str = (
+                f"{test_loss_values[-1]:.4f}" if test_loss_values else "N/A"
+            )
+            summary_msg = (
+                f"\n{'='*70}\n"
+                f"Training Complete!\n"
+                f"{'='*70}\n"
+                f"Run ID: {run_id}\n"
+                f"Model saved to:\n"
+                f"  - Output: {model_path}\n"
+                f"  - .cellpose: {cellpose_model_path}\n"
+                f"Final Losses - Train: {train_losses[-1]:.4f}, "
+                f"Test: {final_test_loss_str}\n"
+                f"Test loss evaluated at {len(test_loss_epochs)} epochs\n"
+                f"{'='*70}\n"
+            )
+
+            print(summary_msg)
+            logging.info(summary_msg)
+
+            return str(cellpose_model_path), train_losses, test_losses, run_id
+
+        except Exception as e:
+            # ensure monitor stops even if training fails
+            if monitor:
+                monitor.stop()
+            raise e
+
+        finally:
+            # cleanup
+            if monitor and monitor.monitoring:
+                monitor.stop()

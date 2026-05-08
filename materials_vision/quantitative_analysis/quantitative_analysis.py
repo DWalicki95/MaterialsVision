@@ -11,7 +11,6 @@ from pathlib import Path
 import pandas as pd
 from datetime import datetime
 
-from config import PIXEL_SIZE, OUTPUT_PATH
 from materials_vision.quantitative_analysis.calculate_statistics import (
     calculate_statistics,
 )
@@ -33,9 +32,8 @@ class PoreMorphologyMetrics:
     ----------
     prop : RegionProperties
         Region properties object from skimage.measure.regionprops
-    pixel_size : float, optional
-        Physical size of one pixel in micrometers (default: PIXEL_SIZE from
-        config)
+    pixel_size : float
+        Physical size of one pixel in micrometers.
 
     Attributes
     ----------
@@ -50,7 +48,7 @@ class PoreMorphologyMetrics:
     """
 
     def __init__(
-        self, prop: RegionProperties, pixel_size: float = PIXEL_SIZE
+        self, prop: RegionProperties, pixel_size: float
     ) -> None:
         self.prop = prop
         self.pixel_size = pixel_size
@@ -499,7 +497,7 @@ class GlobalMicrostructureDescriptors:
         self,
         mask: np.ndarray,
         morphology_results: List[Dict],
-        pixel_size: float = PIXEL_SIZE,
+        pixel_size: float,
         n_rows: int = 2,
         n_cols: int = 2,
     ):
@@ -697,8 +695,8 @@ class SpatialRelationMetrics:
     def __init__(
         self,
         props: List[RegionProperties],
+        pixel_size: float,
         generate_plots: bool = True,
-        pixel_size: float = PIXEL_SIZE,
     ):
         self.props = props
         self.generate_plots = generate_plots
@@ -800,7 +798,7 @@ class TopologyConnectivityAnalysis:
         self,
         mask: np.ndarray,
         props: List[RegionProperties],
-        pixel_size: float = PIXEL_SIZE,
+        pixel_size: float,
     ):
         self.mask = mask
         self.props = props
@@ -809,7 +807,7 @@ class TopologyConnectivityAnalysis:
     def calculate_fractal_dimension(
         self,
         reject_huge_boxes: bool = True,
-        save_plot_path: Optional[Path] = OUTPUT_PATH,
+        save_plot_path: Optional[Path] = None,
         filename: str = "fractal_dimension_plot",
     ) -> Tuple[float, float]:
         """
@@ -835,7 +833,7 @@ class TopologyConnectivityAnalysis:
         save_plot_path : Path, optional
             Directory path to save diagnostic plot showing the log-log
             relationship
-            and linear fit (default: OUTPUT_PATH)
+            and linear fit (default: None — plot not saved)
         filename : str, optional
             Filename for the diagnostic plot (
             default: 'fractal_dimension_plot')
@@ -965,7 +963,7 @@ class TopologyConnectivityAnalysis:
 
     def calculate_coordination_number(
         self,
-        save_plot_path: Optional[Path] = OUTPUT_PATH,
+        save_plot_path: Optional[Path] = None,
         base_filename: str = "analysis",
     ) -> Tuple[Optional[Dict[int, int]], Optional[Dict[str, float]]]:
         """
@@ -982,7 +980,7 @@ class TopologyConnectivityAnalysis:
         ----------
         save_plot_path : Path, optional
             Directory path to save Voronoi diagram visualization with overlaid
-            mask and coordination numbers (default: OUTPUT_PATH)
+            mask and coordination numbers (default: None — plot not saved)
         base_filename : str, optional
             Base filename for the output plot (default: 'analysis')
 
@@ -1116,9 +1114,9 @@ class TopologyConnectivityAnalysis:
             fractal_filename = f"{base_filename}_fractal_dimension"
             cn_plot_path = output_dir
         else:
-            fractal_plot_path = OUTPUT_PATH
+            fractal_plot_path = None
             fractal_filename = "fractal_dimension_plot"
-            cn_plot_path = OUTPUT_PATH
+            cn_plot_path = None
 
         fractal_dim, r_squared = self.calculate_fractal_dimension(
             save_plot_path=fractal_plot_path, filename=fractal_filename
@@ -1158,13 +1156,12 @@ class PorousMaterialAnalyzer:
         Path to instance mask TIFF file where each pore has a unique integer
         label
         (0 = background, 1, 2, ... n = pore IDs)
-    pixel_size : float, optional
-        Physical size of one pixel in micrometers (default: PIXEL_SIZE from
-        config)
+    pixel_size : float
+        Physical size of one pixel in micrometers.
     generate_plots : bool, optional
         Whether to generate visualization plots (default: True)
-    output_base_dir : Path, optional
-        Base directory for all outputs (default: OUTPUT_PATH from config)
+    output_base_dir : Path
+        Base directory for all outputs.
     reject_boundary_pores : bool, optional
         Whether to exclude pores that touch image boundaries from analysis
         (default: True). Boundary pores may have incomplete measurements.
@@ -1236,9 +1233,9 @@ class PorousMaterialAnalyzer:
     def __init__(
         self,
         mask_path: str,
-        pixel_size: float = PIXEL_SIZE,
+        pixel_size: float,
+        output_base_dir: Path,
         generate_plots: bool = True,
-        output_base_dir: Optional[Path] = None,
         reject_boundary_pores: bool = True,
         boundary_tolerance: int = 3,
         plot_boundary_rejection: bool = True,
@@ -1246,7 +1243,7 @@ class PorousMaterialAnalyzer:
         self.mask_path = Path(mask_path)
         self.pixel_size = pixel_size
         self.generate_plots = generate_plots
-        self.output_base_dir = output_base_dir or OUTPUT_PATH
+        self.output_base_dir = output_base_dir
         self.reject_boundary_pores = reject_boundary_pores
         self.boundary_tolerance = boundary_tolerance
         self.plot_boundary_rejection = plot_boundary_rejection

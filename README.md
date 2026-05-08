@@ -4,15 +4,15 @@
 
 MaterialsVision is a comprehensive Python package for quantitative analysis of
 foam material microstructures from scanning electron microscopy (SEM) images.
-It combines state-of-the-art deep learning pores segmentation (Cellpose) with
+It combines state-of-the-art deep learning pore segmentation (Cellpose) with
 advanced morphological, topological, and spatial analysis methods from
 materials science.
 
 ## Research Goals
 
 This is a **research project** with a primary goal of developing an automated
-porous material microstructure segmentation tool that can 
-**replace the manual expert annotation process**. Traditional microscopy 
+porous material microstructure segmentation tool that can
+**replace the manual expert annotation process**. Traditional microscopy
 image analysis requires extensive manual labeling by domain experts, which is:
 
 - **Time-consuming**: Manual annotation of pores in SEM images can take hours per sample
@@ -20,8 +20,9 @@ image analysis requires extensive manual labeling by domain experts, which is:
 - **Prone to inconsistency**: Inter-annotator variability and fatigue affect results
 - **Not scalable**: Large-scale materials characterization studies are impractical
 
-By leveraging deep learning (Cellpose) fine-tuned on foam materials,
- MaterialsVision aims to **automate the segmentation pipeline**, enabling researchers to:
+By leveraging deep learning (Cellpose-SAM) fine-tuned on foam materials,
+MaterialsVision aims to **automate the segmentation pipeline**, enabling
+researchers to:
 - Analyze hundreds of samples in the time it previously took to process one
 - Reduce costs associated with manual annotation
 - Ensure consistent, reproducible segmentation across datasets
@@ -30,9 +31,13 @@ By leveraging deep learning (Cellpose) fine-tuned on foam materials,
 ## Features
 
 ### AI-Powered Segmentation
-- **Cellpose Integration**: Instance segmentation for automated pore detection
-- **Custom Model Training**: Fine-tune pretrained models on your foam datasets with MLflow experiment tracking
-- **Multi-Magnification Support**: Handles 40x, 50x, 100x, 250x, 500x, and 1000x SEM images
+- **Cellpose-SAM Integration**: Instance segmentation for automated pore detection
+- **Custom Model Training**: Fine-tune pretrained models on your foam datasets
+  with MLflow experiment tracking
+- **Hyperparameter Grid Search**: Systematic search over training and inference
+  parameters with full MLflow logging
+- **Multi-Magnification Support**: Handles 40x, 50x, 100x, 250x, 500x, and
+  1000x SEM images
 - **GPU Acceleration**: CUDA support with automatic CPU fallback
 
 ### Comprehensive Quantitative Analysis
@@ -40,7 +45,7 @@ By leveraging deep learning (Cellpose) fine-tuned on foam materials,
 **Individual Pore Morphology**:
 - Area and perimeter measurements
 - Shape descriptors: circularity, solidity, roundness
-- Feret diameters (maximum and minimum)
+- Feret diameters (maximum and minimum via rotating calipers)
 - Ellipse fitting: major/minor axes, aspect ratio, orientation
 
 **Global Microstructure Descriptors**:
@@ -56,10 +61,19 @@ By leveraging deep learning (Cellpose) fine-tuned on foam materials,
 - Fractal dimension (box-counting method)
 - Coordination number (Voronoi tessellation)
 
+**Macroscopic Metrics** (aggregate across full material dataset):
+- Size distribution: mean, median, D10, D90, span, skewness
+- Elongation: mean aspect ratio, fraction of elongated pores (> 2.0)
+- Regularity: mean circularity, D10 of most irregular pores
+- Orientation entropy (0 = aligned, 1 = isotropic)
+- Topology: coordination number mean and standard deviation
+
 ### Research Tools
-- **Synthetic Data Generation**: Create realistic training data using Voronoi diagrams
+- **Synthetic Data Generation**: Create realistic training data using Voronoi
+  diagrams
 - **Batch Processing**: Analyze multiple samples efficiently
-- **Automated Reporting**: Excel reports with statistical summaries and visualizations
+- **Automated Reporting**: Excel reports with statistical summaries and
+  visualizations
 - **Experiment Tracking**: MLflow integration for reproducible research
 
 ## Installation
@@ -72,7 +86,7 @@ By leveraging deep learning (Cellpose) fine-tuned on foam materials,
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
+git clone https://github.com/DWalicki95/MaterialsVision.git
 cd MaterialsVision
 
 # Create virtual environment
@@ -91,101 +105,284 @@ pip install -r requirements.txt
 - `openpyxl`: Excel report generation
 - Scientific stack: `numpy`, `scipy`, `scikit-image`, `pandas`, `matplotlib`
 
+## Configuration
+
+There is no global config file. Each type of setting has a specific,
+predictable home:
+
+| What to configure | Where |
+|-------------------|-------|
+| SEM pixel calibration (µm/px) | `materials_vision/config/sem_calibration.yaml` |
+| Training hyperparameters & dataset paths | `materials_vision/experiments/cellpose/retraining/cellpose_retraining_config.yaml` |
+| Grid search parameter space | `materials_vision/experiments/cellpose/cellpose_grid_search/grid_search_config.yaml` |
+| Segmentation runtime paths | CLI flags to `run_cellpose_inference.py` |
+| Analysis runtime paths | Constants at the top of each analysis script |
+
+### SEM Calibration (`sem_calibration.yaml`)
+
+Physical pixel sizes for each microscope magnification, derived from SEM
+metadata. **Edit only when switching to a different instrument.**
+
+```yaml
+# materials_vision/config/sem_calibration.yaml
+pixel_sizes:
+  40:   3.24023   # µm/px
+  50:   2.59219
+  100:  1.29609
+  250:  0.51844
+  500:  0.25922
+  1000: 0.12961
+```
+
+Loaded automatically by all analysis code via `load_pixel_sizes()`. The right
+pixel size is resolved from the magnification encoded in the filename
+(e.g. `AS2_40_10_jpg.rf.abc_masks.tif` → 40x → 3.24023 µm/px). If
+magnification cannot be extracted, the fallback `pixel_size` set in the
+calling script is used.
+
+### Retraining Config (`cellpose_retraining_config.yaml`)
+
+Edit before running `retrain_cellpose.py`. No CLI arguments needed — the
+script reads this file directly.
+
+```yaml
+dataset:
+  train_dir: /path/to/train      # ← set your path
+  test_dir: /path/to/test        # ← set your path
+  name: AS                       # material series identifier
+  version: 1
+
+training:
+  epochs: 200
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  model_name: cpsam              # Cellpose-SAM architecture
+
+logging:
+  experiment_name: "cellpose retraining AS - augmentation"
+
+general:
+  output_dir: outputs
+  gpu: true
+```
+
+### Grid Search Config (`grid_search_config.yaml`)
+
+Defines the parameter space for systematic hyperparameter search. Edit
+before running `grid_search_cellpose.py`.
+
+```yaml
+mode: full  # training | evaluation | full
+
+data:
+  train_dir: /path/to/train      # ← set your path
+  test_dir: /path/to/test        # ← set your path
+
+training_grid:
+  learning_rate: [0.01]
+  weight_decay: [0.0001, 0.01]
+  n_epochs: [160]
+  batch_size: [1, 8]
+  normalize: [true, {percentile: [3, 98]}, {tile_norm_blocksize: 128}]
+
+eval_grid:
+  flow_threshold: [0.2, 0.4, 0.6, 0.8]
+  cellprob_threshold: [-2.0, -1.0, 0.0, 1.0, 2.0]
+  min_size: [5, 15, 30]
+```
+
+### Analysis Script Paths
+
+The quantitative analysis scripts are not pure CLI tools — they contain a
+`if __name__ == "__main__"` block with paths set as Python constants. Before
+running, open the script and set the variables at the top of the block:
+
+```python
+# scripts/quantitative_analysis/batch_quantitative_analysis.py
+parent_directory = "/path/to/masks/organized"   # ← input dir
+output_directory = Path("/path/to/results")      # ← output dir
+magnification    = 40                            # ← fallback magnification
+```
+
+```python
+# scripts/quantitative_analysis/single_image_quantitative_analysis.py
+mask_path        = "/path/to/single_mask.tif"   # ← input mask
+output_directory = Path("/path/to/results")      # ← output dir
+magnification    = 40                            # ← SEM magnification
+```
+
+## Full Analysis Pipeline
+
+End-to-end workflow from raw SEM images to macroscopic material metrics:
+
+```
+Step 1 — Data Preparation  (side_scripts/)
+   filter_magnifications.py         Filter images by microscope magnification
+   group_material_into_datasets.py  Organize by material type and magnification
+   split_dataset_into_subsets.py    Stratified train/test split
+
+Step 2 — Segmentation  (scripts/)
+   run_cellpose_inference.py        Generate pore masks from SEM images
+
+Step 3 — Quantitative Analysis  (scripts/quantitative_analysis/)
+   batch_quantitative_analysis.py       Per-material Excel reports (pore-level)
+   calculate_macroscopic_metrics.py     17 aggregate metrics per material
+
+Optional — Model Training  (scripts/)
+   retrain_cellpose.py              Fine-tune Cellpose-SAM (YAML-configured)
+   grid_search_cellpose.py          Systematic hyperparameter search
+```
+
 ## Quick Start
 
 ### 1. Run Cellpose Segmentation
 
+All three path arguments are required:
+
 ```bash
 python scripts/run_cellpose_inference.py \
-    --model_path /path/to/cellpose/model \
-    --input_dir /path/to/sem/images \
-    --output_dir /path/to/output
+    --path-to-files /path/to/sem/images \
+    --model-path /path/to/cellpose/model \
+    --output-path /path/to/output/masks
 ```
 
-### 2. Quantitative Analysis (Single Sample)
+Optional flags:
+- `--no-flows` — skip saving optical flow fields
+- `--no-styles` — skip saving style vectors
+- `-v` / `--verbose` — enable DEBUG logging
 
-```python
-from materials_vision.quantitative_analysis.quantitative_analysis import PorousMaterialAnalyzer
+### 2. Batch Quantitative Analysis
 
-# Initialize analyzer
-analyzer = PorousMaterialAnalyzer(
-    mask_path='/path/to/segmentation_mask.tif',
-    pixel_size=3.24023,  # μm/px for 40x magnification
-    sample_name='AS1',
-    output_dir='/path/to/output'
-)
-
-# Run comprehensive analysis
-analyzer.run_analysis(reject_boundary_pores=True)
-```
-
-This generates:
-- Excel report with all metrics
-- Statistical summaries (mean, median, std, min, max)
-- Visualization plots (distributions, Voronoi diagram, fractal analysis)
-
-### 3. Batch Analysis
+Set paths inside the script, then run:
 
 ```bash
-python scripts/quantitative_analysis/batch_quantitative_analysis.py \
-    --material_series AS \
-    --magnification 40
+# 1. Open the script and set parent_directory and output_directory
+#    scripts/quantitative_analysis/batch_quantitative_analysis.py
+
+# 2. Run
+python scripts/quantitative_analysis/batch_quantitative_analysis.py
 ```
 
-### 4. Fine-tune Cellpose on Custom Data
+Generates per-material Excel reports with pore-level metrics.
+The pixel size per image is resolved automatically from the magnification
+in the filename using `materials_vision/config/sem_calibration.yaml`.
+
+### 3. Calculate Macroscopic Metrics
 
 ```bash
-python scripts/retrain_cellpose.py \
-    --train_dir /path/to/train \
-    --test_dir /path/to/test \
-    --epochs 500 \
-    --learning_rate 0.1
+python scripts/quantitative_analysis/calculate_macroscopic_metrics.py \
+    --input-dir /path/to/analysis/results \
+    --output-file macroscopic_metrics.xlsx \
+    --generate-plots
 ```
 
-Training includes:
-- MLflow experiment tracking
-- Real-time system resource monitoring
-- Automatic model checkpointing
-- Loss visualization
+Optional flags:
+- `--merge-only` — combine raw pore datasets without calculating statistics
+- `-v` / `--verbose` — enable DEBUG logging
+
+### 4. Fine-tune Cellpose (YAML-configured)
+
+```bash
+# 1. Edit the config file:
+#    materials_vision/experiments/cellpose/retraining/cellpose_retraining_config.yaml
+
+# 2. Run — no CLI arguments needed
+python scripts/retrain_cellpose.py
+```
+
+Training includes MLflow experiment tracking, real-time resource monitoring,
+automatic model checkpointing, and loss visualization.
+
+### 5. Hyperparameter Grid Search
+
+```bash
+# 1. Edit the config file:
+#    materials_vision/experiments/cellpose/cellpose_grid_search/grid_search_config.yaml
+
+# 2. Preview all combinations without running
+python scripts/grid_search_cellpose.py \
+    --config materials_vision/experiments/cellpose/cellpose_grid_search/grid_search_config.yaml \
+    --mode full \
+    --dry-run
+
+# 3. Run the full grid search
+python scripts/grid_search_cellpose.py \
+    --config materials_vision/experiments/cellpose/cellpose_grid_search/grid_search_config.yaml \
+    --mode full \
+    --gpu-device 0
+```
+
+Modes:
+- `training` — train models for all hyperparameter combinations
+- `evaluation` — evaluate a single pre-trained model with different inference
+  parameters
+- `full` — training grid followed by evaluation grid on top-N models
+
+### 6. View Experiment Results (MLflow)
+
+```bash
+mlflow ui --backend-store-uri sqlite:///mlflow.db
+# Open: http://127.0.0.1:5000
+```
 
 ## Project Structure
 
 ```
 MaterialsVision/
 ├── materials_vision/              # Main Python package
+│   ├── config/
+│   │   └── sem_calibration.yaml  # SEM pixel size calibration (µm/px)
 │   ├── artificial_dataset/        # Synthetic data generation
 │   │   ├── create_voronoi_diagrams.py
-│   │   └── synthetic_microstructures.py
-│   ├── cellpose/                 # Cellpose integration & training
-│   │   ├── training.py           # Model fine-tuning with MLflow
-│   │   └── utils.py
-│   ├── quantitative_analysis/    # Core analysis modules
-│   │   ├── quantitative_analysis.py  # Main analyzer classes
-│   │   ├── batch_analysis.py
-│   │   └── calculate_statistics.py
-│   ├── image_preprocessing/      # Data augmentation
-│   │   └── image_transformation.py
-│   ├── config.py                 # Data paths configuration
-│   ├── data_loader.py            # Dataset loading utilities
-│   ├── logging_config.py         # Logging setup
-│   ├── metrics.py                # Evaluation metrics (IoU, boundary scores)
-│   └── utils.py                  # General utilities
+│   │   ├── synthetic_microstructures.py
+│   │   ├── data_loader_real_dataset.py
+│   │   └── data_loader_synthetic_dataset.py
+│   ├── experiments/               # Experiment code and configs
+│   │   └── cellpose/
+│   │       ├── retraining/
+│   │       │   ├── cellpose_retraining_config.yaml  # ← edit before training
+│   │       │   └── training.py
+│   │       ├── cellpose_grid_search/
+│   │       │   ├── grid_search_config.yaml          # ← edit before search
+│   │       │   └── grid_search.py
+│   │       ├── inference.py
+│   │       └── utils.py
+│   ├── quantitative_analysis/     # Core analysis modules
+│   │   ├── quantitative_analysis.py   # PorousMaterialAnalyzer
+│   │   ├── batch_analysis.py          # BatchPorousMaterialAnalyzer
+│   │   ├── calculate_statistics.py
+│   │   └── file_utils.py
+│   ├── image_preprocessing/       # Data augmentation
+│   │   ├── image_transformation.py
+│   │   ├── transform.py
+│   │   └── helpers.py
+│   ├── logging_config.py          # Centralized logging setup
+│   ├── metrics.py                 # Evaluation metrics (IoU, boundary scores)
+│   └── utils.py                   # General utilities (load_pixel_sizes, ...)
 ├── scripts/                       # Entry point scripts
-│   ├── run_cellpose_inference.py
-│   ├── retrain_cellpose.py
+│   ├── run_cellpose_inference.py      # CLI: --path-to-files --model-path --output-path
+│   ├── retrain_cellpose.py            # YAML-configured
+│   ├── grid_search_cellpose.py        # CLI: --config --mode --gpu-device
 │   └── quantitative_analysis/
-│       ├── single_image_quantitative_analysis.py
-│       └── batch_quantitative_analysis.py
-├── notebooks/                     # Jupyter notebooks for experiments
-│   ├── cellpose_finetuned_evaluation.ipynb
-│   ├── cellpose_out_of_the_box_evaluation.ipynb
-│   ├── preprocessing.ipynb
-│   └── manual_annotations_evaluation.ipynb
-├── side_scripts/                 # Utility scripts
+│       ├── single_image_quantitative_analysis.py  # set paths in script
+│       ├── batch_quantitative_analysis.py         # set paths in script
+│       └── calculate_macroscopic_metrics.py       # CLI: --input-dir --output-file
+├── side_scripts/                  # Utility and data preparation scripts
 │   ├── generate_synthetic_microstructures.py
-│   └── augment_dataset.py
-├── config.py                     # Global configuration
-└── requirements.txt              # Python dependencies
+│   ├── augment_dataset.py
+│   ├── filter_magnifications.py
+│   ├── group_material_into_datasets.py
+│   ├── split_dataset_into_subsets.py
+│   └── batch_quantitative_analysis_random_pore_removal.py
+├── notebooks/                     # Jupyter notebooks
+│   ├── cellpose_finetuned_evaluation.ipynb
+│   ├── cellpose_finetuned_inferece.ipynb
+│   ├── cellpose_sensitivity_analysis.ipynb
+│   ├── stardist_finetuned_evaulation_.ipynb
+│   ├── SAM_tests.ipynb
+│   └── preprocessing.ipynb
+├── mlflow.db                      # MLflow experiment database
+└── requirements.txt               # Python dependencies
 ```
 
 ## Detailed Usage
@@ -200,7 +397,7 @@ MaterialsVision/
 | **Perimeter** | - | Pore perimeter in μm |
 | **Circularity** | 4π × Area / Perimeter² | Shape roundness (1.0 = perfect circle) |
 | **Solidity** | Area / Convex Hull Area | Compactness measure |
-| **Max Feret Diameter** | - | Longest distance between any two points on boundary |
+| **Max Feret Diameter** | - | Longest distance between any two boundary points |
 | **Min Feret Diameter** | - | Shortest distance (rotating calipers algorithm) |
 | **Ellipse Major Axis** | - | Length of fitted ellipse major axis |
 | **Ellipse Minor Axis** | - | Length of fitted ellipse minor axis |
@@ -211,42 +408,23 @@ MaterialsVision/
 #### Global Microstructure Descriptors
 
 - **Porosity**: Total pore area / Total image area
-- **Local Porosity Variance**: Standard deviation of porosity in sub-regions (measures homogeneity)
-- **Anisotropy**: Preferred orientation strength (0 = isotropic, 1 = highly directional)
+- **Local Porosity Variance**: Standard deviation of porosity in sub-regions
+  (measures homogeneity)
+- **Anisotropy**: Preferred orientation strength (0 = isotropic,
+  1 = highly directional)
 
 #### Spatial Relations
 
-- **Nearest Neighbor Distance**: Distance from each pore centroid to its closest neighbor
+- **Nearest Neighbor Distance**: Distance from each pore centroid to its
+  closest neighbor
 - **Distribution Plots**: Histograms and density plots of spatial metrics
 
 #### Topology & Connectivity
 
-- **Fractal Dimension**: Minkowski-Bouligand box-counting method (measures structural complexity)
-- **Coordination Number**: Average number of neighboring pores via Voronoi tessellation (quantifies connectivity)
-
-### Configuration
-
-Edit [config.py](config.py) to configure paths and pixel sizes:
-
-```python
-# Pixel sizes for different SEM magnifications (μm/px)
-PIXEL_SIZES = {
-    40: 3.24023,
-    50: 2.59219,
-    100: 1.29609,
-    250: 0.51844,
-    500: 0.25922,
-    1000: 0.12961
-}
-
-# Segmentation inference settings
-MODEL_PATH_INFERENCE = '/path/to/cellpose/model'
-OUTPUT_PATH_INFERENCE = '/path/to/output/masks'
-PATH_TO_FILES_INFERENCE = '/path/to/input/images'
-
-# Quantitative analysis output
-OUTPUT_PATH = '/path/to/analysis/results'
-```
+- **Fractal Dimension**: Minkowski-Bouligand box-counting method (measures
+  structural complexity)
+- **Coordination Number**: Average number of neighboring pores via Voronoi
+  tessellation (quantifies connectivity)
 
 ### Synthetic Data Generation
 
@@ -255,7 +433,8 @@ Generate training data with realistic microstructure features:
 ```bash
 python side_scripts/generate_synthetic_microstructures.py \
     --n_samples 1000 \
-    --output_dir /path/to/synthetic_data
+    --dataset_name my_dataset \
+    --save_path /path/to/synthetic_data
 ```
 
 **Features**:
@@ -264,6 +443,18 @@ python side_scripts/generate_synthetic_microstructures.py \
 - Boundary imperfections with jitter
 - Pore perforations and contaminants
 - Automatic ground truth mask generation
+- Automatic train/test directory organization for Cellpose
+
+### Data Preparation Utilities (`side_scripts/`)
+
+| Script | Purpose |
+|--------|---------|
+| `generate_synthetic_microstructures.py` | Generate synthetic SEM images with ground truth masks |
+| `augment_dataset.py` | Augment image/mask pairs (rotation, flip, contrast, Poisson noise) |
+| `filter_magnifications.py` | Filter images by microscope magnification extracted from filenames |
+| `group_material_into_datasets.py` | Organize images into subdirectories by material type and magnification |
+| `split_dataset_into_subsets.py` | Stratified train/test split preserving image-mask pairs |
+| `batch_quantitative_analysis_random_pore_removal.py` | Robustness analysis — measure sensitivity to missing pore detections |
 
 ### Output Structure
 
@@ -283,44 +474,32 @@ output_dir/
 │   ├── global_descriptors.csv
 │   └── spatial_metrics.csv
 └── reports/                  # Excel reports
-    └── comprehensive_analysis.xlsx
+    └── {filename}_analysis_report.xlsx
 ```
 
 The Excel report includes:
+- **Individual_Pores sheet**: Complete per-pore measurements
 - **Summary sheet**: Statistical aggregates (mean, median, std, min, max)
-- **Raw data sheets**: Complete per-pore measurements
 - **Metadata**: Analysis parameters and settings
 
-## Example Workflows
+## Notebooks
 
-### Load and Filter Data
+Explore example workflows in [notebooks/](notebooks/):
 
-```python
-from materials_vision.data_loader import DataLoader
-
-# Load AS series foam materials
-loader = DataLoader('AS')
-
-# Filter by magnification
-data_40x = loader.keep_magnification(40)
-
-# Access image paths
-for sample_name, image_path in data_40x.items():
-    print(f"Sample: {sample_name}, Path: {image_path}")
-```
-
-### Evaluate Segmentation Model
-
-See [notebooks/cellpose_finetuned_evaluation.ipynb](notebooks/cellpose_finetuned_evaluation.ipynb) for comprehensive model evaluation workflow:
-- IoU-based metrics (precision, recall, F1)
-- Boundary score evaluation
-- Visualization of results
+| Notebook | Description |
+|----------|-------------|
+| [cellpose_finetuned_evaluation.ipynb](notebooks/cellpose_finetuned_evaluation.ipynb) | Evaluate fine-tuned Cellpose model (IoU, boundary scores) |
+| [cellpose_finetuned_inferece.ipynb](notebooks/cellpose_finetuned_inferece.ipynb) | Run inference with a fine-tuned model |
+| [cellpose_sensitivity_analysis.ipynb](notebooks/cellpose_sensitivity_analysis.ipynb) | Analyze sensitivity of metrics to inference parameters |
+| [stardist_finetuned_evaulation_.ipynb](notebooks/stardist_finetuned_evaulation_.ipynb) | Evaluate StarDist as an alternative segmentation model |
+| [SAM_tests.ipynb](notebooks/SAM_tests.ipynb) | Experiments with Segment Anything Model (SAM) |
+| [preprocessing.ipynb](notebooks/preprocessing.ipynb) | Preprocessing experiments and parameter tuning |
 
 ## Technical Details
 
 ### Algorithms Implemented
 
-- **Cellpose**: Generalist deep learning segmentation (cyto3 model architecture)
+- **Cellpose-SAM**: Generalist deep learning segmentation (cpsam model architecture)
 - **Voronoi Tessellation**: Coordination number and spatial connectivity
 - **Box-Counting Method**: Fractal dimension estimation with R² quality metric
 - **Rotating Calipers**: Efficient O(n) minimum Feret diameter on convex hull
@@ -342,14 +521,12 @@ MLflow integration tracks:
 - Model artifacts and checkpoints
 - Configuration files
 
-## Notebooks
+Access the MLflow dashboard locally:
 
-Explore example workflows in [notebooks/](notebooks/):
-
-- [cellpose_finetuned_evaluation.ipynb](notebooks/cellpose_finetuned_evaluation.ipynb): Evaluate fine-tuned Cellpose model performance
-- [cellpose_out_of_the_box_evaluation.ipynb](notebooks/cellpose_out_of_the_box_evaluation.ipynb): Test pretrained models on foam data
-- [preprocessing.ipynb](notebooks/preprocessing.ipynb): Preprocessing experiments and parameter tuning
-- [manual_annotations_evaluation.ipynb](notebooks/manual_annotations_evaluation.ipynb): Establish baseline performance from human annotations
+```bash
+mlflow ui --backend-store-uri sqlite:///mlflow.db
+# Open: http://127.0.0.1:5000
+```
 
 ## Development
 
@@ -364,14 +541,6 @@ This project uses:
 - **Documentation**: NumPy-style docstrings throughout
 - **Logging**: Comprehensive logging via `materials_vision.logging_config`
 
-### Contributing
-
-Contributions welcome! The project follows standard Python best practices:
-- Comprehensive docstrings and type hints
-- Modular architecture with clear separation of concerns
-- Extensive error handling and logging
-- Scientific rigor in algorithm implementation
-
 ## Citation
 
 If you use MaterialsVision in your research, please cite:
@@ -379,7 +548,6 @@ If you use MaterialsVision in your research, please cite:
 ```
 [Citation information to be added]
 ```
-
 
 ## Contact & Support
 
