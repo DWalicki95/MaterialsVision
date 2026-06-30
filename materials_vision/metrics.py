@@ -1,5 +1,6 @@
 import gc
 import json
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
@@ -322,12 +323,12 @@ def summarize_evaluation_iou(
         precision, recall, and F1-score.
     """
     TP_all, FP_all, FN_all = [], [], []
-    macro_metric_results = {}
+    macro_values = defaultdict(list)
     # macro evaluation
     for metric_dict in iou_results.values():
         for metric, value in metric_dict.items():
             if metric not in ['TP', 'FP', 'FN']:
-                macro_metric_results[f'iou_mean_{metric}'] = np.mean(value)
+                macro_values[f'iou_mean_{metric}'].append(value)
             # micro evaluation
             elif metric == 'TP':
                 TP_all.append(value)
@@ -335,14 +336,25 @@ def summarize_evaluation_iou(
                 FP_all.append(value)
             elif metric == 'FN':
                 FN_all.append(value)
+    macro_metric_results = {
+        metric: np.mean(values) for metric, values in macro_values.items()
+    }
     TP_all_sum = np.sum(TP_all)
     FP_all_sum = np.sum(FP_all)
     FN_all_sum = np.sum(FN_all)
-    precision_micro = TP_all_sum / (TP_all_sum + FP_all_sum)
-    recall_micro = TP_all_sum / (TP_all_sum + FN_all_sum)
+    precision_micro = (
+        TP_all_sum / (TP_all_sum + FP_all_sum)
+        if (TP_all_sum + FP_all_sum) > 0 else 0.0
+    )
+    recall_micro = (
+        TP_all_sum / (TP_all_sum + FN_all_sum)
+        if (TP_all_sum + FN_all_sum) > 0 else 0.0
+    )
     f1_micro = (
         2 * precision_micro * recall_micro
-      ) / (precision_micro + recall_micro)
+        / (precision_micro + recall_micro)
+        if (precision_micro + recall_micro) > 0 else 0.0
+    )
     # prepare final report
     report = pd.DataFrame.from_dict(
         macro_metric_results, orient='index', columns=['value']
