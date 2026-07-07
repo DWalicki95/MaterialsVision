@@ -458,8 +458,8 @@ class PoreMorphologyMetrics:
         # Get all metric names (excluding 'pore_id' and metadata fields)
         # Metadata fields added by batch analysis should not be aggregated
         excluded_fields = {
-            'pore_id', 'filename', 'magnification', 'pixel_size',
-            'coordination_number'
+            'pore_id', 'original_pore_id', 'filename', 'magnification',
+            'pixel_size', 'coordination_number'
         }
         metric_names = [
             key for key in morphology_results[0].keys()
@@ -517,7 +517,7 @@ class GlobalMicrostructureDescriptors:
 
     def _count_all_pores_area(self) -> float:
         """Sum of all pore areas from morphology results."""
-        return np.sum(pore["area"] for pore in self.morphology_results)
+        return sum(pore["area"] for pore in self.morphology_results)
 
     def _count_pores_area_in_mask(self, sub_mask: np.ndarray) -> float:
         """
@@ -534,7 +534,7 @@ class GlobalMicrostructureDescriptors:
             Total area of all pores in the sub-mask (in µm²)
         """
         # Count pixels for each label (excluding background label 0)
-        pore_pixel_count = np.sum(sub_mask > 0)
+        pore_pixel_count = sum(sub_mask > 0)
 
         # Convert to area
         pore_area = pore_pixel_count * (self.pixel_size**2)

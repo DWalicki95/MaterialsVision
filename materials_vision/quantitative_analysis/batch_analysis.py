@@ -35,8 +35,9 @@ class BatchPorousMaterialAnalyzer:
     For each material (subdirectory), all images are analyzed and combined into
     a single report where:
     - Pore IDs are continuous across images (image1: 1-N, image2: N+1-M, etc.)
-    - Individual pores sheet includes 'filename', 'magnification', and
-      'pixel_size' columns
+    - Individual pores sheet includes 'original_pore_id' (raw instance
+      label from that image's mask, not unique across images),
+      'filename', 'magnification', and 'pixel_size' columns
     - Magnification is automatically extracted from filenames
     - Appropriate pixel size is used for each image based on its magnification
     - Analysis results are aggregated across all images in the subdirectory
@@ -300,7 +301,10 @@ class BatchPorousMaterialAnalyzer:
             - 'n_images': Number of images processed
             - 'image_files': List of processed image filenames
             - 'morphology_individual': Combined list of all pores from all
-               images
+               images. Each pore dict has 'pore_id' (continuous, unique
+               within this material) and 'original_pore_id' (raw
+               instance label from that image's mask, not unique
+               across images)
             - 'morphology_aggregated': Aggregated statistics across all pores
             - 'global_descriptors': Combined global descriptors
             - 'spatial_metrics': Combined spatial metrics
@@ -366,6 +370,8 @@ class BatchPorousMaterialAnalyzer:
                 # adjust pore IDs
                 for pore in results['morphology_individual']:
                     pore_copy = pore.copy()
+                    # Keep the raw instance label from this image's mask
+                    pore_copy['original_pore_id'] = pore['pore_id']
                     # Adjust pore ID to be continuous across images
                     pore_copy['pore_id'] = (
                         pore['pore_id'] + current_pore_id_offset
@@ -507,7 +513,6 @@ class BatchPorousMaterialAnalyzer:
 
         # Calculate batch_porosity_variance based on mode
         if self.batch_variance_mode == "across_images":
-            # NEW: Variance of porosity across complete images
             if len(numeric_porosity_values) > 1:
                 combined_global['batch_porosity_variance'] = np.var(
                     numeric_porosity_values
@@ -876,13 +881,13 @@ class BatchPorousMaterialAnalyzer:
         # Reorder columns in Individual_Pores to put key identifiers first
         cols = df_individual.columns.tolist()
         # Remove key columns that we want to put first
-        for col in ['pore_id', 'filename', 'magnification', 'pixel_size',
-                    'coordination_number']:
+        for col in ['pore_id', 'original_pore_id', 'filename',
+                    'magnification', 'pixel_size', 'coordination_number']:
             if col in cols:
                 cols.remove(col)
         # Put key columns first
-        key_cols = ['pore_id', 'filename', 'magnification', 'pixel_size',
-                    'coordination_number']
+        key_cols = ['pore_id', 'original_pore_id', 'filename',
+                    'magnification', 'pixel_size', 'coordination_number']
         key_cols_present = [
             col for col in key_cols if col in df_individual.columns
         ]
