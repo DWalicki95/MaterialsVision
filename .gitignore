@@ -18,8 +18,5 @@ checkpoints/
 outputs/
 mlruns/
 logs/
-.claude/
 
 mlflow.db
-
-CLAUDE.md
