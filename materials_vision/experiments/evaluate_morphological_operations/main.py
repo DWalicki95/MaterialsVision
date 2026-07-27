@@ -2,7 +2,7 @@
 
 Run from the repository root::
 
-    python -m side_scripts.evaluate_morphological_operations \\
+    python scripts/evaluate_morphological_operations.py \\
         --json-path project-26-....json \\
         --predictions-root /path/to/results_root \\
         --output-dir outputs/morphological_evaluation

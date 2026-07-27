@@ -17,7 +17,7 @@ def load_pixel_sizes() -> dict:
     dict
         Mapping of magnification (int) to pixel size in µm/px (float).
     """
-    path = Path(__file__).parent / "config" / "sem_calibration.yaml"
+    path = Path(__file__).parent / "calibration" / "sem_calibration.yaml"
     with open(path) as f:
         return yaml.safe_load(f)["pixel_sizes"]
 

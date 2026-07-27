@@ -127,7 +127,7 @@ predictable home:
 
 | What to configure | Where |
 |-------------------|-------|
-| SEM pixel calibration (µm/px) | `materials_vision/config/sem_calibration.yaml` |
+| SEM pixel calibration (µm/px) | `materials_vision/calibration/sem_calibration.yaml` |
 | Training hyperparameters & dataset paths | `materials_vision/experiments/cellpose/retraining/cellpose_retraining_config.yaml` |
 | Grid search parameter space | `materials_vision/experiments/cellpose/cellpose_grid_search/grid_search_config.yaml` |
 | Segmentation runtime paths | CLI flags to `run_cellpose_inference.py` |
@@ -139,7 +139,7 @@ Physical pixel sizes for each microscope magnification, derived from SEM
 metadata. **Edit only when switching to a different instrument.**
 
 ```yaml
-# materials_vision/config/sem_calibration.yaml
+# materials_vision/calibration/sem_calibration.yaml
 pixel_sizes:
   40:   3.24023   # µm/px
   50:   2.59219
@@ -231,7 +231,7 @@ magnification    = 40                            # ← SEM magnification
 End-to-end workflow from raw SEM images to macroscopic material metrics:
 
 ```
-Step 1 — Data Preparation  (side_scripts/)
+Step 1 — Data Preparation  (data_prep/)
    filter_magnifications.py         Filter images by microscope magnification
    group_material_into_datasets.py  Organize by material type and magnification
    split_dataset_into_subsets.py    Stratified train/test split
@@ -242,6 +242,8 @@ Step 2 — Segmentation  (scripts/)
 Step 3 — Quantitative Analysis  (scripts/quantitative_analysis/)
    batch_quantitative_analysis.py       Per-material Excel reports (pore-level)
    calculate_macroscopic_metrics.py     17 aggregate metrics per material
+                                         (core logic in materials_vision/
+                                         quantitative_analysis/macroscopic_metrics.py)
 
 Optional — Model Training  (scripts/)
    retrain_cellpose.py              Fine-tune Cellpose-SAM (YAML-configured)
@@ -280,7 +282,7 @@ python scripts/quantitative_analysis/batch_quantitative_analysis.py
 
 Generates per-material Excel reports with pore-level metrics.
 The pixel size per image is resolved automatically from the magnification
-in the filename using `materials_vision/config/sem_calibration.yaml`.
+in the filename using `materials_vision/calibration/sem_calibration.yaml`.
 
 ### 3. Calculate Macroscopic Metrics
 
@@ -345,27 +347,35 @@ mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
 MaterialsVision/
 ├── materials_vision/              # Main Python package
-│   ├── config/
+│   ├── calibration/
 │   │   └── sem_calibration.yaml  # SEM pixel size calibration (µm/px)
-│   ├── artificial_dataset/        # Synthetic data generation
+│   ├── synthetic_dataset/        # Synthetic data generation
 │   │   ├── create_voronoi_diagrams.py
 │   │   ├── synthetic_microstructures.py
-│   │   ├── data_loader_real_dataset.py
 │   │   └── data_loader_synthetic_dataset.py
 │   ├── experiments/               # Experiment code and configs
-│   │   └── cellpose/
-│   │       ├── retraining/
-│   │       │   ├── cellpose_retraining_config.yaml  # ← edit before training
-│   │       │   └── training.py
-│   │       ├── cellpose_grid_search/
-│   │       │   ├── grid_search_config.yaml          # ← edit before search
-│   │       │   └── grid_search.py
-│   │       ├── inference.py
-│   │       └── utils.py
+│   │   ├── cellpose/
+│   │   │   ├── retraining/
+│   │   │   │   ├── cellpose_retraining_config.yaml  # ← edit before training
+│   │   │   │   └── training.py
+│   │   │   ├── cellpose_grid_search/
+│   │   │   │   ├── grid_search_config.yaml          # ← edit before search
+│   │   │   │   └── grid_search.py
+│   │   │   ├── inference.py
+│   │   │   └── utils.py
+│   │   ├── evaluate_morphological_operations/  # Watershed vs. DL segmentation comparison
+│   │   │   ├── main.py
+│   │   │   ├── alignment.py
+│   │   │   ├── data_loading.py
+│   │   │   ├── ground_truth.py
+│   │   │   ├── reporting.py
+│   │   │   └── visualization.py
+│   │   └── peft_sam/               # LoRA fine-tuning of SAM
 │   ├── quantitative_analysis/     # Core analysis modules
 │   │   ├── quantitative_analysis.py   # PorousMaterialAnalyzer
 │   │   ├── batch_analysis.py          # BatchPorousMaterialAnalyzer
-│   │   ├── calculate_statistics.py
+│   │   ├── macroscopic_metrics.py     # Aggregate per-material metrics
+│   │   ├── stats_utils.py
 │   │   └── file_utils.py
 │   ├── image_preprocessing/       # Data augmentation
 │   │   ├── image_transformation.py
@@ -378,17 +388,19 @@ MaterialsVision/
 │   ├── run_cellpose_inference.py      # CLI: --path-to-files --model-path --output-path
 │   ├── retrain_cellpose.py            # YAML-configured
 │   ├── grid_search_cellpose.py        # CLI: --config --mode --gpu-device
+│   ├── finetune_peft_sam.py           # LoRA fine-tuning of SAM
+│   ├── augment_dataset.py             # Dataset augmentation
+│   ├── generate_synthetic_microstructures.py  # Synthetic SEM image generation
+│   ├── evaluate_morphological_operations.py   # Watershed vs. DL comparison
 │   └── quantitative_analysis/
 │       ├── single_image_quantitative_analysis.py  # set paths in script
 │       ├── batch_quantitative_analysis.py         # set paths in script
-│       └── calculate_macroscopic_metrics.py       # CLI: --input-dir --output-file
-├── side_scripts/                  # Utility and data preparation scripts
-│   ├── generate_synthetic_microstructures.py
-│   ├── augment_dataset.py
+│       ├── calculate_macroscopic_metrics.py       # CLI: --input-dir --output-file
+│       └── batch_quantitative_analysis_random_pore_removal.py  # sensitivity analysis
+├── data_prep/                     # Standalone data preparation scripts
 │   ├── filter_magnifications.py
 │   ├── group_material_into_datasets.py
-│   ├── split_dataset_into_subsets.py
-│   └── batch_quantitative_analysis_random_pore_removal.py
+│   └── split_dataset_into_subsets.py
 ├── notebooks/                     # Jupyter notebooks
 │   ├── cellpose_finetuned_evaluation.ipynb
 │   ├── cellpose_finetuned_inferece.ipynb
@@ -447,7 +459,7 @@ MaterialsVision/
 Generate training data with realistic microstructure features:
 
 ```bash
-python side_scripts/generate_synthetic_microstructures.py \
+python scripts/generate_synthetic_microstructures.py \
     --n_samples 1000 \
     --dataset_name my_dataset \
     --save_path /path/to/synthetic_data
@@ -461,16 +473,22 @@ python side_scripts/generate_synthetic_microstructures.py \
 - Automatic ground truth mask generation
 - Automatic train/test directory organization for Cellpose
 
-### Data Preparation Utilities (`side_scripts/`)
+### Data Preparation Utilities (`data_prep/`)
+
+| Script | Purpose |
+|--------|---------|
+| `filter_magnifications.py` | Filter images by microscope magnification extracted from filenames |
+| `group_material_into_datasets.py` | Organize images into subdirectories by material type and magnification |
+| `split_dataset_into_subsets.py` | Stratified train/test split preserving image-mask pairs |
+
+### Additional Scripts (`scripts/`)
 
 | Script | Purpose |
 |--------|---------|
 | `generate_synthetic_microstructures.py` | Generate synthetic SEM images with ground truth masks |
 | `augment_dataset.py` | Augment image/mask pairs (rotation, flip, contrast, Poisson noise) |
-| `filter_magnifications.py` | Filter images by microscope magnification extracted from filenames |
-| `group_material_into_datasets.py` | Organize images into subdirectories by material type and magnification |
-| `split_dataset_into_subsets.py` | Stratified train/test split preserving image-mask pairs |
-| `batch_quantitative_analysis_random_pore_removal.py` | Robustness analysis — measure sensitivity to missing pore detections |
+| `evaluate_morphological_operations.py` | Classic image-processing baseline (watershed) vs. deep-learning segmentation comparison |
+| `quantitative_analysis/batch_quantitative_analysis_random_pore_removal.py` | Robustness analysis — measure sensitivity to missing pore detections |
 
 ### Output Structure
 

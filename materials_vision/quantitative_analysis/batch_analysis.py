@@ -9,7 +9,7 @@ from materials_vision.utils import load_pixel_sizes
 from materials_vision.quantitative_analysis.quantitative_analysis import (
     PorousMaterialAnalyzer, PoreMorphologyMetrics,
 )
-from materials_vision.quantitative_analysis.calculate_statistics import (
+from materials_vision.quantitative_analysis.stats_utils import (
     calculate_statistics,
 )
 from materials_vision.quantitative_analysis.file_utils import (

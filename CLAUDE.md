@@ -29,8 +29,7 @@ Python 3.12+ is required. `mlflow`, `torch`/`torchvision`, `cellpose`, and
 # Lint / format (flake8, isort, whitespace/EOF fixers)
 pre-commit run --all-files
 
-# Type check (config targets `MaterialsVision/`, but the actual package dir
-# is lowercase `materials_vision/` — pass the real path explicitly)
+# Type check
 mypy materials_vision/
 
 # View MLflow experiment tracking UI
@@ -47,7 +46,7 @@ sample data, inspect the plots/Excel report/MLflow run).
 
 ### Pipeline stages (data flows in this order)
 
-1. **Data prep** (`side_scripts/`) — filter by magnification, group into
+1. **Data prep** (`data_prep/`) — filter by magnification, group into
    per-material/magnification datasets, stratified train/test split.
 2. **Segmentation** (`scripts/run_cellpose_inference.py`) — runs a trained
    Cellpose-SAM model over SEM images, produces `*_masks.tif`.
@@ -68,28 +67,27 @@ sample data, inspect the plots/Excel report/MLflow run).
   nearest-neighbor spatial stats, fractal dimension via box-counting,
   Voronoi-based coordination number). `batch_analysis.py` wraps this into
   `BatchPorousMaterialAnalyzer` for whole-directory processing.
-  `calculate_statistics.py` / `file_utils.py` support aggregation and I/O.
+  `macroscopic_metrics.py` aggregates per-pore data into per-material
+  macroscopic metrics (size, elongation, regularity, orientation, topology),
+  backing the thin `scripts/quantitative_analysis/calculate_macroscopic_
+  metrics.py` CLI wrapper. `stats_utils.py` / `file_utils.py` are small
+  generic helpers (5-number-summary stats; filename magnification parsing).
 - `experiments/` — training/eval code per model family:
   `cellpose/retraining/` (YAML-configured fine-tuning), `cellpose/
   cellpose_grid_search/` (hyperparameter sweeps), `peft_sam/` (LoRA
   fine-tuning of SAM), `evaluate_morphological_operations/` (classic
-  image-processing baseline vs. deep-learning segmentation comparison).
-  **Note:** both `peft_sam/` and `peft-sam/` exist side by side — check
-  which one is actually imported/current before editing; treat the other as
-  possibly stale.
-- `artificial_dataset/` — synthetic microstructure generation via Voronoi
+  image-processing baseline vs. deep-learning segmentation comparison,
+  invoked via `scripts/evaluate_morphological_operations.py`).
+- `synthetic_dataset/` — synthetic microstructure generation via Voronoi
   diagrams, used to create training data with ground-truth masks.
 - `image_preprocessing/` — augmentation (rotation, flip, contrast, Poisson
-  noise) for image/mask pairs. Standalone data-prep stage behind
-  `side_scripts/augment_dataset.py`; not imported by any experiment or
-  training/inference code. Model-specific preprocessing belongs in that
-  experiment's own directory (see `experiments/peft_sam/dataset.py` and
-  `experiments/cellpose/utils.py`), not here.
-- `config/sem_calibration.yaml` + `utils.load_pixel_sizes()` — the single
-  source of truth for physical pixel size (µm/px) per SEM magnification.
-  Analysis code resolves the right pixel size by parsing the magnification
-  out of the input filename (e.g. `AS2_40_...` → 40x); a fallback
-  `pixel_size` constant in the calling script is used if that parse fails.
+  noise) for image/mask pairs.
+- `calibration/sem_calibration.yaml` + `utils.load_pixel_sizes()` — the
+  single source of truth for physical pixel size (µm/px) per SEM
+  magnification. Analysis code resolves the right pixel size by parsing the
+  magnification out of the input filename (e.g. `AS2_40_...` → 40x); a
+  fallback `pixel_size` constant in the calling script is used if that parse
+  fails.
 - `logging_config.setup_logging()` — centralized console + rotating file
   logging (10MB/5 backups) writing to `logs/materials_vision.log` by default.
 
@@ -99,7 +97,7 @@ There is no single global config. Each concern has one dedicated home:
 
 | What | Where |
 |------|-------|
-| SEM pixel calibration | `materials_vision/config/sem_calibration.yaml` |
+| SEM pixel calibration | `materials_vision/calibration/sem_calibration.yaml` |
 | Cellpose fine-tuning hyperparameters/paths | `materials_vision/experiments/cellpose/retraining/cellpose_retraining_config.yaml` |
 | Grid search parameter space | `materials_vision/experiments/cellpose/cellpose_grid_search/grid_search_config.yaml` |
 | Inference/analysis I/O paths | CLI flags (`run_cellpose_inference.py`, `calculate_macroscopic_metrics.py`) or constants at the top of the script's `if __name__ == "__main__"` block (the two `quantitative_analysis/*.py` scripts) |

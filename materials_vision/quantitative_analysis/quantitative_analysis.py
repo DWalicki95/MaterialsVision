@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 from datetime import datetime
 
-from materials_vision.quantitative_analysis.calculate_statistics import (
+from materials_vision.quantitative_analysis.stats_utils import (
     calculate_statistics,
 )
 import logging
