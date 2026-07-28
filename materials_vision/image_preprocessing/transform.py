@@ -7,9 +7,7 @@ from PIL import Image
 from materials_vision.image_preprocessing.image_transformation import (
     Augmentor
 )
-from materials_vision.image_preprocessing.helpers import (
-    find_image_mask_pairs,
-)
+from materials_vision.utils import find_image_mask_pairs
 
 
 logger = logging.getLogger(__name__)
@@ -96,7 +94,10 @@ def augment_dataset(
 
     # Find all image-mask pairs
     pairs = find_image_mask_pairs(
-        input_dir, image_suffix, mask_suffix
+        image_dir=input_dir,
+        image_suffix=image_suffix,
+        mask_suffix=mask_suffix,
+        strict=False,
     )
 
     if not pairs:

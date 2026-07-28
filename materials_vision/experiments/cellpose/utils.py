@@ -9,6 +9,8 @@ from typing import List, Optional, Tuple
 from cellpose import dynamics, io, train as _cp_train
 from tqdm import tqdm
 
+from materials_vision.utils import find_image_mask_pairs
+
 log = logging.getLogger(__name__)
 
 
@@ -340,12 +342,10 @@ def split_into_train_and_test_directory(
     Raises
     ------
     ValueError
-        If the counts of raw image files and raw mask files differ.
-    ValueError
-        If an image filename does not end with the specified image suffix.
+        If any image has no matching mask, or any mask has no matching
+        image (see `materials_vision.utils.find_image_mask_pairs`).
     ValueError
         If `subset_size` is larger than the available number of pairs.
-        If the expected mask filename for an image cannot be found.
     """
     base_out = Path(output_root) / dataset_name
     train_dir = base_out / 'train'
@@ -354,26 +354,15 @@ def split_into_train_and_test_directory(
     img_suffix = image_suffix_convention + image_format
     msk_suffix = mask_suffix_convention + mask_format
 
-    all_images = list(dataset_store_path.glob(f'*{img_suffix}'))
-    all_masks = list(dataset_store_path.glob(f'*{msk_suffix}'))
-
-    if len(all_images) != len(all_masks):
-        raise ValueError(
-            f'Found {len(all_images)} images but {len(all_masks)} masks in '
-            f'{dataset_store_path}'
+    pairs: list[tuple[Path, Path]] = [
+        (pair['image'], pair['mask'])
+        for pair in find_image_mask_pairs(
+            image_dir=dataset_store_path,
+            image_suffix=img_suffix,
+            mask_suffix=msk_suffix,
+            strict=True,
         )
-
-    # build guaranteed-matched pairs by swapping suffixes
-    pairs: list[tuple[Path, Path]] = []
-    for img in all_images:
-        if not img.name.endswith(img_suffix):
-            raise ValueError(
-                f'Image file "{img.name}" does not end with "{img_suffix}"'
-            )
-        prefix = img.name[: -len(img_suffix)]
-        expected_mask_name = prefix + msk_suffix
-        mask_path = get_full_mask_path(expected_mask_name, all_masks)
-        pairs.append((img, mask_path))
+    ]
 
     # optionally sub‑sample
     if subset_size is not None:
@@ -401,73 +390,6 @@ def split_into_train_and_test_directory(
     log.info(
         'Split dataset into train and test and copied into desired catalogs'
     )
-
-
-def find_matching_masks(
-    files_list: list[Path],
-    all_masks_list: list[Path],
-    mask_suffix: str
-) -> list[Path]:
-    """Filters files to those that match images.
-
-    Parameters
-    ----------
-    files_list : list[Path]
-        List of all train or test files' paths (mask and images)
-    all_masks_list : list[Path]
-        List of all files' paths in dataset
-    mask_suffix : str
-        mask suffix in mask name convention, f.e. `_masks.tiff`
-
-    Returns
-    -------
-    list[Path]
-        List of chosen images masks.
-    """
-    matching_mask_paths = []
-    for file in files_list:
-        chosen_img_num = file.name.split('_')[-2]
-        # name convention must be as below !
-        chosen_mask_name = 'sample_' + str(chosen_img_num) + mask_suffix
-        mask_path = get_full_mask_path(chosen_mask_name, all_masks_list)
-        matching_mask_paths.append(mask_path)
-    return matching_mask_paths
-
-
-def get_full_mask_path(
-    chosen_mask_name: str,
-    all_masks_list: list[Path]
-) -> Path:
-    """Function tasks:
-        1) Make sure if mask name with provided convention really exists.
-        2) If file exists -> returns full path
-        3) If not -> raise error
-
-    Parameters
-    ----------
-    chosen_mask_name : str
-        mask name created by `find_matching_mask` function with a specific
-        convention
-    all_masks_list : list[Path]
-        List of all files' paths in dataset
-
-    Returns
-    -------
-    Path
-        Full path of mask
-
-    Raises
-    ------
-    ValueError
-        Error if file that should be in directory is not present. It might be
-        changed name convention fault.
-    """
-    for mask in all_masks_list:
-        if mask.name == chosen_mask_name:
-            return mask
-    raise ValueError(
-            f'There is no mask {chosen_mask_name} in dataset.'
-        )
 
 
 def copy_into_desired_directory(files_list: list[Path], desired_folder: Path):

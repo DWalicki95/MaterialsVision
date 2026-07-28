@@ -11,6 +11,7 @@ from torch_em.transform.label import PerObjectDistanceTransform  # pyright: igno
 from torch_em.data import MinInstanceSampler  # pyright: ignore[reportMissingImports]
 from peft_sam.util import RawTrafo  # pyright: ignore[reportMissingImports]
 from materials_vision.experiments.peft_sam.exceptions import DataLoaderError
+from materials_vision.utils import find_image_mask_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -51,24 +52,17 @@ class FoamSEMDataset(torch.utils.data.Dataset):
         return len(self.pairs)
 
     def _load_pairs(self):
-        img_files = sorted(self.img_dir.glob(f"*{self.img_suffix}"))
-        mask_files = sorted(self.mask_dir.glob(f"*{self.mask_suffix}"))
-
-        if len(img_files) != len(mask_files):
-            raise DataLoaderError(
-                f"Image/mask count mismatch: {len(img_files)} vs {len(mask_files)}"
+        try:
+            pairs = find_image_mask_pairs(
+                image_dir=self.img_dir,
+                mask_dir=self.mask_dir,
+                image_suffix=self.img_suffix,
+                mask_suffix=self.mask_suffix,
+                strict=True,
             )
-
-        pairs = []
-        for img, mask in zip(img_files, mask_files):
-            img_key = img.name.removesuffix(self.img_suffix)
-            mask_key = mask.name.removesuffix(self.mask_suffix)
-            if img_key != mask_key:
-                raise DataLoaderError(
-                    f"Pairing mismatch: {img.name} vs {mask.name}"
-                )
-            pairs.append((img, mask))
-        return pairs
+        except ValueError as e:
+            raise DataLoaderError(str(e)) from e
+        return [(pair['image'], pair['mask']) for pair in pairs]
 
     def _verify_shapes(self):
         ph, pw = self.desired_shape

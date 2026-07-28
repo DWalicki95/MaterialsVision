@@ -15,10 +15,13 @@ from materials_vision.image_preprocessing.helpers import plot
 
 class Augmentor:
     """
-    Image augmentation for Cellpose segmentation training.
+    Generic image/mask-pair augmentation.
 
-    Applies geometric and intensity transformations to images and
+    Applies geometric and intensity transformations (rotation, flip,
+    contrast, gamma correction, Poisson noise) to images and their
     corresponding masks while maintaining their spatial correspondence.
+    Model-agnostic: this class makes no assumptions about which
+    downstream model consumes the augmented pairs.
 
     Parameters
     ----------
@@ -384,9 +387,12 @@ class Augmentor:
 
         Notes
         -----
-        Images are saved in specified format, masks as TIF format.
-        Naming follows Cellpose convention: basename_augN_image.jpg
-        and basename_augN_masks.tif
+        Images are saved in the specified format, masks as TIF. The
+        ``img_suffix``/``mask_suffix`` parameters are configurable and
+        default to this repo's ``_image``/``_masks`` convention (used
+        across the codebase, not specific to any one model): saved names
+        follow the pattern basename_augN_image.jpg and
+        basename_augN_masks.tif.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)

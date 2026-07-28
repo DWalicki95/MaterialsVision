@@ -80,7 +80,11 @@ sample data, inspect the plots/Excel report/MLflow run).
 - `artificial_dataset/` — synthetic microstructure generation via Voronoi
   diagrams, used to create training data with ground-truth masks.
 - `image_preprocessing/` — augmentation (rotation, flip, contrast, Poisson
-  noise) for image/mask pairs.
+  noise) for image/mask pairs. Standalone data-prep stage behind
+  `side_scripts/augment_dataset.py`; not imported by any experiment or
+  training/inference code. Model-specific preprocessing belongs in that
+  experiment's own directory (see `experiments/peft_sam/dataset.py` and
+  `experiments/cellpose/utils.py`), not here.
 - `config/sem_calibration.yaml` + `utils.load_pixel_sizes()` — the single
   source of truth for physical pixel size (µm/px) per SEM magnification.
   Analysis code resolves the right pixel size by parsing the magnification
