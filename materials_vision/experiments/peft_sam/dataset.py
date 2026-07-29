@@ -24,6 +24,7 @@ class FoamSEMDataset(torch.utils.data.Dataset):
         desired_shape,
         img_filename_suffix="_image.tif",
         mask_filename_suffix="_masks.tif",
+        transform=None,
         raw_transform=None,
         label_transform=None,
         sampler=None,
@@ -36,6 +37,7 @@ class FoamSEMDataset(torch.utils.data.Dataset):
         self.img_suffix = img_filename_suffix
         self.mask_suffix = mask_filename_suffix
         self.raw_transform = raw_transform
+        self.transform = transform
         self.label_transform = label_transform
         self.sampler = sampler
         self.max_sampler_retries = max_sampler_retries
@@ -122,6 +124,10 @@ class FoamSEMDataset(torch.utils.data.Dataset):
             mask = mask.astype(np.uint16)
 
         image_patch, mask_patch = self._sample_valid_patch(image, mask)
+
+        # augmentation
+        if self.transform is not None:
+            image_patch, mask_patch = self.transform(image_patch, mask_patch)
 
         if self.raw_transform is not None:
             image_patch = torch.from_numpy(image_patch)
