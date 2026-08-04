@@ -3,8 +3,6 @@
 *.vscode
 peft-sam-venv
 
-# Local machine-specific config (not tracked — use YAML per experiment)
-config.py
 
 checkpoints/
 */.ipynb_checkpoints/

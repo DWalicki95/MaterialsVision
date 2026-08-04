@@ -1,4 +1,11 @@
-# Rozmiar piksela w µm/px dla danego powiększenia (kalibracja SEM)
+# UWAGA: pixel_sizes to wartości mikroskopu TM3000, zachowane bez zmian dla
+# zgodności wstecz (load_pixel_sizes(), materials_vision.quantitative_analysis
+# .batch_analysis). Iloczyn PixelSize x Magnification jest stały PER
+# INSTRUMENT, ale różny między instrumentami
+
+# TODO
+# nowy kod powinien używać pixel_sizes_by_instrument, nie zakładać jednego
+# wspólnego słownika.
 pixel_sizes:
   40:   3.24023
   50:   2.59219
@@ -6,3 +13,19 @@ pixel_sizes:
   250:  0.51844
   500:  0.25922
   1000: 0.12961
+
+pixel_sizes_by_instrument:
+  TM3000:            # PixelSize x Magnification = 129609 nm (stała instrumentu)
+    40:   3.24023
+    50:   2.59219
+    100:  1.29609
+    250:  0.51844
+    500:  0.25922
+    1000: 0.12961
+  SU8000:            # PixelSize x Magnification = 99218.75 nm (stała instrumentu)
+    30:   3.307292
+    40:   2.480469
+    50:   1.984375
+    130:  0.7632211
+    200:  0.4960938
+    400:  0.2480469

@@ -1,0 +1,12 @@
+[SemImageFile]
+InstructName=TM3000
+SerialNumber=TEST-0002
+SampleName=
+Format=JPG
+ImageName=test.jpg
+Date=1/1/2024
+Time=12:00:00
+DataSize=not_a_size
+PixelSize=3240.23
+Magnification=40
+MicronMarker=2000000

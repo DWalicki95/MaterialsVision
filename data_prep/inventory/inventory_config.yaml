@@ -1,0 +1,23 @@
+manifest_version: v
+output_dir: /home/dwalicki/dane/manifests
+mask_root: /home/dwalicki/dane/masks
+
+sources:
+  - series: AS
+    images_dir: /home/dwalicki/dane/dane_treningowe/iteracja_2/AS1/project-26-at-2026-07-18-11-58-36ab6d72/images
+    label_studio_json: /home/dwalicki/dane/dane_treningowe/iteracja_2/AS1/project-26-at-2026-07-18-12-02-6adbbefa.json
+    sem_metadata_dirs:
+      - /mnt/d/foam_materials/Dane/dane_rzeczywiste/AS
+  - series: VAB
+    images_dir: /home/dwalicki/dane/dane_treningowe/iteracja_2/VAB/project-8-at-2026-07-18-12-14-a88cf974/images
+    label_studio_json: /home/dwalicki/dane/dane_treningowe/iteracja_2/VAB/project-8-at-2026-07-18-12-16-a88cf974.json
+    sem_metadata_dirs:
+      - /mnt/d/dane/SEM/SEM/11.10.2022
+      - "/mnt/d/dane/SEM/SEM/20.10.2022 GK"
+
+scale_outlier_ratio: 1.5
+fuzzy_cutoff: 0.85
+nonimage_extreme_fraction: 0.90
+nonimage_max_band_fraction: 0.35
+overlap_significant_fraction: 0.01
+pixel_size_tolerance: 0.01

@@ -22,6 +22,26 @@ def load_pixel_sizes() -> dict:
         return yaml.safe_load(f)["pixel_sizes"]
 
 
+def load_pixel_sizes_by_instrument() -> Dict[str, Dict[int, float]]:
+    """
+    Load SEM pixel size calibration grouped by instrument.
+
+    Unlike `load_pixel_sizes`, this preserves the fact that the same
+    nominal magnification maps to a different physical pixel size on
+    different SEM instruments (e.g. TM3000 40x is 3.24023 um/px, SU8000
+    40x is 2.480469 um/px) - the two are not interchangeable.
+
+    Returns
+    -------
+    dict
+        Mapping of instrument name (e.g. "TM3000", "SU8000") to a mapping
+        of magnification (int) to pixel size in µm/px (float).
+    """
+    path = Path(__file__).parent / "calibration" / "sem_calibration.yaml"
+    with open(path) as f:
+        return yaml.safe_load(f)["pixel_sizes_by_instrument"]
+
+
 def create_current_time_output_directory(dir_base_path: Path):
     """
     Create timestamped output directory.
