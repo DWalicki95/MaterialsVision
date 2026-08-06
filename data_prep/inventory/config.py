@@ -105,11 +105,22 @@ def _load_source(entry: dict) -> SourceConfig:
         raise ConfigError(
             f"Missing required source key: {e} in {entry}"
         ) from e
+
+    avoid_annotators_raw = entry.get("avoid_annotators", [])
+    if not isinstance(avoid_annotators_raw, list) or not all(
+        isinstance(a, int) for a in avoid_annotators_raw
+    ):
+        raise ConfigError(
+            f"[{series}] avoid_annotators must be a list of int: "
+            f"{avoid_annotators_raw!r}"
+        )
+
     return SourceConfig(
         series=series,
         images_dir=images_dir,
         label_studio_json=label_studio_json,
         sem_metadata_dirs=sem_metadata_dirs,
+        avoid_annotators=tuple(avoid_annotators_raw),
     )
 
 

@@ -413,7 +413,10 @@ def _process_one_image(
     )
 
     try:
-        selection = select_annotation(task, collector=collector)
+        selection = select_annotation(
+            task, collector=collector,
+            avoid_annotators=source.avoid_annotators,
+        )
     except AnnotationSelectionError as e:
         issue = collector.add(
             IssueLevel.FATAL, "annotation_none_available",

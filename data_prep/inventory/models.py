@@ -27,12 +27,21 @@ class SourceConfig:
         Label Studio JSON export; the authoritative image registry.
     sem_metadata_dirs : tuple of Path
         SEM sidecar root directories, searched in order.
+    avoid_annotators : tuple of int
+        ``completed_by`` IDs to avoid when selecting the mask-producing
+        annotation for this source. If the latest annotation
+        (``latest_updated_at_then_max_id``) belongs to one of these
+        annotators, ``select_annotation`` falls back to the latest
+        annotation among the remaining annotators, when one exists.
+        Empty by default, which reproduces the unconditional
+        latest-wins behaviour.
     """
 
     series: str
     images_dir: Path
     label_studio_json: Path
     sem_metadata_dirs: tuple[Path, ...]
+    avoid_annotators: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -251,8 +260,10 @@ class AnnotationSelection:
     annotation_completed_at : str
         ``updated_at`` of the selected annotation (ISO 8601 UTC).
     selection_rule : str
-        Name of the rule used, always
-        ``"latest_updated_at_then_max_id"`` in this implementation.
+        Name of the rule used: ``"latest_updated_at_then_max_id"``, or
+        ``"latest_updated_at_then_max_id+annotator_fallback"`` when the
+        source's ``avoid_annotators`` caused the selection to fall back
+        away from the globally latest annotation.
     annotation : Mapping
         The selected annotation dict itself (not written to the
         manifest, consumed by ``label_studio.iter_polygon_results``).

@@ -8,6 +8,7 @@ sources:
     label_studio_json: /home/dwalicki/dane/dane_treningowe/iteracja_2/AS1/project-26-at-2026-07-18-12-02-6adbbefa.json
     sem_metadata_dirs:
       - /mnt/d/foam_materials/Dane/dane_rzeczywiste/AS
+    avoid_annotators: [1]
   - series: VAB
     images_dir: /home/dwalicki/dane/dane_treningowe/iteracja_2/VAB/project-8-at-2026-07-18-12-14-a88cf974/images
     label_studio_json: /home/dwalicki/dane/dane_treningowe/iteracja_2/VAB/project-8-at-2026-07-18-12-16-a88cf974.json

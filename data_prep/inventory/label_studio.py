@@ -9,9 +9,9 @@ Note on collector parameters: as with ``series_profiles.parse``, the
 plan's pipeline sketch omits the ``IssueCollector`` argument from
 ``select_annotation``/``polygon_to_pixels``/``iter_polygon_results`` for
 brevity, but reporting "multiple annotations", "ground truth present",
-"empty annotation", "unexpected result type" and "LS/file dimension
-mismatch" (all required by the error taxonomy) needs it, so it is a
-required keyword argument here.
+"empty annotation", "unexpected result type", "LS/file dimension
+mismatch" and "annotator fallback" (all required by the error
+taxonomy) needs it, so it is a required keyword argument here.
 """
 import logging
 from typing import Any, Iterator, Mapping
@@ -26,6 +26,7 @@ from data_prep.inventory.models import AnnotationSelection
 logger = logging.getLogger(__name__)
 
 _SELECTION_RULE = "latest_updated_at_then_max_id"
+_SELECTION_RULE_WITH_FALLBACK = _SELECTION_RULE + "+annotator_fallback"
 
 
 def load_tasks(json_path) -> list[dict]:
@@ -54,7 +55,10 @@ def load_tasks(json_path) -> list[dict]:
 
 
 def select_annotation(
-    task: Mapping[str, Any], *, collector: IssueCollector
+    task: Mapping[str, Any],
+    *,
+    collector: IssueCollector,
+    avoid_annotators: tuple[int, ...] = (),
 ) -> AnnotationSelection:
     """Select the mask-producing annotation for one Label Studio task.
 
@@ -63,13 +67,24 @@ def select_annotation(
     take the last. ``ground_truth`` never affects the choice; a
     positive value is only reported for awareness.
 
+    If ``avoid_annotators`` is non-empty and the selected annotation's
+    ``completed_by`` is in it, the selection falls back to the latest
+    annotation (same rule) among the candidates whose ``completed_by``
+    is not in ``avoid_annotators``. If no such candidate exists, the
+    original (avoided) selection is kept.
+
     Parameters
     ----------
     task : Mapping
         One Label Studio task dictionary.
     collector : IssueCollector
-        Records ``multiple_annotations``, ``ground_truth_present`` and
-        ``empty_annotation`` (all INFO).
+        Records ``multiple_annotations``, ``ground_truth_present``,
+        ``empty_annotation``, ``annotator_fallback_applied`` and
+        ``annotator_fallback_unavailable`` (all INFO).
+    avoid_annotators : tuple of int, optional
+        ``completed_by`` IDs to fall back away from, per source
+        (``SourceConfig.avoid_annotators``). Empty by default, which
+        reproduces the unconditional latest-wins behaviour.
 
     Returns
     -------
@@ -95,6 +110,35 @@ def select_annotation(
         candidates, key=lambda a: (a["updated_at"], a["id"])
     )
     selected = candidates_sorted[-1]
+    selection_rule = _SELECTION_RULE
+
+    if avoid_annotators and selected["completed_by"] in avoid_annotators:
+        fallback_candidates = [
+            a for a in candidates_sorted
+            if a["completed_by"] not in avoid_annotators
+        ]
+        if fallback_candidates:
+            fallback_selected = fallback_candidates[-1]
+            collector.add(
+                IssueLevel.INFO,
+                "annotator_fallback_applied",
+                image_ref,
+                f"latest annotation id={selected['id']} by annotator "
+                f"{selected['completed_by']} avoided, selected "
+                f"id={fallback_selected['id']} by annotator "
+                f"{fallback_selected['completed_by']} instead",
+            )
+            selected = fallback_selected
+            selection_rule = _SELECTION_RULE_WITH_FALLBACK
+        else:
+            collector.add(
+                IssueLevel.INFO,
+                "annotator_fallback_unavailable",
+                image_ref,
+                f"latest annotation id={selected['id']} by annotator "
+                f"{selected['completed_by']} is avoided, but no "
+                f"annotation from another annotator exists; kept",
+            )
 
     if len(candidates) > 1:
         collector.add(
@@ -102,7 +146,7 @@ def select_annotation(
             "multiple_annotations",
             image_ref,
             f"{len(candidates)} annotations, selected "
-            f"id={selected['id']} (rule={_SELECTION_RULE})",
+            f"id={selected['id']} (rule={selection_rule})",
         )
     if any(a.get("ground_truth") for a in candidates):
         collector.add(
@@ -126,7 +170,7 @@ def select_annotation(
         mask_annotator=selected["completed_by"],
         mask_annotation_id=selected["id"],
         annotation_completed_at=selected["updated_at"],
-        selection_rule=_SELECTION_RULE,
+        selection_rule=selection_rule,
         annotation=selected,
     )
 
