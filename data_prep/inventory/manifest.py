@@ -28,9 +28,9 @@ from data_prep.inventory.label_studio import (iter_polygon_results, load_tasks,
 from data_prep.inventory.models import (InventoryConfig, ParsedName,
                                         SidecarRecord, SourceConfig)
 from data_prep.inventory.nonimage_region import detect_nonimage_region
-from data_prep.inventory.sem_sidecar import (check_pixel_size_consistency,
-                                             find_sidecar, interpret_sidecar,
-                                             parse_sidecar_file)
+from data_prep.inventory.sem_sidecar import (
+    INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM, check_pixel_size_consistency,
+    find_sidecar, interpret_sidecar, parse_sidecar_file)
 from data_prep.inventory.series_profiles import get_profile
 from materials_vision.utils import load_pixel_sizes_by_instrument
 
@@ -39,6 +39,62 @@ logger = logging.getLogger(__name__)
 # Which nominal instrument's pixel-size table to fall back to when a
 # series has no sidecar at all
 SERIES_TO_INSTRUMENT: dict[str, str] = {"AS": "TM3000", "VAB": "SU8000"}
+
+# InstructName (SEM control software identifier) -> logical microscope
+# label. TM3000 and SU8000 are the two physical microscopes used to
+# acquire this dataset; each has its own field-of-view calibration, so
+# knowing which one took an image matters wherever pixel size or panel
+# geometry is involved.
+INSTRUMENT_TO_MICROSCOPE: dict[str, str] = {"TM3000": "M1", "SU8000": "M2"}
+
+# Fallback for rows with no matched sidecar to read InstructName from
+# directly: each series was only ever scanned on one of the two
+# microscopes, so the series name alone still identifies it.
+_MICROSCOPE_FALLBACK_BY_SERIES: dict[str, str] = {
+    series: INSTRUMENT_TO_MICROSCOPE[instrument]
+    for series, instrument in SERIES_TO_INSTRUMENT.items()
+}
+
+# pixel_size_um x magnification is a hardware constant for a given
+# microscope (field of view scales inversely with magnification), so
+# this product should land near the same value regardless of which
+# image it's measured on. Used only as a sanity check on an
+# already-resolved `microscope` value, never to assign it - magnifi-
+# cation itself is sometimes missing or comes from an unreliable
+# source. Derived from sem_sidecar.INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM
+# (the same constant used to validate a sidecar's own internal
+# consistency) so the two checks cannot silently drift apart.
+MICROSCOPE_PRODUCT_UM: dict[str, float] = {
+    INSTRUMENT_TO_MICROSCOPE[instrument]: constant_nm / 1000.0
+    for instrument, constant_nm
+    in INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM.items()
+}
+
+# Height, in rows, of the bottom data panel (scale bar / acquisition
+# parameters) the SEM software burns into the image. Zero for M1
+# (series AS): those files already had the panel removed before
+# export, so the pixel detector never sees one there. Applied to each
+# row's own on-disk height in `_resolve_load_crop_bbox` rather than
+# hardcoded as an absolute pixel pair, so the same fixed-row-count
+# invariant holds even for a file with slightly different on-disk
+# dimensions (e.g. a `dimension_outlier` row), and for the smaller
+# synthetic images used in tests.
+PANEL_HEIGHT_ROWS_BY_MICROSCOPE: dict[str, int] = {"M1": 0, "M2": 70}
+
+# Pixel-size thresholds (um/px) separating coarse-scale images from
+# fine-scale ones, with a gap below the fine threshold reserved for
+# close-up outlier shots that aren't representative of either normal
+# scale.
+SCALE_BIN_COARSE_MIN_UM = 3.0
+SCALE_BIN_FINE_MIN_UM = 2.4
+
+# Reference pixel size for q_max_i = pixel_size_um / Q_REFERENCE_UM:
+# the finest (most zoomed-in) working scale in the dataset, from the
+# SU8000 microscope at 40x (see
+# materials_vision/calibration/sem_calibration.yaml). Expressing every
+# image's scale as a ratio against this reference gives one
+# comparable "how zoomed in is this" number across both microscopes.
+Q_REFERENCE_UM = 2.480469
 
 # Column order is the manifest's contract
 MANIFEST_COLUMNS: tuple[str, ...] = (
@@ -54,9 +110,11 @@ MANIFEST_COLUMNS: tuple[str, ...] = (
     "cross_section_redundancy_ok",
     # 5.4 C. scale
     "pixel_size_source", "pixel_size_raw_nm", "instrument",
+    "microscope", "microscope_source",
     "sem_serial_number", "acquired_at", "sem_datasize_w",
     "sem_datasize_h", "geometry_rescaled", "panel_cropped_px",
-    "pixel_size_consistency", "scale_outlier",
+    "load_crop_bbox",
+    "pixel_size_consistency", "scale_bin", "scale_outlier", "q_max_i",
     # 5.5 D. image properties
     "width_px", "height_px", "file_format", "bit_depth", "n_channels",
     "channels_identical",
@@ -412,6 +470,26 @@ def _process_one_image(
         pixel_sizes_by_instrument, collector,
     )
 
+    microscope, microscope_source = _resolve_microscope(
+        parsed, sidecar, pixel_size_um, magnification,
+        config.pixel_size_tolerance, collector,
+    )
+    load_crop_bbox = _resolve_load_crop_bbox(
+        microscope, props.width_px, props.height_px
+    )
+    if load_crop_bbox is not None and load_crop_bbox != region.content_bbox:
+        issue = collector.add(
+            IssueLevel.FATAL, "content_bbox_crop_mismatch",
+            parsed.image_id,
+            f"detected content_bbox={region.content_bbox} vs frozen "
+            f"load_crop_bbox={load_crop_bbox} (microscope="
+            f"{microscope!r}); PANEL_HEIGHT_ROWS_BY_MICROSCOPE may be "
+            f"stale for this data",
+        )
+        return None, issue
+    scale_bin = _scale_bin(pixel_size_um)
+    q_max_i = _q_max_i(pixel_size_um)
+
     try:
         selection = select_annotation(
             task, collector=collector,
@@ -455,7 +533,8 @@ def _process_one_image(
         sidecar, magnification, magnification_source,
         magnification_conflict, pixel_size_um, pixel_size_raw_nm,
         pixel_size_source, geometry_rescaled, panel_cropped_px,
-        pixel_size_consistency, selection, stats, config,
+        pixel_size_consistency, microscope, microscope_source,
+        load_crop_bbox, scale_bin, q_max_i, selection, stats, config,
     )
     return row, None
 
@@ -563,6 +642,113 @@ def _resolve_pixel_size(
     )
 
 
+def _resolve_microscope(
+    parsed: ParsedName,
+    sidecar: Optional[SidecarRecord],
+    pixel_size_um: Optional[float],
+    magnification: Optional[int],
+    tolerance: float,
+    collector: IssueCollector,
+) -> tuple[Optional[str], str]:
+    """Resolve which physical microscope acquired this image.
+
+    The sidecar's own InstructName wins whenever a sidecar was
+    matched - a direct instrument reading is the most reliable
+    source. Otherwise fall back to the per-series nominal instrument,
+    since each series was only ever scanned on one microscope.
+    pixel_size_um x magnification is never used to pick a value here
+    - it only feeds an independent sanity check against whichever
+    microscope was resolved above (see `_check_microscope_product`),
+    because that product can look right by coincidence and
+    `magnification` is not always reliable itself."""
+    instrument = sidecar.instrument if sidecar is not None else None
+    if instrument is not None and instrument in INSTRUMENT_TO_MICROSCOPE:
+        microscope = INSTRUMENT_TO_MICROSCOPE[instrument]
+        source = "sem_sidecar"
+    else:
+        microscope = _MICROSCOPE_FALLBACK_BY_SERIES.get(parsed.series)
+        source = "series_map" if microscope is not None else "none"
+
+    if microscope is not None:
+        _check_microscope_product(
+            parsed, microscope, pixel_size_um, magnification, tolerance,
+            collector,
+        )
+    return microscope, source
+
+
+def _check_microscope_product(
+    parsed: ParsedName,
+    microscope: str,
+    pixel_size_um: Optional[float],
+    magnification: Optional[int],
+    tolerance: float,
+    collector: IssueCollector,
+) -> None:
+    """Sanity-check the resolved `microscope` against an independent
+    physical fact: pixel_size_um x magnification is a hardware
+    constant for a given microscope (`MICROSCOPE_PRODUCT_UM`). A
+    mismatch only flags the row for review - it never changes
+    `microscope` itself, since the sidecar instrument or the series
+    fallback are more trustworthy sources. Skipped entirely when
+    either input is unknown."""
+    if pixel_size_um is None or magnification is None:
+        return
+    expected_um = MICROSCOPE_PRODUCT_UM.get(microscope)
+    if expected_um is None:
+        return
+    actual_um = pixel_size_um * magnification
+    if abs(actual_um - expected_um) / expected_um > tolerance:
+        collector.add(
+            IssueLevel.WARNING, "microscope_product_conflict",
+            parsed.image_id,
+            f"pixel_size_um*magnification={actual_um:.6g} vs "
+            f"{microscope} expected {expected_um:.6g}",
+        )
+
+
+def _resolve_load_crop_bbox(
+    microscope: Optional[str], width_px: int, height_px: int,
+) -> Optional[tuple[int, int, int, int]]:
+    """Compute the bounding box of this image's actual content,
+    excluding the bottom data panel if its microscope has one.
+    Computed from this image's own on-disk dimensions minus
+    `PANEL_HEIGHT_ROWS_BY_MICROSCOPE`, not hardcoded as an absolute
+    pixel pair - see that constant's comment for why. None when
+    `microscope` could not be resolved at all, since there is then no
+    panel height to subtract."""
+    if microscope not in PANEL_HEIGHT_ROWS_BY_MICROSCOPE:
+        return None
+    panel_rows = PANEL_HEIGHT_ROWS_BY_MICROSCOPE[microscope]
+    return (0, 0, width_px, height_px - panel_rows)
+
+
+def _scale_bin(pixel_size_um: Optional[float]) -> Optional[str]:
+    """Classify pixel_size_um into a scale bin using fixed
+    thresholds, not a rule relative to other images in the current
+    run: a relative rule would shift its own boundaries every time
+    the dataset changes, silently invalidating any split or
+    comparison that assumed stable bins. See
+    `_apply_global_validation` for a separate, purely informational
+    check against the per-series median."""
+    if pixel_size_um is None:
+        return None
+    if pixel_size_um >= SCALE_BIN_COARSE_MIN_UM:
+        return "coarse"
+    if pixel_size_um >= SCALE_BIN_FINE_MIN_UM:
+        return "fine"
+    return "outlier"
+
+
+def _q_max_i(pixel_size_um: Optional[float]) -> Optional[float]:
+    """q_max_i = pixel_size_um / Q_REFERENCE_UM: how many times more
+    zoomed-out this image's pixel size is than the dataset's finest
+    working scale."""
+    if pixel_size_um is None:
+        return None
+    return pixel_size_um / Q_REFERENCE_UM
+
+
 def _build_row(
     parsed: ParsedName,
     source: SourceConfig,
@@ -581,6 +767,11 @@ def _build_row(
     geometry_rescaled: bool,
     panel_cropped_px: Optional[int],
     pixel_size_consistency: Optional[str],
+    microscope: Optional[str],
+    microscope_source: str,
+    load_crop_bbox: Optional[tuple[int, int, int, int]],
+    scale_bin: Optional[str],
+    q_max_i: Optional[float],
     selection,
     stats,
     config: InventoryConfig,
@@ -621,14 +812,22 @@ def _build_row(
         "pixel_size_source": pixel_size_source,
         "pixel_size_raw_nm": pixel_size_raw_nm,
         "instrument": sidecar.instrument if sidecar else None,
+        "microscope": microscope,
+        "microscope_source": microscope_source,
         "sem_serial_number": sidecar.serial_number if sidecar else None,
         "acquired_at": sidecar.acquired_at if sidecar else None,
         "sem_datasize_w": sidecar.datasize_w if sidecar else None,
         "sem_datasize_h": sidecar.datasize_h if sidecar else None,
         "geometry_rescaled": geometry_rescaled,
         "panel_cropped_px": panel_cropped_px,
+        "load_crop_bbox": (
+            _bbox_to_str(load_crop_bbox)
+            if load_crop_bbox is not None else None
+        ),
         "pixel_size_consistency": pixel_size_consistency,
-        "scale_outlier": False,  # filled in global validation pass
+        "scale_bin": scale_bin,
+        "scale_outlier": scale_bin == "outlier",
+        "q_max_i": q_max_i,
         "width_px": props.width_px,
         "height_px": props.height_px,
         "file_format": props.file_format,
@@ -697,8 +896,10 @@ def _apply_global_validation(
     collector: IssueCollector,
 ) -> pd.DataFrame:
     """Apply checks that require the full, assembled manifest:
-    image_id uniqueness (defense in depth), duplicate file hashes,
-    scale outliers, and dimension outliers (issue-only, no column)."""
+    image_id uniqueness (defense in depth), duplicate file hashes, the
+    relative-scale diagnostic, and dimension outliers (all issue-only,
+    no column - scale_bin/scale_outlier are set per-row in
+    `_build_row` from the frozen absolute thresholds)."""
     duplicated_ids = df["image_id"][df["image_id"].duplicated()]
     for image_id in duplicated_ids.unique():
         collector.add(
@@ -719,21 +920,27 @@ def _apply_global_validation(
 
     for series, group in df.groupby("series"):
         known = group["pixel_size_um"].dropna()
-        if known.empty:
-            continue
-        median = known.median()
-        if median <= 0:
-            continue
-        for idx, value in known.items():
-            ratio = max(value / median, median / value)
-            if ratio > config.scale_outlier_ratio:
-                df.loc[idx, "scale_outlier"] = True
-                collector.add(
-                    IssueLevel.WARNING, "scale_outlier",
-                    df.loc[idx, "image_id"],
-                    f"pixel_size_um={value:.6g} vs series median "
-                    f"{median:.6g} (series={series})",
-                )
+        if not known.empty and known.median() > 0:
+            median = known.median()
+            for idx, value in known.items():
+                ratio = max(value / median, median / value)
+                if ratio > config.scale_outlier_ratio:
+                    # Purely informational: scale_bin/scale_outlier
+                    # are already set per-row from the fixed absolute
+                    # thresholds in _scale_bin. This separate check
+                    # flags rows that deviate a lot from their own
+                    # series' median even when the absolute rule does
+                    # not - useful for spotting future data that
+                    # looks inconsistent with the rest of its series
+                    # for a different reason than the fixed bins
+                    # catch.
+                    collector.add(
+                        IssueLevel.INFO,
+                        "scale_outlier_relative_diagnostic",
+                        df.loc[idx, "image_id"],
+                        f"pixel_size_um={value:.6g} vs series median "
+                        f"{median:.6g} (series={series})",
+                    )
 
         dims = list(
             zip(group["width_px"], group["height_px"])

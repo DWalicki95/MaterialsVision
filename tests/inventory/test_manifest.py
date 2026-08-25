@@ -144,6 +144,276 @@ class TestOverwriteProtection:
         write_artifacts(result, mini_dataset.config, overwrite=True)
 
 
+class TestMicroscopeAndScale:
+    def test_microscope_from_sidecar(self, mini_dataset):
+        result = build_manifest(mini_dataset.config)
+        row = result.manifest.set_index("image_id").loc["AS1_40_1"]
+        assert row["microscope"] == "M1"
+        assert row["microscope_source"] == "sem_sidecar"
+
+    def test_microscope_series_fallback_without_sidecar(
+        self, mini_dataset
+    ):
+        result = build_manifest(mini_dataset.config)
+        row = result.manifest.set_index("image_id").loc["AS1_40_2"]
+        assert row["microscope"] == "M1"
+        assert row["microscope_source"] == "series_map"
+
+    def test_vab_microscope_and_scale_bin(self, mini_dataset):
+        result = build_manifest(mini_dataset.config)
+        vab_id = "VAB1_prostopadly_m001"
+        row = result.manifest.set_index("image_id").loc[vab_id]
+        assert row["microscope"] == "M2"
+        assert row["microscope_source"] == "sem_sidecar"
+        assert row["scale_bin"] == "fine"
+        assert bool(row["scale_outlier"]) is False
+        assert abs(row["q_max_i"] - 1.0) < 1e-6
+        assert row["load_crop_bbox"] == "0,0,128,190"
+
+    def test_as_scale_bin_coarse_and_load_crop_bbox(self, mini_dataset):
+        result = build_manifest(mini_dataset.config)
+        row = result.manifest.set_index("image_id").loc["AS1_40_1"]
+        assert row["scale_bin"] == "coarse"
+        assert bool(row["scale_outlier"]) is False
+        assert row["load_crop_bbox"] == "0,0,128,96"
+
+
+class TestScaleOutlierRelativeDiagnostic:
+    def test_relative_deviation_is_info_not_column(self, tmp_path):
+        import json as jsonlib
+
+        import numpy as np
+        from PIL import Image
+
+        from data_prep.inventory.models import InventoryConfig, SourceConfig
+
+        images_dir = tmp_path / "images"
+        images_dir.mkdir()
+        sem_dir = tmp_path / "sem"
+        w, h = 64, 48
+
+        def _image(name):
+            rng = np.random.default_rng(0)
+            base = rng.integers(60, 200, size=(h, w), dtype=np.uint8)
+            rgb = np.stack([base, base, base], axis=-1)
+            Image.fromarray(rgb, mode="RGB").save(
+                images_dir / f"{name}.jpg"
+            )
+
+        def _sidecar(formulation, image_id, pixel_size_nm):
+            # find_sidecar looks up <formulation>/<image_id>.txt, where
+            # image_id is the parsed core name, not the raw LS/Roboflow
+            # filename (see ASProfile.sidecar_candidates).
+            path = sem_dir / formulation / f"{image_id}.txt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            lines = [
+                "[SemImageFile]", "InstructName=TM3000",
+                "Magnification=40", f"PixelSize={pixel_size_nm}",
+                f"DataSize={w}x{h}", "Format=JPG",
+            ]
+            path.write_text(
+                "\r\n".join(lines) + "\r\n", encoding="iso-8859-2"
+            )
+
+        # Both stay in the "coarse" absolute bin (>= 3.0 um/px), but
+        # their ratio (2.0x) exceeds the default scale_outlier_ratio
+        # (1.5x) around their shared series median (6.0 um/px) - the
+        # relative rule must flag the low one as a diagnostic without
+        # touching scale_bin/scale_outlier on either row.
+        name_low = "AS1_40_1_jpg.rf.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_image"
+        name_high = "AS2_40_1_jpg.rf.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_image"
+        _image(name_low)
+        _image(name_high)
+        _sidecar("AS1", "AS1_40_1", 3000.0)
+        _sidecar("AS2", "AS2_40_1", 9000.0)
+
+        def _task(task_id, name, ann_id):
+            return {
+                "id": task_id,
+                "data": {"image": f"/data/upload/1/{name}.jpg"},
+                "annotations": [{
+                    "id": ann_id, "completed_by": 1,
+                    "was_cancelled": False, "ground_truth": False,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                    "result": [],
+                }],
+            }
+
+        tasks = [_task(1, name_low, 1), _task(2, name_high, 2)]
+        ls_json = tmp_path / "export.json"
+        ls_json.write_text(jsonlib.dumps(tasks), encoding="utf-8")
+
+        config = InventoryConfig(
+            manifest_version="v1",
+            output_dir=tmp_path / "out",
+            mask_root=tmp_path / "masks",
+            sources=(
+                SourceConfig(
+                    series="AS", images_dir=images_dir,
+                    label_studio_json=ls_json,
+                    sem_metadata_dirs=(sem_dir,),
+                ),
+            ),
+        )
+
+        result = build_manifest(config)
+
+        assert bool(
+            result.manifest.set_index("image_id")
+            .loc["AS1_40_1", "scale_outlier"]
+        ) is False
+        assert bool(
+            result.manifest.set_index("image_id")
+            .loc["AS2_40_1", "scale_outlier"]
+        ) is False
+        codes = [i.code for i in result.issues]
+        assert "scale_outlier_relative_diagnostic" in codes
+        assert "scale_outlier" not in codes
+
+
+class TestMicroscopeProductConflict:
+    def test_product_mismatch_is_warning_not_reassignment(
+        self, tmp_path
+    ):
+        import json as jsonlib
+
+        import numpy as np
+        from PIL import Image
+
+        from data_prep.inventory.models import InventoryConfig, SourceConfig
+
+        images_dir = tmp_path / "images"
+        images_dir.mkdir()
+        sem_dir = tmp_path / "sem"
+        w, h = 64, 48
+
+        rng = np.random.default_rng(0)
+        base = rng.integers(60, 200, size=(h, w), dtype=np.uint8)
+        rgb = np.stack([base, base, base], axis=-1)
+        name = "AS1_40_1_jpg.rf.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_image"
+        Image.fromarray(rgb, mode="RGB").save(images_dir / f"{name}.jpg")
+
+        # InstructName=TM3000 (-> microscope M1) but PixelSize is the
+        # SU8000 40x nominal value: pixel_size_um * magnification is
+        # nowhere near MICROSCOPE_PRODUCT_UM["M1"] (~129.6). The
+        # conflict must be flagged, not silently reassign microscope.
+        sidecar_path = sem_dir / "AS1" / f"{name.split('_jpg')[0]}.txt"
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "[SemImageFile]", "InstructName=TM3000", "Magnification=40",
+            "PixelSize=2480.469", f"DataSize={w}x{h}", "Format=JPG",
+        ]
+        sidecar_path.write_text(
+            "\r\n".join(lines) + "\r\n", encoding="iso-8859-2"
+        )
+
+        task = {
+            "id": 1,
+            "data": {"image": f"/data/upload/1/{name}.jpg"},
+            "annotations": [{
+                "id": 1, "completed_by": 1,
+                "was_cancelled": False, "ground_truth": False,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "result": [],
+            }],
+        }
+        ls_json = tmp_path / "export.json"
+        ls_json.write_text(jsonlib.dumps([task]), encoding="utf-8")
+
+        config = InventoryConfig(
+            manifest_version="v1",
+            output_dir=tmp_path / "out",
+            mask_root=tmp_path / "masks",
+            sources=(
+                SourceConfig(
+                    series="AS", images_dir=images_dir,
+                    label_studio_json=ls_json,
+                    sem_metadata_dirs=(sem_dir,),
+                ),
+            ),
+        )
+
+        result = build_manifest(config)
+
+        row = result.manifest.set_index("image_id").loc["AS1_40_1"]
+        assert row["microscope"] == "M1"
+        assert row["microscope_source"] == "sem_sidecar"
+        codes = [i.code for i in result.issues]
+        assert "microscope_product_conflict" in codes
+
+
+class TestContentBboxCropMismatch:
+    def test_mismatch_aborts_build(self, tmp_path):
+        import json as jsonlib
+
+        import numpy as np
+        from PIL import Image
+
+        from data_prep.inventory.models import InventoryConfig, SourceConfig
+
+        images_dir = tmp_path / "images"
+        images_dir.mkdir()
+        sem_dir = tmp_path / "sem"
+        w, h = 128, 96
+
+        # No panel drawn at all, so detect_nonimage_region reports the
+        # full frame as content_bbox - but the sidecar resolves this
+        # row to microscope M2 (SU8000), whose frozen
+        # PANEL_HEIGHT_ROWS_BY_MICROSCOPE expects the bottom 70 rows
+        # cropped away. content_bbox and load_crop_bbox must disagree.
+        rng = np.random.default_rng(0)
+        base = rng.integers(60, 200, size=(h, w), dtype=np.uint8)
+        vab_name = "VAB1_prostopadla_VAB1_prostopadla_m001"
+        Image.fromarray(base, mode="L").save(
+            images_dir / f"{vab_name}.png"
+        )
+        sidecar_path = (
+            sem_dir / "VAB1 prostopadla" / "VAB1 prostopadla_m001.txt"
+        )
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "[SemImageFile]", "InstructName=SU8000", "Magnification=40",
+            "PixelSize=2480.469", f"DataSize={w}x{h}", "Format=tif",
+        ]
+        sidecar_path.write_text(
+            "\r\n".join(lines) + "\r\n", encoding="iso-8859-2"
+        )
+
+        task = {
+            "id": 1,
+            "data": {"image": f"/data/upload/2/{vab_name}.png"},
+            "annotations": [{
+                "id": 1, "completed_by": 1,
+                "was_cancelled": False, "ground_truth": False,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "result": [],
+            }],
+        }
+        ls_json = tmp_path / "export.json"
+        ls_json.write_text(jsonlib.dumps([task]), encoding="utf-8")
+
+        config = InventoryConfig(
+            manifest_version="v1",
+            output_dir=tmp_path / "out",
+            mask_root=tmp_path / "masks",
+            sources=(
+                SourceConfig(
+                    series="VAB", images_dir=images_dir,
+                    label_studio_json=ls_json,
+                    sem_metadata_dirs=(sem_dir,),
+                ),
+            ),
+        )
+
+        with pytest.raises(ManifestBuildAborted) as excinfo:
+            build_manifest(config)
+        codes = [i.code for i in excinfo.value.fatal_issues]
+        assert "content_bbox_crop_mismatch" in codes
+
+
 class TestImageIdCollision:
     def test_duplicate_image_id_aborts_build(self, tmp_path):
         import json as jsonlib

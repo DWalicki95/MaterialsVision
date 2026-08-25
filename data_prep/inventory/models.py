@@ -60,7 +60,13 @@ class InventoryConfig:
         One entry per data series, processed in this order.
     scale_outlier_ratio : float
         Ratio above the per-series median ``pixel_size_um`` (or its
-        reciprocal) beyond which a row is flagged ``scale_outlier``.
+        reciprocal) beyond which a row is recorded as an INFO-level
+        ``scale_outlier_relative_diagnostic`` issue. Diagnostic only:
+        it does not set ``scale_bin``/``scale_outlier``, which use the
+        fixed absolute thresholds in ``manifest.SCALE_BIN_COARSE_
+        MIN_UM`` / ``manifest.SCALE_BIN_FINE_MIN_UM`` instead, so
+        those bins stay stable across runs regardless of what else is
+        in the dataset.
     fuzzy_cutoff : float
         ``difflib.get_close_matches`` cutoff for cross-section
         canonicalization fallback.

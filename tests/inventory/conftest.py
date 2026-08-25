@@ -12,9 +12,19 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from data_prep.inventory.manifest import PANEL_HEIGHT_ROWS_BY_MICROSCOPE
 from data_prep.inventory.models import InventoryConfig, SourceConfig
 
 _AS_WIDTH, _AS_HEIGHT = 128, 96
+
+# The VAB (M2/SU8000) fixture image needs its own, taller height: it
+# must actually carry a bottom panel of PANEL_HEIGHT_ROWS_BY_MICROSCOPE
+# ["M2"] rows so detect_nonimage_region's content_bbox agrees with
+# manifest._resolve_load_crop_bbox (see _make_gray_image_with_panel).
+# Comfortably above panel_rows / nonimage_max_band_fraction (0.35
+# default) so the band detector's scan cap never truncates it.
+_VAB_PANEL_ROWS = PANEL_HEIGHT_ROWS_BY_MICROSCOPE["M2"]
+_VAB_HEIGHT = 260
 
 
 def _make_rgb_image(
@@ -32,6 +42,24 @@ def _make_gray_image(
     rng = np.random.default_rng(seed)
     base = rng.integers(60, 200, size=(height, width), dtype=np.uint8)
     Image.fromarray(base, mode="L").save(path)
+
+
+def _make_gray_image_with_panel(
+    path: Path, width: int, height: int, panel_rows: int, seed: int = 1
+) -> None:
+    """Grayscale image with a solid near-black bottom panel of
+    `panel_rows`, simulating the SU8000 data panel so
+    `detect_nonimage_region` actually reports a band - needed for
+    tests that exercise `load_crop_bbox` vs `content_bbox` agreement.
+    """
+    rng = np.random.default_rng(seed)
+    content_rows = height - panel_rows
+    content = rng.integers(
+        60, 200, size=(content_rows, width), dtype=np.uint8
+    )
+    panel = np.zeros((panel_rows, width), dtype=np.uint8)
+    full = np.concatenate([content, panel], axis=0)
+    Image.fromarray(full, mode="L").save(path)
 
 
 def _write_sidecar(path: Path, fields: dict) -> None:
@@ -158,14 +186,19 @@ def mini_dataset(tmp_path) -> MiniDataset:
     as_json = tmp_path / "as_export.json"
     as_json.write_text(json.dumps(as_tasks), encoding="utf-8")
 
-    # 7. Normal VAB image with a consistent sidecar.
+    # 7. Normal VAB image with a consistent sidecar. Height/panel are
+    # deliberately different from the AS images (see _VAB_HEIGHT):
+    # this is the M2 row that exercises load_crop_bbox vs
+    # content_bbox agreement.
     vab_name = "VAB1_prostopadla_VAB1_prostopadla_m001"
-    _make_gray_image(vab_images / f"{vab_name}.png", w, h)
+    _make_gray_image_with_panel(
+        vab_images / f"{vab_name}.png", w, _VAB_HEIGHT, _VAB_PANEL_ROWS,
+    )
     _write_sidecar(
         vab_sem / "VAB1 prostopadla" / "VAB1 prostopadla_m001.txt",
         {
             "InstructName": "SU8000", "Magnification": 40,
-            "PixelSize": 2480.469, "DataSize": f"{w}x{h}",
+            "PixelSize": 2480.469, "DataSize": f"{w}x{_VAB_HEIGHT}",
             "MicronMarker": 150000, "Format": "tif",
             "ImageName": "VAB1 prostopadla_m001.tif",
             "Date": "1/1/2026", "Time": "12:00:00",
@@ -173,7 +206,7 @@ def mini_dataset(tmp_path) -> MiniDataset:
     )
     vab_tasks = [
         _polygon_task(
-            201, f"/data/upload/2/{vab_name}.png", w, h, 201,
+            201, f"/data/upload/2/{vab_name}.png", w, _VAB_HEIGHT, 201,
         ),
     ]
     vab_json = tmp_path / "vab_export.json"

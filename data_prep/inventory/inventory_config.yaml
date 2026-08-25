@@ -1,4 +1,4 @@
-manifest_version: v1
+manifest_version: v2
 output_dir: /home/dwalicki/dane/manifests
 mask_root: /home/dwalicki/dane/masks
 

@@ -21,7 +21,12 @@ import pandas as pd
 from PIL import Image, ImageDraw
 
 from data_prep.inventory.issues import Issue
-from data_prep.inventory.manifest import InventoryResult
+from data_prep.inventory.manifest import (INSTRUMENT_TO_MICROSCOPE,
+                                          PANEL_HEIGHT_ROWS_BY_MICROSCOPE,
+                                          Q_REFERENCE_UM,
+                                          SCALE_BIN_COARSE_MIN_UM,
+                                          SCALE_BIN_FINE_MIN_UM,
+                                          InventoryResult)
 from data_prep.inventory.models import InventoryConfig
 from materials_vision.quantitative_analysis.stats_utils import \
     calculate_statistics
@@ -146,7 +151,7 @@ def write_dataset_summary(
     lines.append("")
     for column in (
         "series", "material", "formulation", "magnification",
-        "cross_section", "instrument",
+        "cross_section", "instrument", "microscope", "scale_bin",
     ):
         lines.append(f"### per `{column}`")
         lines.append("")
@@ -348,6 +353,18 @@ def write_run_metadata(
             "overlap_significant_fraction":
                 config.overlap_significant_fraction,
             "pixel_size_tolerance": config.pixel_size_tolerance,
+        },
+        # Fixed, code-level constants (not YAML-tunable) - recorded
+        # here so the manifest stays self-describing even as these
+        # values evolve across manifest_version bumps.
+        "derivation_rules": {
+            "version": "v2",
+            "scale_bin_coarse_min_um": SCALE_BIN_COARSE_MIN_UM,
+            "scale_bin_fine_min_um": SCALE_BIN_FINE_MIN_UM,
+            "q_reference_um": Q_REFERENCE_UM,
+            "instrument_to_microscope": INSTRUMENT_TO_MICROSCOPE,
+            "panel_height_rows_by_microscope":
+                PANEL_HEIGHT_ROWS_BY_MICROSCOPE,
         },
     }
 
