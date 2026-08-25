@@ -377,6 +377,30 @@ Dla finalnej polityki (i jej głównego konkurenta) można — zamiast polegać 
 
 Losowanie obrazów do batchy **proporcjonalne do liczebności, bez oversamplingu**, zamrożone dla wszystkich runów. Nierównowagę rzadkich podzbiorów (bin `fine` — 10.7%; rodziny K i VAB — 15.3%) monitorują metryki per `scale_bin`, per rodzina i per formulacja; ewentualna zmiana wag musiałaby nastąpić przed startem porównań i obowiązywać wszystkie runy — nigdy w trakcie. Świadoma konsekwencja: model bez augmentacji skali nauczy się głównie skali `coarse`, i to jest właśnie hipoteza, którą testuje F2.
 
+### Wynik wykonania (2026-08-25, [WYKONANE])
+
+Zaimplementowane jako `materials_vision/data/sampling.py` (`ProportionalImageSampler`) plus `materials_vision/data/split_io.py` (`load_split`). Konfiguracja trafia do metadanych runu przez `sampler_run_metadata()`.
+
+**Realna ekspozycja na `split_v1`** — przy `batch_size = 1` udział obrazów jest dokładnie udziałem kroków optymalizatora, więc te liczby raportuje się obok metryk per przekrój:
+
+| przekrój | obrazów TRAIN | udział kroków |
+|---|---:|---:|
+| AS | 422 | 85.4% |
+| K | 45 | 9.1% |
+| VAB | 27 | 5.5% |
+| `coarse` | 437 | 88.5% |
+| `fine` | 51 | 10.3% |
+| `outlier` | 6 | 1.2% |
+
+Epoka to **494 kroki**.
+
+**Dwa rozstrzygnięcia, których ten plan wcześniej nie zawierał** (podjęte przy wykonaniu, zamrożone):
+
+1. **Permutacja epoki, nie losowanie ze zwracaniem.** „Proporcjonalne do liczebności" nie odróżnia tych dwóch wariantów. Wybrano permutację: daje udziały dokładnie proporcjonalne w *każdej* epoce, a nie tylko w oczekiwaniu, i pozostawia „epokę" dobrze zdefiniowaną na potrzeby raportowania pomocniczego z I.7. Porównania nadal idą po krokach optymalizatora (V.1).
+2. **Sampler ma własny strumień RNG, odseparowany od augmentacji.** To warunek konieczny sparowanych porównań z X.1, a nie detal implementacyjny. `DataLoader(shuffle=True)` czerpie permutację z globalnego generatora torcha, którego stan zależy od tego, ile losowości zużyło wszystko inne — a to różni się między politykami augmentacji. B0 i FULL przy tym samym seedzie dostałyby wtedy **różną kolejność obrazów** i część zmierzonej różnicy byłaby szumem kolejności udającym efekt augmentacji. Permutacja jest więc zasiewana z lokalnego generatora, wyłącznie z pary `(run_seed, epoch)` przez `blake2b`. Zależność musi być jednostronna: augmentacja nie może wpływać na kolejność obrazów, odwrotnie może. Broni tego test `test_image_order_is_immune_to_augmentation_randomness`.
+
+**Bramka na TEST została domknięta tutaj, nie w kroku G.** Strażnikiem musi być ten, kto czyta plik splitu, a jest nim `load_split`: odczyt `subset="test"` bez `allow_test=True` podnosi `LockedTestSetError`, a odczyt z flagą zostawia wpis WARNING w logu. `load_split` opcjonalnie weryfikuje też `sha256` manifestu wobec metadanych splitu, więc split nie może po cichu przeżyć manifestu, z którego powstał.
+
 ---
 
 # CZĘŚĆ IV. PREPROCESSING I KOLEJNOŚĆ PIPELINE
@@ -994,7 +1018,13 @@ optimizer_config: ...
 scheduler_config: ...
 scheduler_horizon: = T_full
 input_preprocessing: ...
-sampler_config: ...
+sampler_config:                     # sampler_run_metadata(), III.7
+  split_id: split_v1
+  strategy: proportional_no_oversampling
+  ordering: epoch_permutation
+  n_images: 494                     # = steps_per_epoch
+  run_seed: ...                     # zasiew permutacji, osobny od augmentacji
+  exposure: {material: ..., scale_bin: ...}
 inference_mode: ais
 watershed_params: ...
 T_full: ...
@@ -1090,7 +1120,8 @@ Promocja pozytywnego kandydata = wznowienie tego samego runu z 60% do 100%, nie 
 | Baseline atrybucji | B0 = brak augmentacji, 3 seedy |
 | Ablacja | pełna leave-one-family-out z FULL |
 | Model wdrożeniowy | trening na wszystkich 31 formulacjach |
-| Sampler obrazów | proporcjonalny, bez oversamplingu, zamrożony |
+| Sampler obrazów | proporcjonalny, bez oversamplingu, zamrożony; permutacja epoki, własny strumień RNG z `(run_seed, epoch)` — **zaimplementowane**, III.7 |
+| Odczyt zbioru TEST | wyłącznie przez `load_split(..., allow_test=True)`, z wpisem WARNING w logu — **zaimplementowane**, III.7 |
 | Min. instancji w cropie | 3; do 5 prób; fallback q = 1.0 |
 | `A_min_fragment` | P1 powierzchni instancji GT z TRAIN |
 | Zakres q skali | `q_max = 1.30` dla `coarse`, `q = 1.00` dla `fine` i `outlier` (bramka zaliczona: 1.25–1.33) |
@@ -1204,18 +1235,21 @@ D. [WYKONANE] Grupowy podział TRAIN/VAL/TEST — split `split_v1`,
    z III.4 spełnione; zero obrazów `scale_outlier` straconych.
    A_min_fragment = 432.0 px². Szczegóły i pełny raport: III.5
    "Wynik wykonania".
-   POZOSTAJE DO KROKU G: bramka na TEST. Split jednoznacznie wskazuje
-   zbiór testowy, ale nie istnieje jeszcze kod, który by go bronił —
-   wczytanie `split == "test"` musi wymagać jawnej flagi i być
-   logowane. Nie da się tego umieścić wcześniej, bo dataloader
-   powstaje dopiero w kroku G.
+   Bramka na TEST: domknięta w kroku E (`load_split`, III.7) — strażnikiem
+   jest czytnik pliku splitu, a nie dataloader, więc nie trzeba było
+   czekać na krok G.
    UWAGA: dotychczasowy skrypt dzielący per obraz nie może być użyty —
    dzieli bez grupowania po formulacji, czyli generuje przeciek (III.3).
    Wyniki wcześniejszych eksperymentów uzyskane na tamtym podziale nie są
    porównywalne z tym eksperymentem. Skrypt
    `data_prep/split_dataset_into_subsets.py` jest oznaczony jako
    DEPRECATED; obowiązujący jest `scripts/create_dataset_split.py`.
-E. Zamrożenie samplera obrazów.
+E. [WYKONANE] Zamrożenie samplera obrazów: proporcjonalny, bez
+   oversamplingu, permutacja epoki, własny strumień RNG zasiewany
+   z `(run_seed, epoch)`. Ekspozycja na `split_v1`: AS 85.4%,
+   K 9.1%, VAB 5.5%, `fine` 10.3%; epoka = 494 kroki.
+   Przy okazji domknięta bramka na TEST (`load_split`). Szczegóły
+   i oba nowe rozstrzygnięcia: III.7 "Wynik wykonania".
 F. (Opcjonalnie) P0: wybór bazowego checkpointu → zamrożenie.
 G. Zamrożenie Micro-SAM + LoRA + dekodera AIS + preprocessingu (w tym docięcia
    do load_crop_bbox i skali ×0.8) + postprocessingu.
