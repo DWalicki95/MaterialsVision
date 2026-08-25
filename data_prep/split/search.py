@@ -5,10 +5,10 @@ formulations.
 Why a search and not ``StratifiedGroupKFold``: the stratification
 cell ``VAB x coarse`` contains exactly one formulation (VAB1, the only
 VAB formulation with 30x images), which no three-way stratified
-splitter can distribute; the plan additionally imposes hard conditions
-that a splitter has no way to express (both scale bins present in
-every set, at least one M2 formulation per set, minimum cross-section
-sizes), and it needs the balance measured on *images and instances*
+splitter can distribute; there are additional hard conditions that a
+splitter has no way to express (both scale bins present in every set,
+at least one M2 formulation per set, minimum cross-section sizes);
+and the balance has to be measured on *images and instances*
 while the group quota is expressed in *formulations*.
 
 The procedure is: fix the formulation quota per material, generate
@@ -186,8 +186,8 @@ def search_split(
         raise SplitSearchError(
             f"No admissible split among {config.n_candidates} "
             f"candidate(s) with seed {config.seed}. Relax the hard "
-            f"constraints or revisit the quota - the conditions of "
-            f"III.4 may be unsatisfiable for this manifest."
+            f"constraints or revisit the quota - they may be jointly "
+            f"unsatisfiable for this manifest."
         )
 
     feasible_share = n_feasible / config.n_candidates

@@ -578,8 +578,11 @@ def _resolve_magnification(
     sidecar: Optional[SidecarRecord],
     collector: IssueCollector,
 ) -> tuple[Optional[int], str, bool]:
-    """Resolve magnification per the plan's source precedence
-    (section 6.1): sidecar wins, filename is the cross-check."""
+    """Resolve magnification: the SEM sidecar wins, the filename is
+    only a cross-check. The sidecar is written by the microscope, while
+    a filename is typed by a human and can be wrong; a disagreement is
+    recorded as ``magnification_conflict`` rather than resolved in the
+    filename's favour."""
     sidecar_mag = sidecar.magnification if sidecar is not None else None
     name_mag = parsed.magnification_from_name
 
@@ -606,7 +609,9 @@ def _resolve_pixel_size(
     collector: IssueCollector,
 ) -> tuple[Optional[float], Optional[float], str, bool, Optional[int]]:
     """Resolve pixel_size_um, its provenance, and the Roboflow-rescale
-    correction, per the plan's source precedence (section 6.1)."""
+    correction. Same precedence as magnification: the SEM sidecar is
+    authoritative, and a nominal per-magnification value is only a
+    fallback for images whose sidecar is missing."""
     pixel_size_raw_nm = (
         sidecar.pixel_size_raw_nm if sidecar is not None else None
     )

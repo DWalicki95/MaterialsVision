@@ -6,7 +6,8 @@ This splitter works per image and stratifies by material only, so
 images of one formulation end up in different subsets. Since all
 images of a formulation come from a single synthesis and are strongly
 correlated, that is data leakage: evaluation would score the model on
-material it effectively saw in training (experiment plan, III.3).
+material it effectively saw in training, and the numbers come out
+inflated.
 
 Use ``scripts/create_dataset_split.py`` instead - it groups by
 formulation, stratifies by ``material x scale_bin`` and freezes the

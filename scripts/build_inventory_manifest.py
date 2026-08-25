@@ -181,8 +181,9 @@ def main() -> int:
     -------
     int
         Process exit code: 0 success, 1 completed with ERROR-level
-        issues (some images dropped), 2 fatal (no artifacts written).
-        See the inventory plan, section 8.3.
+        issues (some images were dropped, but the manifest was still
+        written and the validation report says which and why), 2 fatal
+        (no artifacts written at all).
     """
     args = build_parser().parse_args()
     setup_logging(

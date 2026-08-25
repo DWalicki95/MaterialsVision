@@ -1,17 +1,20 @@
 """Label Studio export adapter: task loading, annotation selection, and
 polygon coordinate conversion.
 
-The Label Studio JSON export is the authoritative image registry (not
-the images directory listing, see the inventory plan section 4.5). This
-module never touches the filesystem beyond reading the export itself.
+The Label Studio JSON export is the authoritative image registry, not
+the images directory listing: an image on disk that nobody annotated
+is not part of the dataset, and the export is the only record of what
+was actually annotated. This module never touches the filesystem
+beyond reading the export itself.
 
-Note on collector parameters: as with ``series_profiles.parse``, the
-plan's pipeline sketch omits the ``IssueCollector`` argument from
-``select_annotation``/``polygon_to_pixels``/``iter_polygon_results`` for
-brevity, but reporting "multiple annotations", "ground truth present",
+Note on collector parameters: ``select_annotation``,
+``polygon_to_pixels`` and ``iter_polygon_results`` all take an
+``IssueCollector`` as a required keyword argument. They have to -
+each can encounter a condition that must be reported rather than
+silently resolved ("multiple annotations", "ground truth present",
 "empty annotation", "unexpected result type", "LS/file dimension
-mismatch" and "annotator fallback" (all required by the error
-taxonomy) needs it, so it is a required keyword argument here.
+mismatch", "annotator fallback"), and nothing may vanish from the
+run's record.
 """
 import logging
 from typing import Any, Iterator, Mapping

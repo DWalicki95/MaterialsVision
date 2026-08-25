@@ -27,11 +27,10 @@ def rasterize_annotation(
     Rasterize polygons (in export order) into a dense label image.
 
     Painting order follows the Label Studio export order, so at
-    overlapping pixels the later polygon wins - this is the "last
-    wins" default for the overlap-resolution rule the plan leaves as
-    an open decision; it is not applied to any
-    downstream training step here, only to this inventory's own
-    instance statistics.
+    overlapping pixels the later polygon wins. That "last wins" rule
+    is a local default, not a project-wide decision on how annotation
+    overlaps should be resolved: it affects only the instance
+    statistics computed in this module, never any training target.
 
     Parameters
     ----------

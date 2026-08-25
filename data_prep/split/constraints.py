@@ -1,9 +1,13 @@
 """
 Aggregation of a candidate assignment into per-set statistics, and the
-hard admissibility conditions of the experiment plan (section III.4).
+hard conditions a split must satisfy to be usable at all.
 
-Constraints are checked before any scoring: an inadmissible candidate
-is never compared against an admissible one.
+The conditions encode what the evaluation has to be able to report: a
+set that lacks one of the microscopes cannot measure cross-microscope
+transfer, and a set that lacks one of the scale bins cannot show
+whether the model generalizes across resolutions. Constraints are
+checked before any scoring, so an inadmissible candidate is never
+compared against an admissible one.
 """
 import logging
 from typing import Mapping, Sequence
@@ -75,7 +79,7 @@ def aggregate(
 def check_constraints(
     stats: Mapping[str, SetStats], constraints: SplitConstraints
 ) -> list[str]:
-    """Check a candidate split against the hard conditions of III.4.
+    """Check a candidate split against the hard conditions.
 
     Parameters
     ----------
@@ -116,7 +120,7 @@ def check_constraints(
             violations.append(
                 f"{name}: {s.n_fine} 'fine' image(s), needs >= "
                 f"{constraints.min_eval_fine_images} for a reportable "
-                f"per-scale_bin cross-section (E2 decision)"
+                f"per-scale_bin cross-section"
             )
         for material, minimum in (
             constraints.min_eval_images_by_material.items()

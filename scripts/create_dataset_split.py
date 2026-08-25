@@ -12,9 +12,10 @@ every run of the augmentation experiment, so writing over an existing
 split_id requires an explicit ``--overwrite``.
 
 This supersedes ``data_prep/split_dataset_into_subsets.py``, which
-splits per image and therefore leaks images of one formulation across
-sets (plan III.3). Results obtained on that older split are not
-comparable with this experiment.
+splits per image and therefore scatters images of one formulation
+across sets. Since those images come from a single synthesis and are
+strongly correlated, that inflates evaluation scores, and results
+obtained on such a split are not comparable with this experiment.
 
 Examples
 --------
@@ -183,9 +184,9 @@ def main() -> int:
     -------
     int
         Process exit code: 0 success, 1 the chosen split violates a
-        hard condition of III.4 (artifacts are still written, so the
-        violation can be inspected, but the split must not be frozen),
-        2 fatal (nothing written).
+        hard condition (artifacts are still written, so the violation
+        can be inspected, but the split must not be frozen), 2 fatal
+        (nothing written).
     """
     args = build_parser().parse_args()
     setup_logging(

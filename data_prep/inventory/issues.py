@@ -37,8 +37,10 @@ class Issue:
     level : IssueLevel
         Severity, see ``IssueLevel``.
     code : str
-        Short machine-readable code, one of the taxonomy in the plan
-        (e.g. ``"sidecar_missing"``, ``"magnification_conflict"``).
+        Short machine-readable code naming the kind of problem, e.g.
+        ``"sidecar_missing"`` or ``"magnification_conflict"``. Codes
+        are grouped by this value in the validation report, so reuse
+        an existing one rather than inventing a near-synonym.
     image_ref : str
         ``image_id`` if already known, otherwise the raw source filename.
     detail : str

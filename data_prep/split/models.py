@@ -42,10 +42,14 @@ class CostWeights:
         distort the argmin without expressing a real preference.
     lost_outlier_image : float
         Penalty per ``scale_outlier`` image that ends up outside
-        TRAIN. Such an image is dropped entirely: grouping by
-        formulation wins over the plan's "outliers stay in TRAIN"
-        rule, because relocating it alone would split its formulation
-        across two sets and reintroduce the leakage of III.3.
+        TRAIN. Such an image is unusable for evaluation - its
+        resolution is several times finer than the rest, so it is a
+        visually different task - and it is dropped entirely rather
+        than moved back to TRAIN on its own, which would split its
+        formulation across two sets and let the model be scored on
+        material it trained on. The penalty is small because the loss
+        is small; it only nudges the search away from splits that
+        waste those few images.
     """
 
     images: float = 3.0
@@ -78,9 +82,10 @@ class SplitConstraints:
     """Hard admissibility conditions a candidate split must satisfy.
 
     A candidate failing any of these is rejected outright and never
-    scored. They encode the plan's section III.4 requirements plus the
-    minimum cross-section sizes below which a reported per-material or
-    per-scale number would not support any conclusion.
+    scored. They encode what the evaluation must be able to report -
+    both microscopes and both scale bins present in every set - plus
+    the minimum cross-section sizes below which a reported
+    per-material or per-scale number would not support any conclusion.
 
     Parameters
     ----------
@@ -92,10 +97,14 @@ class SplitConstraints:
         Minimum images of each of ``coarse`` and ``fine`` in every
         set.
     min_eval_fine_images : int
-        Minimum ``fine`` images in VALIDATION and in TEST. The F2
-        (multi-scale crop) decision rests on the per-``scale_bin``
-        cross-section, so a set that cannot report it is useless for
-        E2 regardless of its global metric.
+        Minimum ``fine`` images in VALIDATION and in TEST. The ``fine``
+        bin is about a tenth of the dataset, so a global metric is
+        dominated by ``coarse`` and says almost nothing about how the
+        model handles the other resolution. Deciding whether
+        scale-varying augmentation helps therefore rests on the
+        per-``scale_bin`` cross-section, and a set too thin to report
+        it is useless for that decision however good its global
+        metric looks.
     min_eval_images_by_material : Mapping[str, int]
         Minimum evaluable images per material in VALIDATION and in
         TEST, keyed by material. Materials absent from the mapping are
@@ -122,11 +131,17 @@ class MinFragmentAreaConfig:
         no per-instance areas, so they are recomputed from polygons.
     percentile : float
         Percentile of the TRAIN instance-area distribution to freeze,
-        in percent (the plan specifies P1).
+        in percent. Set low (P1) on purpose: the value becomes the
+        floor below which a clipped instance fragment is discarded,
+        and the intent is to never create a label smaller than
+        anything an annotator actually drew.
     exclude_scale_outlier : bool
-        Whether to exclude ``scale_outlier`` images from the
-        calibration, consistent with their exclusion from the ``q``
-        calibration in III.1. Both values are always reported.
+        Whether to exclude ``scale_outlier`` images - the handful of
+        close-ups several times finer than the rest - from the
+        calibration. Instance area in pixels grows with the square of
+        the resolution, so leaving them in would drag the threshold
+        upward on evidence that does not represent the dataset. Both
+        values are always reported.
     """
 
     inventory_config: Path

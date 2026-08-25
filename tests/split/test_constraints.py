@@ -1,4 +1,4 @@
-"""Tests for candidate aggregation and the hard conditions of III.4."""
+"""Tests for candidate aggregation and the hard split conditions."""
 from data_prep.split.constraints import (aggregate, check_constraints,
                                          is_admissible)
 from data_prep.split.models import SplitConstraints

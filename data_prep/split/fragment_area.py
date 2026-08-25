@@ -1,11 +1,13 @@
 """
-Calibration of ``A_min_fragment`` on TRAIN (plan V.2, XVI.2).
+Calibration of ``A_min_fragment`` on TRAIN.
 
-``A_min_fragment`` is the P1 percentile of the ground-truth instance
-area distribution: the multi-scale crop of F2 keeps a clipped instance
-fragment only when it is at least this large, on the principle that we
-never manufacture a label smaller than anything an annotator actually
-drew.
+``A_min_fragment`` is a low percentile (P1) of the ground-truth
+instance area distribution. Training crops cut through pores at their
+edges, and the resulting fragment is kept as a label only when it is
+at least this large - the principle being that we never manufacture a
+label smaller than anything an annotator actually drew. A low
+percentile is what makes that threshold defensible: it sits just under
+the smallest real annotations.
 
 The manifest cannot answer this - it stores per-image minimum, median
 and maximum equivalent diameters, not per-instance areas - so the
@@ -14,13 +16,16 @@ inventory's own rasterizer.
 
 Two properties of this measurement matter:
 
-- it runs on TRAIN only, because the value feeds a training-time
-  transform and calibrating it on VALIDATION or TEST would leak;
+- it runs on TRAIN only. The value feeds a training-time transform,
+  and measuring it on VALIDATION or TEST would let information from
+  the evaluation sets influence how the model is trained;
 - it is measured *after* the deterministic crop to ``load_crop_bbox``,
-  because that is the geometry every instance actually has by the time
-  F2 sees it. For the K/VAB subseries this is not a detail: every one
-  of the 108 M2 images has at least one instance reaching into the
-  cropped-away information panel (plan IV.1, check C5).
+  the box that removes the microscope's information panel from the
+  bottom of the frame. That is the geometry instances actually have by
+  the time any training crop sees them. For images from the microscope
+  that leaves the panel in the file this is not a detail: every one of
+  those 108 images has at least one annotated pore reaching into the
+  panel area, so their areas before and after the crop differ.
 """
 import logging
 from typing import Mapping, Optional, Sequence

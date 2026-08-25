@@ -1,9 +1,11 @@
 """Tests for the frozen image sampler.
 
 The load-bearing test here is
-``test_image_order_is_immune_to_augmentation_randomness``: it is the
-only one that actually defends the paired-comparison assumption of the
-experiment plan (X.1).
+``test_image_order_is_immune_to_augmentation_randomness``. The
+experiment attributes a metric difference between two runs to the
+augmentation policy that differed between them; that only holds if the
+runs saw the same images in the same order, and this is the one test
+that checks it.
 """
 import pytest
 import torch

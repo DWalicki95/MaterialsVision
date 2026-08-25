@@ -133,8 +133,9 @@ def build_formulation_profiles(
     ------
     SplitDataError
         If ``check_grouping_integrity`` would fail, or a formulation
-        has no microscope assigned (which would make the M2 coverage
-        condition of III.4 unverifiable).
+        has no microscope assigned - without it there is no way to
+        check that every set contains images from both microscopes,
+        which is what makes cross-microscope transfer measurable.
     """
     violations = check_grouping_integrity(df)
     if violations:

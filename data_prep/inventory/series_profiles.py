@@ -1,20 +1,21 @@
 """Registry of per-series filename parsers.
 
-The AS and VAB/K series use unrelated filename conventions (see the
-inventory plan, section 4.1): AS encodes magnification in the name and
-never has a cross-section; VAB/K never encodes magnification but always
-repeats formulation+cross-section twice. A single regex covering both
-would be unreadable and fragile, so each series gets its own
-``SeriesProfile`` implementation bundling: the filename parser, the
-sidecar path convention, and a lightweight series-consistency check.
+The AS and VAB/K series use unrelated filename conventions: AS encodes
+magnification in the name and never has a cross-section; VAB/K never
+encodes magnification but always repeats formulation+cross-section
+twice. A single regex covering both would be unreadable and fragile,
+so each series gets its own ``SeriesProfile`` implementation bundling:
+the filename parser, the sidecar path convention, and a lightweight
+series-consistency check.
 
-Note on ``parse()`` signature: the plan's pipeline sketch shows a bare
-``profile.parse(stem)`` call, but the ``ParsedName.cross_section`` field
-is documented as already canonical. Producing a canonical value requires
-the run-scoped ``IssueCollector`` (fuzzy cross-section matches must be
-reported, see ``cross_section.py``), so ``parse()`` takes it as a
-required keyword argument. ``ASProfile`` ignores it (no cross-section to
-resolve) but must accept it for polymorphic use via ``SeriesProfile``.
+Note on ``parse()`` signature: it takes the run-scoped
+``IssueCollector`` as a required keyword argument, even though a bare
+``parse(stem)`` would look tidier. ``ParsedName.cross_section`` is
+guaranteed canonical, and canonicalizing it can involve a fuzzy match
+that must be reported rather than applied silently (see
+``cross_section.py``). ``ASProfile`` has no cross-section to resolve
+and ignores the collector, but must still accept it to stay
+interchangeable through ``SeriesProfile``.
 """
 import re
 from abc import ABC, abstractmethod

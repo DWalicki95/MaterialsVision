@@ -7,8 +7,9 @@ convenience: the test set can only be guarded by whoever opens the
 file, so the lock lives here rather than in any single dataloader.
 
 The split itself is produced once by
-``scripts/create_dataset_split.py`` (experiment plan, step D) and is
-never regenerated per run.
+``scripts/create_dataset_split.py`` and then reused unchanged by every
+training run, so that results from different runs stay comparable. It
+is never regenerated per run.
 """
 import hashlib
 import json
@@ -37,8 +38,13 @@ class SplitLoadError(ValueError):
 class LockedTestSetError(RuntimeError):
     """Raised on any attempt to read TEST without unlocking it.
 
-    TEST is opened exactly once, after the augmentation policy is
-    frozen (plan III.4, XII.2). Requiring an explicit flag makes an
+    TEST is held back untouched until the very end of the experiment
+    and opened exactly once, to produce the headline numbers. It must
+    take part in no decision along the way - every choice of
+    hyperparameter, checkpoint or augmentation policy is made on
+    VALIDATION - because a test set consulted during development stops
+    measuring generalization and starts measuring how well the
+    development loop fitted it. Requiring an explicit flag makes an
     accidental read impossible and a deliberate one visible in the
     log.
     """
@@ -61,8 +67,10 @@ class SplitSubset:
         Rows of this subset dropped because ``used`` was False, i.e.
         ``scale_outlier`` images whose formulation landed outside
         TRAIN. They follow their formulation and are discarded rather
-        than relocated, since relocating them would split a
-        formulation across two sets (plan III.3).
+        than relocated: all images of one formulation come from a
+        single synthesis and are strongly correlated, so putting some
+        in TRAIN and others in an evaluation set would let the model
+        be scored on material it effectively trained on.
     """
 
     split_id: str
@@ -175,10 +183,10 @@ def load_split(
         )
     if subset == "test" and not allow_test:
         raise LockedTestSetError(
-            "TEST is locked. It is opened exactly once, after the "
-            "augmentation policy is frozen (plan XII.2), and never "
-            "participates in a decision. Pass allow_test=True only "
-            "when that moment has come."
+            "TEST is locked. It is opened exactly once, at the end of "
+            "the experiment, and takes part in no decision before "
+            "that - development choices are made on VALIDATION. Pass "
+            "allow_test=True only when that final moment has come."
         )
 
     if not split_csv.exists():

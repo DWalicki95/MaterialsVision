@@ -3,10 +3,16 @@ Split artifacts: the per-image assignment table, the human-readable
 split report, and the run metadata that makes the split reproducible.
 
 None of this module decides anything about the split - it renders what
-``search.search_split`` already chose. The report is the deliverable
-required by the plan's section III.5, steps 7 and 8: the per-set
+``search.search_split`` already chose. The report carries the per-set
 distribution of materials, microscopes and scale bins with counts, and
-an explicit verification of the hard conditions of III.4.
+an explicit verification of the hard conditions, so that whoever reads
+the split later can see what it contains and that it was admissible
+without rerunning the search.
+
+The report text itself is written in Polish and does cite the
+experiment plan by section: it is a methodological artifact read
+alongside that document. Docstrings and comments in this module do
+not, since they are read alongside the code.
 """
 import json
 import logging
@@ -41,11 +47,10 @@ def write_split_table(
     """Write the per-image split assignment as CSV.
 
     One row per manifest image. ``scale_outlier`` images outside TRAIN
-    carry ``used = False``: grouping by formulation wins over the
-    plan's "outliers stay in TRAIN" rule, because moving such an image
-    on its own would put one formulation in two sets and reintroduce
-    the leakage of III.3. The column makes that loss explicit and
-    countable rather than implicit.
+    carry ``used = False``: they are dropped rather than moved back to
+    TRAIN on their own, which would put one formulation in two sets
+    and let the model be scored on material it trained on. The column
+    makes that loss explicit and countable rather than implicit.
 
     Parameters
     ----------
@@ -98,7 +103,7 @@ def write_split_report(
     config: SplitConfig,
     fragment_area: Optional[FragmentAreaResult],
 ) -> Path:
-    """Write the Markdown split report (plan III.5, steps 7 and 8).
+    """Write the Markdown split report.
 
     Parameters
     ----------
@@ -220,7 +225,12 @@ def _przekroje_section(result: SplitResult) -> list[str]:
 def _warunki_section(
     result: SplitResult, config: SplitConfig
 ) -> list[str]:
-    """Explicit verification of the hard conditions (III.5, step 8)."""
+    """Render the hard-condition check as positive evidence.
+
+    When the split is admissible this section lists the conditions as
+    satisfied rather than saying nothing, so the report shows what was
+    verified instead of leaving it to be assumed.
+    """
     violations = check_constraints(result.stats, config.constraints)
     lines = ["## Weryfikacja twardych warunkow (III.4)", ""]
     if violations:

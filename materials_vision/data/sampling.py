@@ -1,7 +1,7 @@
 """
 Order in which TRAIN images reach the optimizer.
 
-The policy is frozen by the experiment plan (III.7): draw images
+The policy is frozen for every run of the experiment: draw images
 **proportionally to their counts, with no oversampling**. At
 ``batch_size = 1`` one optimizer step is one image, so this ordering
 *is* the effective training distribution - there is no batch averaging
@@ -10,19 +10,24 @@ steps, K about 9%, VAB about 5.5%, and the ``fine`` scale bin about
 10%.
 
 That imbalance is a condition of the experiment, not a defect to
-repair. The F2 hypothesis is precisely that a model trained without
+repair. One of the hypotheses under test is precisely that a model
+trained without
 scale augmentation learns mostly the ``coarse`` scale; oversampling
 ``fine`` would answer that question with the sampler instead of with
 the augmentation, and the same argument applies to K/VAB and
 cross-microscope transfer. The rare cross-sections are watched through
 per-``scale_bin``, per-material and per-formulation metrics instead.
 
-**The sampler owns its own random stream.** This is the part that
-makes the paired comparisons of X.1 real rather than nominal. A
+**The sampler owns its own random stream.** The experiment compares
+augmentation policies in pairs: the same seed is run under two
+policies and the difference in the resulting metric is attributed to
+the augmentation. That attribution is only valid if the two runs saw
+the same images in the same order, which is what the private stream
+guarantees. A
 ``DataLoader`` built with ``shuffle=True`` draws its permutation from
 the global torch generator, whose state depends on how much randomness
 everything else consumed first - and that differs between augmentation
-policies. B0 and FULL at the same seed would then see *different image
+policies. Two policies at the same seed would then see *different image
 orders*, and part of the measured difference would be ordering noise
 wearing the costume of an augmentation effect. Seeding a local
 generator from ``(run_seed, epoch)`` alone makes the order immune to
@@ -55,8 +60,9 @@ class ProportionalImageSampler(Sampler[int]):
     image exactly once per epoch gives every group a share of steps
     equal to its share of images, exactly rather than in expectation.
     A permutation is preferred over independent draws with replacement
-    for that reason, and because it keeps "epoch" well defined for the
-    auxiliary reporting of I.7.
+    for that reason, and because it keeps "epoch" a well-defined unit
+    for reporting - runs are compared by optimizer steps, but epochs
+    remain a readable secondary axis.
 
     Parameters
     ----------

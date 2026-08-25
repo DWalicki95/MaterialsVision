@@ -2,23 +2,45 @@
 Deterministic crop of an image/label pair to the content region, and
 the instance bookkeeping it forces.
 
-This is step 2 of the mandatory pipeline order (plan IV.2) and the
-part of it that carries real consequences. Cropping the SEM
-information panel away is not a matter of slicing an array: on the
-K/VAB subseries every single image has annotated pores reaching into
-the panel - 108 of 108 M2 images, 404 instances in total (check C5) -
-so the crop cuts through real annotations and something principled has
-to happen to the remains.
+Some SEM images carry an information panel along the bottom edge - a
+black strip with magnification, scale bar and acquisition settings,
+written by the microscope rather than photographed. It contains no
+material, so it is removed before the image reaches the model. On this
+dataset the strip occupies the bottom 70 rows of every image from one
+of the two microscopes; images from the other microscope had it
+stripped at acquisition time and need no crop at all. Which box to cut
+to is decided per image and stored in the manifest column
+``load_crop_bbox``.
 
-The rule, frozen in IV.1: an annotation crossing the crop edge is
-**cut along that edge, not discarded**. What is left survives if it is
-connected and its area is at least ``A_min_fragment``; anything
-smaller is removed, because we never manufacture a label smaller than
-what an annotator actually drew (V.2). Instances touching the edge are
-flagged ``border_instance`` and are later excluded from morphological
-metrics, consistently on the ground-truth and the prediction side.
-IDs are renumbered densely at the end, so downstream code can assume
-labels ``1..n`` with no gaps.
+Removing it is not a matter of slicing an array. Annotators drew on
+the full frame, so pores near the bottom edge have outlines running
+into the strip: on this dataset that is true of every single image
+from the affected microscope, ~400 instances in total. The crop
+therefore cuts through real annotations, and the remains need a rule.
+
+The rule implemented here:
+
+- an annotation crossing the crop edge is **cut along that edge, not
+  discarded** - the part inside the content region is still a valid,
+  if truncated, pore;
+- what remains survives only if its area is at least
+  ``A_min_fragment``, a threshold measured once as a low percentile of
+  the real annotated-instance areas. The point is to never manufacture
+  a label smaller than anything an annotator actually drew: a sliver
+  of a pore left by the cut is not a pore;
+- **the threshold applies only to instances the crop actually
+  reduced.** An instance lying wholly inside the content region is a
+  genuine annotation and survives at any size. Filtering those by the
+  same threshold would delete the bottom percentile of the ground
+  truth on every image, because that is precisely what the threshold
+  was measured as;
+- instances touching any edge of the cropped frame are flagged
+  ``border_instance``. Their shape is truncated by the frame, so
+  morphological measurements on them are meaningless and downstream
+  code excludes them - on the ground-truth and the prediction side
+  alike, or the comparison would be biased;
+- IDs are renumbered densely at the end, so consumers can assume
+  labels ``1..n_instances`` with no gaps.
 """
 import logging
 from dataclasses import dataclass
@@ -53,14 +75,13 @@ class CroppedSample:
     n_input_instances : int
         Instances present in the labels before cropping.
     n_cut_by_crop : int
-        Instances the crop reduced in area. Only these are subject to
-        the ``A_min_fragment`` test; an instance lying wholly inside
-        the content region survives at any size.
+        Instances the crop reduced in area. Only these face the
+        minimum-area test; an instance lying wholly inside the content
+        region survives at any size.
     n_dropped_outside : int
         Instances that had no pixel inside the crop at all.
     n_dropped_below_min_area : int
-        Cut instances whose surviving fragment fell below
-        ``A_min_fragment``.
+        Cut instances whose surviving fragment was too small to keep.
     n_dropped_disconnected : int
         Pieces discarded because the crop left a cut instance in more
         than one fragment and only the largest is kept. Promoting the
@@ -121,8 +142,11 @@ def apply_content_crop(
         ``(x0, y0, x1, y1)`` content region, as stored in the
         manifest's ``load_crop_bbox``; ``x1``/``y1`` are exclusive.
     min_fragment_area_px2 : float
-        ``A_min_fragment``: minimum area, in source pixels squared,
-        for a cut fragment to be kept.
+        Smallest area, in source pixels squared, a cut instance may
+        keep and still count as an instance. Calibrated once as a low
+        percentile of the real annotated-instance areas, so the crop
+        never produces a label smaller than anything an annotator
+        drew. Instances the crop did not touch ignore it.
 
     Returns
     -------
@@ -186,14 +210,22 @@ def _rebuild_instances(
 ) -> CroppedSample:
     """Resolve fragments, drop the too-small, and renumber densely.
 
-    ``A_min_fragment`` applies **only to instances the crop actually
-    reduced**. An instance lying wholly inside the content region is a
-    real annotation and survives whatever its size; filtering it by
-    the same threshold would delete roughly the bottom percentile of
-    the ground truth, since ``A_min_fragment`` is by construction the
-    P1 of that very distribution. The plan scopes the rule the same
-    way: it speaks of an annotation *extending past* the crop edge
-    (IV.1) and of instances *cut by* it (V.2).
+    An instance counts as *cut* when its area inside the crop is less
+    than its area in the full frame. Only cut instances face the
+    ``min_fragment_area_px2`` test: the threshold exists to suppress
+    slivers the cut manufactured, and an intact instance is a real
+    annotation no matter how small. Applying it to intact instances
+    would delete the bottom percentile of the ground truth on every
+    image, since the threshold is measured as a low percentile of
+    exactly that distribution.
+
+    The same scoping applies to connectivity. Rasterizing overlapping
+    outlines resolves each pixel to a single instance, which can leave
+    an instance in two pieces before any cropping happens; such an
+    instance keeps all its pixels under one ID. Only when the *cut*
+    breaks an instance apart is the largest piece kept and the rest
+    dropped - promoting them to their own IDs would invent instances
+    nobody annotated.
 
     Connected components are computed once over the whole cropped
     label image. ``skimage.measure.label`` joins pixels only when they
