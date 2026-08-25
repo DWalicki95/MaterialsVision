@@ -1,0 +1,53 @@
+split_id: split_v1
+manifest_path: /home/dwalicki/dane/manifests/manifest_v2.csv
+output_dir: /home/dwalicki/dane/splits
+
+# Seed, candidate count and the cost weights below fully determine the
+# chosen split. Changing any of them produces a different split and
+# therefore requires a new split_id - never an overwrite (plan II.1:
+# the split is frozen across every run of the experiment).
+seed: 20260825
+n_candidates: 50000
+
+# Formulation counts (train, val, test) per material, proportional to
+# each material's formulation count: 21 / 5 / 5 overall (plan III.4).
+quotas:
+  AS: [14, 3, 3]
+  K: [3, 1, 1]
+  VAB: [4, 1, 1]
+
+# VAB11 holds 4 images, 2 of them scale_outlier, leaving 2 evaluable.
+# In VAL or TEST it would produce a VAB cross-section of 2 images,
+# a number no conclusion can rest on.
+forced_train:
+  - VAB11
+
+target_shares:
+  train: 0.70
+  val: 0.15
+  test: 0.15
+
+constraints:
+  min_m2_formulations_per_set: 1
+  min_scale_bin_images_per_set: 1
+  min_eval_fine_images: 8
+  min_eval_images_by_material:
+    K: 10
+    VAB: 5
+
+cost_weights:
+  images: 3.0
+  instances: 1.0
+  cell_default: 2.0
+  cell_overrides:
+    # VAB x coarse is 3 images inside a single formulation (VAB1), so
+    # no three-way split can approach the 70/15/15 target for it. At
+    # full weight the term would add a near-constant offset that
+    # distorts the argmin without expressing a real preference.
+    "VAB:coarse": 0.5
+  lost_outlier_image: 0.02
+
+min_fragment_area:
+  inventory_config: data_prep/inventory/inventory_config.yaml
+  percentile: 1.0
+  exclude_scale_outlier: true

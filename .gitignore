@@ -18,3 +18,8 @@ mlruns/
 logs/
 
 mlflow.db
+
+# Only the current experiment plan is versioned; local settings, locks
+# and superseded plan drafts stay out of the repository.
+.claude/*
+!.claude/plan_eksperymentu_augmentacji_peft_sam_v3_geometria.md

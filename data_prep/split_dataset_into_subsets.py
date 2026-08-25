@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
 """
+DEPRECATED - do not use for the augmentation experiment.
+
+This splitter works per image and stratifies by material only, so
+images of one formulation end up in different subsets. Since all
+images of a formulation come from a single synthesis and are strongly
+correlated, that is data leakage: evaluation would score the model on
+material it effectively saw in training (experiment plan, III.3).
+
+Use ``scripts/create_dataset_split.py`` instead - it groups by
+formulation, stratifies by ``material x scale_bin`` and freezes the
+result. Results obtained on a split produced by this script are not
+comparable with that experiment.
+
+Kept only to keep older runs reproducible.
+
 Split a flat directory of image/mask pairs into train/, test/,
 and optionally post_train/ subdirectories using material-type
 stratified sampling.

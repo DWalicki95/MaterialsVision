@@ -5,17 +5,13 @@ verification thumbnails for the non-image region detector.
 None of this module decides anything about the manifest's content -
 it only renders what ``manifest.build_manifest`` already produced.
 """
-import hashlib
 import json
 import logging
 import math
-import platform
-import subprocess
 from collections import Counter
 from datetime import datetime, timezone
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 from PIL import Image, ImageDraw
@@ -28,14 +24,12 @@ from data_prep.inventory.manifest import (INSTRUMENT_TO_MICROSCOPE,
                                           SCALE_BIN_FINE_MIN_UM,
                                           InventoryResult)
 from data_prep.inventory.models import InventoryConfig
+from data_prep.run_provenance import (git_commit, library_versions,
+                                      python_version, sha256_of)
 from materials_vision.quantitative_analysis.stats_utils import \
     calculate_statistics
 
 logger = logging.getLogger(__name__)
-
-_TRACKED_LIBRARIES = (
-    "pandas", "numpy", "Pillow", "PyYAML", "scikit-image",
-)
 
 
 def write_validation_report(
@@ -232,6 +226,27 @@ def write_dataset_summary(
         lines.append(f"| {series} | {int(count)} |")
     lines.append("")
 
+    lines.append("## Adnotacje siegajace w obszar przycinany")
+    lines.append("")
+    below_crop = df["n_instances_below_crop_bbox"]
+    n_images_affected = int((below_crop > 0).sum())
+    n_instances_affected = int(below_crop.sum())
+    lines.append(
+        f"Obrazy z co najmniej jedna instancja siegajaca w obszar "
+        f"panelu (do przyciecia): {n_images_affected}"
+    )
+    lines.append("")
+    lines.append(
+        f"Laczna liczba takich instancji: {n_instances_affected}"
+    )
+    lines.append("")
+    if n_images_affected:
+        affected_ids = sorted(
+            df.loc[below_crop > 0, "image_id"].tolist()
+        )
+        lines.append(f"Obrazy: {affected_ids}")
+        lines.append("")
+
     lines.append("## Formulacje wymagające uwagi przy splicie")
     lines.append("")
     per_formulation = df.groupby("formulation").size()
@@ -325,11 +340,11 @@ def write_run_metadata(
 
     metadata: dict[str, Any] = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "git_commit": _git_commit(),
-        "python_version": platform.python_version(),
-        "library_versions": _library_versions(),
+        "git_commit": git_commit(),
+        "python_version": python_version(),
+        "library_versions": library_versions(),
         "manifest_version": config.manifest_version,
-        "manifest_sha256": _sha256_of(manifest_path),
+        "manifest_sha256": sha256_of(manifest_path),
         "n_rows": len(result.manifest),
         "n_rejected": len(result.rejected),
         "n_issues": len(result.issues),
@@ -373,35 +388,6 @@ def write_run_metadata(
         f.write("\n")
     logger.info("Wrote run metadata: %s", path)
     return path
-
-
-def _git_commit() -> Optional[str]:
-    """Return the current git commit hash, or None outside a repo."""
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True, timeout=5,
-        )
-        return out.stdout.strip()
-    except Exception:
-        return None
-
-
-def _library_versions() -> dict[str, Optional[str]]:
-    """Return installed versions of the libraries this pipeline
-    depends on, None for any that cannot be resolved."""
-    versions: dict[str, Optional[str]] = {}
-    for name in _TRACKED_LIBRARIES:
-        try:
-            versions[name] = version(name)
-        except PackageNotFoundError:
-            versions[name] = None
-    return versions
-
-
-def _sha256_of(path: Path) -> str:
-    """SHA-256 hex digest of a file's bytes."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def write_thumbnails(
