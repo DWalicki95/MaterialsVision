@@ -131,6 +131,25 @@ Każdy run porównawczy: wczytuje ten sam bazowy checkpoint; tworzy świeże LoR
 
 Dwa krótkie runy (~30% `T_full`, jeden seed): (a) natywny SAM, (b) generalista EM z Micro-SAM (np. `vit_l_em_organelles` — transfer na SEM materiałowe niepewny, ale tani do sprawdzenia). Zwycięzcę zamraża się jako bazowy checkpoint. Jeżeli P0 pominięty → natywny SAM.
 
+### Uwaga o kolejności (decyzja 2026-08-25)
+
+Zapis „etap F" sugeruje, że P0 wyprzedza G. Dosłownie wzięty jest niewykonalny, bo zależności tworzą cykl:
+
+- **F wymaga G** — żeby cokolwiek wytrenować, potrzebny jest dataloader, preprocessing, LoRA i dekoder AIS, czyli zawartość G;
+- **F wymaga L** — „~30% `T_full`" odwołuje się do wielkości wyznaczanej dopiero w kroku L;
+- **L wymaga F** — E0 musi wystartować z jakiegoś bazowego checkpointu.
+
+**Rozstrzygnięcie: litery w części XVII są kolejnością zamrażania decyzji, nie kolejnością pisania kodu.** G nazywa się „zamrożenie", a nie „budowa"; stos powstaje wcześniej niezależnie od liter, a F stoi przed G dlatego, że bazowy checkpoint jest jedną z wartości, które G zamraża. Kolejność wykonawcza brzmi: zbudować stos → P0 → zamrozić stos wraz ze zwycięzcą → L.
+
+Konsekwencje zamrożone razem z tą decyzją:
+
+1. **Budżet P0 wyrażamy w krokach bezwzględnych, nie jako ułamek `T_full`.** P0 nie uczestniczy w atrybucji, więc jego budżet nie musi być współmierny z niczym; zapis „~30%" czytamy jako szacunek rzędu wielkości.
+2. **P0 jest jednocześnie pierwszym testem dymnym pipeline'u.** Pierwszy udany run trzeba wykonać tak czy inaczej, żeby sprawdzić, że docięcie nie psuje masek, że AIS się uczy i że koszt spada. Zrobienie z niego P0 kosztuje dodatkowo tylko drugi run.
+3. **P0 porównuje checkpointy bez augmentacji.** Checkpoint wygrywający w B0 nie musi wygrywać pod FULL; sprawdzenie tego byłoby macierzą 2×2 poza budżetem. Ryzyko przyjęte świadomie i odnotowane przy wyniku.
+4. **Reguła awaryjna pozostaje w mocy.** Jeżeli instalacja Micro-SAM albo stos sprawią kłopot, P0 odpada i obowiązuje natywny SAM — bez blokowania dalszych kroków.
+
+Stan środowiska na 2026-08-25: `micro_sam` ani `peft_sam` nie są zainstalowane w żadnym venvie, a w cache Micro-SAM są wyłącznie `vit_b` i `vit_h` — brak ViT-L, który plan zamraża jako backbone (II.1). Nazwę `vit_l_em_organelles` należy zweryfikować w rejestrze modeli przy instalacji, a nie przyjmować za pewnik.
+
 ---
 
 # CZĘŚĆ III. DANE I PODZIAŁ
@@ -426,6 +445,20 @@ Cztery reguły towarzyszące:
 
 **Maski przy docięciu.** Poligony przesuwa się o `(x0, y0)` ramki i przycina do jej granic. Anotacja wykraczająca poza `y = 889` jest **cięta prostą wzdłuż krawędzi docięcia** — nie odrzucana. Pozostały fragment zachowuje się, jeżeli jest spójny i ma powierzchnię ≥ `A_min_fragment` (V.2); instancja dotykająca krawędzi docięcia dostaje flagę `border_instance` i podlega tym samym regułom co instancje przecięte krawędzią cropu, w tym wykluczeniu z metryk morfologicznych spójnie po stronie GT i predykcji. Po cięciu — gęsta renumeracja ID.
 
+**Doprecyzowanie zakresu `A_min_fragment` (2026-08-25, przy implementacji).** Próg dotyczy **wyłącznie instancji, którym docięcie realnie zabrało powierzchnię**. Instancja leżąca w całości wewnątrz ramki treści jest prawdziwą anotacją i przeżywa niezależnie od rozmiaru. Powód jest arytmetyczny: `A_min_fragment` to **P1 rozkładu powierzchni instancji GT**, więc zastosowany do instancji nietkniętych kasowałby z definicji dolny percentyl prawdziwej anotacji — na każdym obrazie, także na 599 obrazach AS, gdzie docięcia nie ma w ogóle. Pierwsza implementacja stosowała próg globalnie i usuwała 404 instancje, z czego 211 na M1; po zawężeniu zakresu strata na M1 wynosi zero. To samo zawężenie dotyczy warunku spójności („zachowuje się, jeżeli jest spójny"): instancja rozspójniona przez nakładanie się sąsiada, a nie przez cięcie, zachowuje wszystkie swoje piksele pod jednym ID.
+
+**Zmierzone zachowanie docięcia na całym zbiorze (2026-08-25, [WYKONANE]).** Implementacja: `materials_vision/data/instances.py`, `apply_content_crop`.
+
+| | M1 (bez docięcia) | M2 (pasek 70 wierszy) |
+|---|---:|---:|
+| instancji na wejściu | 31 130 | 4 716 |
+| instancji po docięciu | **31 130** | 4 709 |
+| przeciętych przez krawędź | 0 | 399 |
+| odrzuconych poniżej `A_min_fragment` | 0 | 7 |
+| rozspójnionych przez cięcie | 0 | 0 |
+
+Trzy wnioski: (1) seria AS przechodzi przez docięcie **bez żadnej straty**, co jest warunkiem zgodności z liczbami instancji w manifeście; (2) 399 przeciętych instancji zgadza się z 404 z weryfikacji C5 niżej — tamta liczba idzie po wierzchołkach poligonów, ta po realnej utracie powierzchni; (3) reguła „zachowaj największy spójny fragment" **nie uruchomiła się ani razu** na prawdziwych danych, więc pozostaje siatką bezpieczeństwa, a nie mechanizmem roboczym. Łączny koszt docięcia to 7 instancji w całym zbiorze, czyli 0.02%.
+
 **Weryfikacja empiryczna (C5, [WYKONANE]).** Sprawdzono maksymalną współrzędną `y` wierzchołków poligonów dla całej serii K/VAB (manifest v2, kolumna `n_instances_below_crop_bbox`, licząca instancje z co najmniej jednym wierzchołkiem na `y ≥ 890`). Wynik: **108 z 108 obrazów M2 (100%)** ma co najmniej jedną taką instancję, łącznie **404 instancje** w całym zbiorze, średnio ~3.7 na obraz tam, gdzie występują. Zgadza się to z prostym rachunkiem prawdopodobieństwa dla gęstości porów w tej serii (~44 instancji/obraz, mediana średnicy ~127 px, treść 890 px wysokości) — nie jest artefaktem pojedynczych obrazów. **Wniosek: reguła cięcia poligonów opisana wyżej nie jest zabezpieczeniem na rzadki przypadek brzegowy — jest obowiązkowym elementem pipeline'u dla całej podserii K/VAB, bez którego samo docięcie paska systematycznie okalecza adnotacje w niemal każdym obrazie tej podserii.**
 
 **Kanały.** Obrazy monochromatyczne (trzy identyczne kanały). Pipeline pracuje na **jednym kanale roboczym**; powielenie do RGB dopiero na końcu. Cała augmentacja fotometryczna działa na jednym kanale.
@@ -574,7 +607,7 @@ load_crop_bbox, bez obrazow scale_outlier. Diagnostyka per bin:
 coarse 451.5, fine 217.8 px^2 (III.5 "Wynik wykonania").
 ```
 
-Zasada: nie tworzymy etykiet mniejszych niż cokolwiek, co anotator realnie oznaczył. Fragment ≥ `A_min_fragment` i spójny — zachowany; mniejszy — usunięty; instancja dotykająca brzegu → flaga `border_instance`; gęsta renumeracja ID. `border_instance` wykluczone z metryk morfologicznych **spójnie po stronie GT i predykcji**.
+Zasada: nie tworzymy etykiet mniejszych niż cokolwiek, co anotator realnie oznaczył. Fragment ≥ `A_min_fragment` i spójny — zachowany; mniejszy — usunięty; instancja dotykająca brzegu → flaga `border_instance`; gęsta renumeracja ID. **Próg stosuje się wyłącznie do instancji, którym cięcie realnie zabrało powierzchnię** — instancja nietknięta przez krawędź przeżywa w każdym rozmiarze (uzasadnienie i pomiar: IV.1 „Doprecyzowanie zakresu `A_min_fragment`"). `border_instance` wykluczone z metryk morfologicznych **spójnie po stronie GT i predykcji**.
 
 ### Interpolacja
 
@@ -1250,7 +1283,10 @@ E. [WYKONANE] Zamrożenie samplera obrazów: proporcjonalny, bez
    K 9.1%, VAB 5.5%, `fine` 10.3%; epoka = 494 kroki.
    Przy okazji domknięta bramka na TEST (`load_split`). Szczegóły
    i oba nowe rozstrzygnięcia: III.7 "Wynik wykonania".
-F. (Opcjonalnie) P0: wybór bazowego checkpointu → zamrożenie.
+F. [DECYZJA 2026-08-25] P0 **zostaje w planie, ale wykonywany po
+   zbudowaniu stosu treningowego**, jako pierwszy test dymny
+   pipeline'u. Uzasadnienie i rozwiązanie cyklu zależności: II.4
+   "Uwaga o kolejności".
 G. Zamrożenie Micro-SAM + LoRA + dekodera AIS + preprocessingu (w tym docięcia
    do load_crop_bbox i skali ×0.8) + postprocessingu.
 H. Implementacja i testy syntetyczne metryk (mask IoU, merge/split, boundary, anizotropia).
