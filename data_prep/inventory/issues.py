@@ -1,4 +1,5 @@
-"""Issue taxonomy for the data inventory pipeline.
+"""
+Issue taxonomy for the data inventory pipeline.
 
 Every problem encountered while building the manifest is recorded as an
 ``Issue`` instead of being silently skipped or only logged. Collected issues

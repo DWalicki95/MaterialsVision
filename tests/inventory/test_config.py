@@ -90,3 +90,59 @@ def test_load_config_overrides(tmp_path, valid_layout):
     config = load_config(config_path)
     assert config.scale_outlier_ratio == 2.0
     assert config.fuzzy_cutoff == 0.9
+
+
+def test_load_config_avoid_annotators_defaults_empty(tmp_path, valid_layout):
+    images_dir, ls_json, sem_dir = valid_layout
+    config_path = _write_yaml(tmp_path, images_dir, ls_json, sem_dir)
+
+    config = load_config(config_path)
+
+    assert config.sources[0].avoid_annotators == ()
+
+
+def test_load_config_avoid_annotators_parsed(tmp_path, valid_layout):
+    images_dir, ls_json, sem_dir = valid_layout
+    output_dir = tmp_path / "out"
+    mask_root = tmp_path / "masks"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"""
+manifest_version: v1
+output_dir: {output_dir}
+mask_root: {mask_root}
+sources:
+  - series: AS
+    images_dir: {images_dir}
+    label_studio_json: {ls_json}
+    sem_metadata_dirs:
+      - {sem_dir}
+    avoid_annotators: [1, 3]
+""", encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.sources[0].avoid_annotators == (1, 3)
+
+
+def test_load_config_avoid_annotators_invalid_type_raises(
+    tmp_path, valid_layout
+):
+    images_dir, ls_json, sem_dir = valid_layout
+    output_dir = tmp_path / "out"
+    mask_root = tmp_path / "masks"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"""
+manifest_version: v1
+output_dir: {output_dir}
+mask_root: {mask_root}
+sources:
+  - series: AS
+    images_dir: {images_dir}
+    label_studio_json: {ls_json}
+    sem_metadata_dirs:
+      - {sem_dir}
+    avoid_annotators: ["not_an_int"]
+""", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="avoid_annotators"):
+        load_config(config_path)

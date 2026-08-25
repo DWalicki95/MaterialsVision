@@ -140,6 +140,74 @@ class TestSelectAnnotation:
         codes = [i.code for i in collector.all()]
         assert "empty_annotation" in codes
 
+    def test_avoid_annotators_falls_back_to_latest_non_avoided(self):
+        task = {
+            "id": 9,
+            "data": {"image": "img9.jpg"},
+            "annotations": [
+                _annotation(1, "2026-01-01T00:00:00Z",
+                            "2026-01-01T00:00:00Z", completed_by=2),
+                _annotation(2, "2026-01-02T00:00:00Z",
+                            "2026-01-01T00:00:00Z", completed_by=1),
+            ],
+        }
+        collector = IssueCollector()
+        selection = select_annotation(
+            task, collector=collector, avoid_annotators=(1,),
+        )
+        assert selection.mask_annotation_id == 1
+        assert selection.mask_annotator == 2
+        assert selection.selection_rule == (
+            "latest_updated_at_then_max_id+annotator_fallback"
+        )
+        codes = [i.code for i in collector.all()]
+        assert "annotator_fallback_applied" in codes
+
+    def test_avoid_annotators_no_alternative_keeps_latest(self):
+        task = {
+            "id": 10,
+            "data": {"image": "img10.jpg"},
+            "annotations": [
+                _annotation(1, "2026-01-01T00:00:00Z",
+                            "2026-01-01T00:00:00Z", completed_by=1),
+                _annotation(2, "2026-01-02T00:00:00Z",
+                            "2026-01-01T00:00:00Z", completed_by=1),
+            ],
+        }
+        collector = IssueCollector()
+        selection = select_annotation(
+            task, collector=collector, avoid_annotators=(1,),
+        )
+        assert selection.mask_annotation_id == 2
+        assert selection.selection_rule == (
+            "latest_updated_at_then_max_id"
+        )
+        codes = [i.code for i in collector.all()]
+        assert "annotator_fallback_unavailable" in codes
+
+    def test_avoid_annotators_not_triggered_when_latest_ok(self):
+        task = {
+            "id": 11,
+            "data": {"image": "img11.jpg"},
+            "annotations": [
+                _annotation(1, "2026-01-01T00:00:00Z",
+                            "2026-01-01T00:00:00Z", completed_by=1),
+                _annotation(2, "2026-01-02T00:00:00Z",
+                            "2026-01-01T00:00:00Z", completed_by=2),
+            ],
+        }
+        collector = IssueCollector()
+        selection = select_annotation(
+            task, collector=collector, avoid_annotators=(1,),
+        )
+        assert selection.mask_annotation_id == 2
+        assert selection.selection_rule == (
+            "latest_updated_at_then_max_id"
+        )
+        codes = [i.code for i in collector.all()]
+        assert "annotator_fallback_applied" not in codes
+        assert "annotator_fallback_unavailable" not in codes
+
 
 class TestIterPolygonResults:
     def test_filters_non_polygon_types(self):
