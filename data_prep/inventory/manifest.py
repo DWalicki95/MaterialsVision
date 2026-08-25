@@ -123,6 +123,7 @@ MANIFEST_COLUMNS: tuple[str, ...] = (
     "nonimage_detector_version",
     # 5.7 F. annotation statistics
     "n_annotations", "n_instances", "n_border_instances",
+    "n_instances_below_crop_bbox",
     "n_degenerate_polygons", "overlap_px_fraction",
     "has_significant_overlap",
     "pore_equivalent_diameter_min_px",
@@ -520,6 +521,19 @@ def _process_one_image(
         )
         return None, issue
 
+    n_instances_below_crop_bbox = _count_instances_below_crop_bbox(
+        polygons, region.content_bbox
+    )
+    if n_instances_below_crop_bbox > 0:
+        collector.add(
+            IssueLevel.INFO, "annotation_below_crop_bbox",
+            parsed.image_id,
+            f"{n_instances_below_crop_bbox} instance(s) have an "
+            f"annotated point at or past y="
+            f"{region.content_bbox[3]}, inside the area that gets "
+            f"cropped away before training",
+        )
+
     labels, coverage, n_degenerate = rasterize_annotation(
         polygons, (props.height_px, props.width_px)
     )
@@ -534,7 +548,8 @@ def _process_one_image(
         magnification_conflict, pixel_size_um, pixel_size_raw_nm,
         pixel_size_source, geometry_rescaled, panel_cropped_px,
         pixel_size_consistency, microscope, microscope_source,
-        load_crop_bbox, scale_bin, q_max_i, selection, stats, config,
+        load_crop_bbox, scale_bin, q_max_i,
+        n_instances_below_crop_bbox, selection, stats, config,
     )
     return row, None
 
@@ -749,6 +764,23 @@ def _q_max_i(pixel_size_um: Optional[float]) -> Optional[float]:
     return pixel_size_um / Q_REFERENCE_UM
 
 
+def _count_instances_below_crop_bbox(
+    polygons: list, content_bbox: tuple[int, int, int, int],
+) -> int:
+    """Count annotated instances that reach into the area a later
+    cropping step would cut away (everything at or past the bottom
+    edge of `content_bbox`). An annotator draws on the full image, so
+    a pore near the bottom edge can have points inside a data panel
+    that gets removed before training; this only matters for images
+    that actually have such a panel - for the rest, `content_bbox`
+    already spans the full frame and the count is always zero."""
+    _, _, _, y1 = content_bbox
+    return sum(
+        1 for polygon in polygons
+        if polygon.size > 0 and float(polygon[:, 1].max()) >= y1
+    )
+
+
 def _build_row(
     parsed: ParsedName,
     source: SourceConfig,
@@ -772,6 +804,7 @@ def _build_row(
     load_crop_bbox: Optional[tuple[int, int, int, int]],
     scale_bin: Optional[str],
     q_max_i: Optional[float],
+    n_instances_below_crop_bbox: int,
     selection,
     stats,
     config: InventoryConfig,
@@ -843,6 +876,7 @@ def _build_row(
         "n_annotations": selection.n_annotations,
         "n_instances": stats.n_instances,
         "n_border_instances": stats.n_border_instances,
+        "n_instances_below_crop_bbox": n_instances_below_crop_bbox,
         "n_degenerate_polygons": stats.n_degenerate_polygons,
         "overlap_px_fraction": stats.overlap_px_fraction,
         "has_significant_overlap": (

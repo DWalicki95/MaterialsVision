@@ -414,6 +414,108 @@ class TestContentBboxCropMismatch:
         assert "content_bbox_crop_mismatch" in codes
 
 
+class TestInstancesBelowCropBbox:
+    def test_instance_reaching_into_panel_is_counted(self, tmp_path):
+        import json as jsonlib
+
+        import numpy as np
+        from PIL import Image
+
+        from data_prep.inventory.manifest import (
+            PANEL_HEIGHT_ROWS_BY_MICROSCOPE)
+        from data_prep.inventory.models import InventoryConfig, SourceConfig
+
+        images_dir = tmp_path / "images"
+        images_dir.mkdir()
+        sem_dir = tmp_path / "sem"
+        w, h = 128, 260
+        panel_rows = PANEL_HEIGHT_ROWS_BY_MICROSCOPE["M2"]
+        content_h = h - panel_rows
+
+        # A real panel, matching PANEL_HEIGHT_ROWS_BY_MICROSCOPE, so
+        # this row passes the content_bbox/load_crop_bbox check and
+        # reaches annotation processing.
+        rng = np.random.default_rng(0)
+        content = rng.integers(
+            60, 200, size=(content_h, w), dtype=np.uint8
+        )
+        panel = np.zeros((panel_rows, w), dtype=np.uint8)
+        full = np.concatenate([content, panel], axis=0)
+        vab_name = "VAB1_prostopadla_VAB1_prostopadla_m001"
+        Image.fromarray(full, mode="L").save(
+            images_dir / f"{vab_name}.png"
+        )
+        sidecar_path = (
+            sem_dir / "VAB1 prostopadla" / "VAB1 prostopadla_m001.txt"
+        )
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "[SemImageFile]", "InstructName=SU8000", "Magnification=40",
+            "PixelSize=2480.469", f"DataSize={w}x{h}", "Format=tif",
+        ]
+        sidecar_path.write_text(
+            "\r\n".join(lines) + "\r\n", encoding="iso-8859-2"
+        )
+
+        # Square straddling the content/panel boundary: its top edge
+        # is in the content area, its bottom edge is inside the panel.
+        x0, y0, x1, y1 = 20, content_h - 20, 40, content_h + 20
+        points = [
+            [x0 / w * 100, y0 / h * 100],
+            [x1 / w * 100, y0 / h * 100],
+            [x1 / w * 100, y1 / h * 100],
+            [x0 / w * 100, y1 / h * 100],
+        ]
+        task = {
+            "id": 1,
+            "data": {"image": f"/data/upload/2/{vab_name}.png"},
+            "annotations": [{
+                "id": 1, "completed_by": 1,
+                "was_cancelled": False, "ground_truth": False,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "result": [{
+                    "original_width": w, "original_height": h,
+                    "image_rotation": 0, "id": "res1",
+                    "from_name": "poly_tool", "to_name": "image",
+                    "type": "polygonlabels",
+                    "value": {
+                        "points": points, "closed": True,
+                        "polygonlabels": ["Por"],
+                    },
+                }],
+            }],
+        }
+        ls_json = tmp_path / "export.json"
+        ls_json.write_text(jsonlib.dumps([task]), encoding="utf-8")
+
+        config = InventoryConfig(
+            manifest_version="v1",
+            output_dir=tmp_path / "out",
+            mask_root=tmp_path / "masks",
+            sources=(
+                SourceConfig(
+                    series="VAB", images_dir=images_dir,
+                    label_studio_json=ls_json,
+                    sem_metadata_dirs=(sem_dir,),
+                ),
+            ),
+        )
+
+        result = build_manifest(config)
+
+        row = result.manifest.iloc[0]
+        assert row["n_instances_below_crop_bbox"] == 1
+        codes = [i.code for i in result.issues]
+        assert "annotation_below_crop_bbox" in codes
+
+    def test_instance_inside_content_is_not_counted(self, mini_dataset):
+        result = build_manifest(mini_dataset.config)
+        vab_id = "VAB1_prostopadly_m001"
+        row = result.manifest.set_index("image_id").loc[vab_id]
+        assert row["n_instances_below_crop_bbox"] == 0
+
+
 class TestImageIdCollision:
     def test_duplicate_image_id_aborts_build(self, tmp_path):
         import json as jsonlib
