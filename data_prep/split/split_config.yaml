@@ -4,13 +4,16 @@ output_dir: /home/dwalicki/dane/splits
 
 # Seed, candidate count and the cost weights below fully determine the
 # chosen split. Changing any of them produces a different split and
-# therefore requires a new split_id - never an overwrite (plan II.1:
-# the split is frozen across every run of the experiment).
+# therefore requires a new split_id - never an overwrite. Every
+# training run of the experiment reuses one frozen split, so that
+# results from different runs stay comparable; replacing a split in
+# place would silently invalidate every result already obtained on it.
 seed: 20260825
 n_candidates: 50000
 
 # Formulation counts (train, val, test) per material, proportional to
-# each material's formulation count: 21 / 5 / 5 overall (plan III.4).
+# each material's formulation count: 21 / 5 / 5 formulations overall,
+# roughly a 70/15/15 split.
 quotas:
   AS: [14, 3, 3]
   K: [3, 1, 1]

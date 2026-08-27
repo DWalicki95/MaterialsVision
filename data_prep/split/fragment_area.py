@@ -28,16 +28,17 @@ Two properties of this measurement matter:
   panel area, so their areas before and after the crop differ.
 """
 import logging
-from typing import Mapping, Optional, Sequence
+from typing import Mapping, Optional
 
 import numpy as np
 import pandas as pd
 
+from data_prep.annotations import (AnnotationLookupError,
+                                   index_annotations_by_id, polygons_in_pixels,
+                                   require_annotation)
 from data_prep.inventory.annotation_stats import rasterize_annotation
 from data_prep.inventory.config import load_config
 from data_prep.inventory.issues import IssueCollector, PolygonConversionError
-from data_prep.inventory.label_studio import (iter_polygon_results, load_tasks,
-                                              polygon_to_pixels)
 from data_prep.split.models import FragmentAreaResult, MinFragmentAreaConfig
 
 logger = logging.getLogger(__name__)
@@ -78,35 +79,6 @@ def parse_bbox(value: str) -> tuple[int, int, int, int]:
     return parts[0], parts[1], parts[2], parts[3]
 
 
-def _index_annotations(
-    label_studio_json, image_refs: Sequence[str]
-) -> dict[int, dict]:
-    """Index every annotation of an export by its annotation id.
-
-    Indexing by annotation id rather than re-running the annotator
-    selection guarantees the areas are measured on exactly the
-    annotation the manifest recorded in ``mask_annotation_id``.
-
-    Parameters
-    ----------
-    label_studio_json : Path
-    image_refs : Sequence of str
-        Only used to size the log message.
-
-    Returns
-    -------
-    dict of int to dict
-    """
-    del image_refs
-    by_id: dict[int, dict] = {}
-    for task in load_tasks(label_studio_json):
-        for annotation in task.get("annotations", []):
-            annotation_id = annotation.get("id")
-            if annotation_id is not None:
-                by_id[int(annotation_id)] = annotation
-    return by_id
-
-
 def _instance_areas_px2(
     annotation: Mapping,
     width_px: int,
@@ -136,17 +108,10 @@ def _instance_areas_px2(
     n_lost_to_crop : int
         Instances that had pixels before the crop and none after.
     """
-    polygons = []
-    for result in iter_polygon_results(
-        annotation, collector=collector, image_ref=image_ref
-    ):
-        polygons.append(
-            polygon_to_pixels(
-                result, width_px, height_px,
-                collector=collector, image_ref=image_ref,
-            )
-        )
-
+    polygons = polygons_in_pixels(
+        annotation, width_px, height_px,
+        collector=collector, image_ref=image_ref,
+    )
     labels, _, _ = rasterize_annotation(polygons, (height_px, width_px))
     n_labels = int(labels.max())
     if n_labels == 0:
@@ -213,22 +178,19 @@ def compute_min_fragment_area(
     n_images = 0
 
     for series, group in train.groupby("series", sort=True):
-        annotations = _index_annotations(
-            exports[str(series)], group["image_id"].tolist()
-        )
+        annotations = index_annotations_by_id(exports[str(series)])
         logger.info(
             "Series %s: %d TRAIN image(s), %d annotation(s) indexed.",
             series, len(group), len(annotations),
         )
         for row in group.itertuples(index=False):
-            annotation = annotations.get(int(row.mask_annotation_id))
-            if annotation is None:
-                raise FragmentAreaError(
-                    f"Annotation {row.mask_annotation_id} "
-                    f"(image {row.image_id}) is absent from "
-                    f"{exports[str(series)]}: the manifest and the "
-                    f"export are out of sync"
+            try:
+                annotation = require_annotation(
+                    annotations, int(row.mask_annotation_id),
+                    str(row.image_id),
                 )
+            except AnnotationLookupError as e:
+                raise FragmentAreaError(str(e)) from e
             try:
                 areas, lost = _instance_areas_px2(
                     annotation,
