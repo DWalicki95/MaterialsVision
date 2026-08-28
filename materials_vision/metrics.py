@@ -246,7 +246,7 @@ def iou_scores_batch(
         pred_bboxes = get_bbox_from_mask(pred_mask)
         true_bboxes = get_bbox_from_mask(true_mask)
         iou_matrix = get_iou_matrix(
-            list(pred_bboxes.values()), list(true_bboxes.values())
+            list(true_bboxes.values()), list(pred_bboxes.values())
         )
         one_img_output = greedy_match_iou(iou_matrix, greedy_match_threshold)
         iou_results[idx] = one_img_output
