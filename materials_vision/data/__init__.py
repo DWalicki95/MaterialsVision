@@ -6,6 +6,8 @@ Training-time access to the frozen dataset split.
 ``sampling`` decides the order in which TRAIN images reach the
 optimizer.
 """
+from materials_vision.data.dataset import (InstanceSegmentationDataset,
+                                           build_label_transform)
 from materials_vision.data.instances import CroppedSample, apply_content_crop
 from materials_vision.data.masks import MaskLoadError, load_instance_mask
 from materials_vision.data.samples import (PreparedSample, SampleRecord,
@@ -18,6 +20,7 @@ from materials_vision.data.split_io import (LockedTestSetError, SplitLoadError,
 
 __all__ = [
     "CroppedSample",
+    "InstanceSegmentationDataset",
     "LockedTestSetError",
     "MaskLoadError",
     "PreparedSample",
@@ -28,6 +31,7 @@ __all__ = [
     "SplitLoadError",
     "SplitSubset",
     "apply_content_crop",
+    "build_label_transform",
     "load_instance_mask",
     "load_split",
     "read_manifest",
