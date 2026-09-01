@@ -315,14 +315,54 @@ def _empty_sample(
     )
 
 
+def border_instance_labels(labels: np.ndarray) -> np.ndarray:
+    """Labels of the instances touching any edge of the frame.
+
+    This is the single definition of a border instance in this
+    codebase: an instance is one when it has at least one pixel on the
+    outermost row or column. Its outline is truncated by the frame, so
+    its shape cannot be measured, and downstream code excludes it from
+    morphological comparisons - on the ground-truth and the prediction
+    side alike, which is why the rule has to live in one place and be
+    applied to both.
+
+    The bottom edge introduced by the panel crop counts like any
+    other: an instance cut there is as unsuitable for morphology as
+    one running off the original frame.
+
+    Note that a *different*, looser rule exists in
+    ``quantitative_analysis`` - it rejects instances whose bounding box
+    comes within three pixels of the edge. That one governs the
+    material report; this one governs model evaluation. They are
+    deliberately different and must not be mixed.
+
+    Parameters
+    ----------
+    labels : np.ndarray
+        Instance label image, 0 as background.
+
+    Returns
+    -------
+    np.ndarray
+        Sorted labels touching an edge; empty when none do.
+    """
+    if labels.size == 0:
+        return np.empty(0, dtype=labels.dtype)
+    edge = np.concatenate([
+        labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1],
+    ])
+    touching = np.unique(edge)
+    return touching[touching > 0]
+
+
 def _border_flags(
     relabelled: np.ndarray, n_instances: int
 ) -> np.ndarray:
-    """Flag instances touching any edge of the cropped frame.
+    """Flag densely numbered instances touching the frame edge.
 
-    The bottom edge introduced by the panel crop counts like any
-    other: an instance that was cut there is as unsuitable for
-    morphological metrics as one running off the original frame.
+    Thin wrapper over :func:`border_instance_labels` that turns the
+    labels it reports into the per-instance boolean array this module
+    hands downstream.
 
     Parameters
     ----------
@@ -339,13 +379,7 @@ def _border_flags(
     flags = np.zeros(n_instances + 1, dtype=bool)
     if n_instances == 0:
         return flags[1:]
-    edge_ids = np.unique(
-        np.concatenate([
-            relabelled[0, :], relabelled[-1, :],
-            relabelled[:, 0], relabelled[:, -1],
-        ])
-    )
-    flags[edge_ids[edge_ids > 0]] = True
+    flags[border_instance_labels(relabelled)] = True
     return flags[1:]
 
 
