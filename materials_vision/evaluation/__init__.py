@@ -8,13 +8,21 @@ characterisation of the material itself lives in
 shape descriptors computed here answer "did the model reproduce the
 outline it was shown", never "what is this foam like".
 """
+from materials_vision.evaluation.boundary import (BOUNDARY_SCALES,
+                                                  DECISION_SCALE,
+                                                  BoundaryScore,
+                                                  boundary_scores)
 from materials_vision.evaluation.matching import (InstanceMatch, MatchedPair,
                                                   match_instances,
                                                   pore_count_error)
 
 __all__ = [
+    "BOUNDARY_SCALES",
+    "DECISION_SCALE",
+    "BoundaryScore",
     "InstanceMatch",
     "MatchedPair",
+    "boundary_scores",
     "match_instances",
     "pore_count_error",
 ]
