@@ -82,6 +82,14 @@ class BoundaryScore:
         when the annotation has no outline.
     f1 : float
         Harmonic mean of the two; ``nan`` when either is undefined.
+    true_positive_px : int
+        Pixels within tolerance of both outlines. Carried so that
+        several images can be pooled into one score, which averaging
+        their F1 values cannot reconstruct.
+    false_positive_px : int
+        Pixels near the predicted outline but not the annotated one.
+    false_negative_px : int
+        Pixels near the annotated outline but not the predicted one.
     """
 
     scale: float
@@ -89,6 +97,9 @@ class BoundaryScore:
     precision: float
     recall: float
     f1: float
+    true_positive_px: int
+    false_positive_px: int
+    false_negative_px: int
 
 
 def boundary_scores(
@@ -165,8 +176,11 @@ def _score_at_scale(
     BoundaryScore
     """
     if mean_diameter_px <= 0:
-        return BoundaryScore(scale, float("nan"), float("nan"),
-                             float("nan"), float("nan"))
+        return BoundaryScore(
+            scale=float(scale), tolerance_px=float("nan"),
+            precision=float("nan"), recall=float("nan"), f1=float("nan"),
+            true_positive_px=0, false_positive_px=0, false_negative_px=0,
+        )
 
     tolerance_px = max(MIN_TOLERANCE_PX, scale * mean_diameter_px)
     near_gt = _within_tolerance(gt_outline, tolerance_px)
@@ -184,6 +198,9 @@ def _score_at_scale(
         precision=precision,
         recall=recall,
         f1=_harmonic_mean(precision, recall),
+        true_positive_px=true_positive,
+        false_positive_px=false_positive,
+        false_negative_px=false_negative,
     )
 
 

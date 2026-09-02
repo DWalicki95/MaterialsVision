@@ -8,6 +8,12 @@ characterisation of the material itself lives in
 shape descriptors computed here answer "did the model reproduce the
 outline it was shown", never "what is this foam like".
 """
+from materials_vision.evaluation.aggregate import (CROSS_SECTION_KEYS,
+                                                   AggregateResult,
+                                                   ImageEvaluation, aggregate,
+                                                   cross_sections,
+                                                   evaluate_image,
+                                                   scale_outlier_report)
 from materials_vision.evaluation.boundary import (BOUNDARY_SCALES,
                                                   DECISION_SCALE,
                                                   BoundaryScore,
@@ -38,11 +44,14 @@ from materials_vision.evaluation.size_bins import (SIZE_BIN_LABELS, SizeBins,
 __all__ = [
     "ANGLE_ELONGATION_THRESHOLD",
     "BOUNDARY_SCALES",
+    "CROSS_SECTION_KEYS",
     "DECISION_SCALE",
     "SIZE_BIN_LABELS",
+    "AggregateResult",
     "AreaNumberDensity",
     "BoundaryScore",
     "DiameterDistributionError",
+    "ImageEvaluation",
     "InstanceMatch",
     "InstanceShapes",
     "MatchedPair",
@@ -53,10 +62,13 @@ __all__ = [
     "SizeBinRecall",
     "SizeBins",
     "SizeBinsLoadError",
+    "aggregate",
     "area_number_density",
     "boundary_scores",
     "calibrate_size_bins",
+    "cross_sections",
     "diameter_distribution_error",
+    "evaluate_image",
     "instance_areas_um2",
     "instance_shapes",
     "load_size_bins",
@@ -65,5 +77,6 @@ __all__ = [
     "pore_count_error",
     "porosity_error",
     "recall_per_size_bin",
+    "scale_outlier_report",
     "shape_errors",
 ]
