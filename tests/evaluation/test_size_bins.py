@@ -90,17 +90,33 @@ def test_malformed_edges_are_rejected(edges, message):
 def test_areas_convert_pixels_to_square_micrometres():
     labels = _strip_labels([2, 3])
 
-    areas = instance_areas_um2(labels, pixel_size_um=2.0)
+    present, areas = instance_areas_um2(labels, pixel_size_um=2.0)
 
+    assert present.tolist() == [1, 2]
     assert areas.tolist() == [4 * 4.0, 9 * 4.0]
 
 
-def test_areas_reject_a_labelling_with_gaps():
+def test_areas_report_the_labels_present_when_numbering_has_gaps():
     labels = _strip_labels([2, 3])
     labels[labels == 1] = 0
 
-    with pytest.raises(ValueError, match="densely numbered"):
-        instance_areas_um2(labels, pixel_size_um=1.0)
+    present, areas = instance_areas_um2(labels, pixel_size_um=1.0)
+
+    assert present.tolist() == [2]
+    assert areas.tolist() == [9.0]
+
+
+def test_recall_handles_a_ground_truth_with_gaps_in_its_numbering():
+    labels = _strip_labels([2, 4, 8])
+    labels[labels == 2] = 0
+    bins = SizeBins(edges_um2=(10.0, 40.0, 150.0),
+                    n_calibration_instances=1000)
+
+    result = recall_per_size_bin(labels, np.array([3]), bins,
+                                 pixel_size_um=1.0)
+
+    assert sum(entry.n_gt for entry in result) == 2
+    assert sum(entry.n_matched for entry in result) == 1
 
 
 @pytest.mark.parametrize("pixel_size_um", [0.0, -1.0, np.nan])
@@ -124,10 +140,10 @@ def test_the_same_physical_pore_lands_in_the_same_class_on_both_scales():
 
     bins = SizeBins(edges_um2=(400.0, 1600.0, 3600.0),
                     n_calibration_instances=1000)
-    coarse = instance_areas_um2(_strip_labels([coarse_side_px]),
-                                pixel_size_um=COARSE_UM_PER_PX)
-    fine = instance_areas_um2(_strip_labels([fine_side_px]),
-                              pixel_size_um=FINE_UM_PER_PX)
+    _, coarse = instance_areas_um2(_strip_labels([coarse_side_px]),
+                                   pixel_size_um=COARSE_UM_PER_PX)
+    _, fine = instance_areas_um2(_strip_labels([fine_side_px]),
+                                 pixel_size_um=FINE_UM_PER_PX)
 
     assert bins.assign(coarse) == bins.assign(fine)
 
@@ -193,7 +209,7 @@ def test_nothing_matched_gives_zero_recall_not_nan():
 def test_a_matched_id_outside_the_ground_truth_is_rejected():
     labels = _strip_labels([2, 3])
 
-    with pytest.raises(ValueError, match="outside"):
+    with pytest.raises(ValueError, match="absent from"):
         recall_per_size_bin(labels, np.array([5]), _bins(),
                             pixel_size_um=1.0)
 

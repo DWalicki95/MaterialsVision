@@ -56,9 +56,11 @@ from scipy.ndimage import convolve
 
 logger = logging.getLogger(__name__)
 
-BOUNDARY_SCALES = (0.05, 0.1, 0.2)
+BOUNDARY_SCALES = (0.1,)
 
 DECISION_SCALE = 0.1
+
+DIAGNOSTIC_SCALES = (0.05, 0.1, 0.2)
 
 MIN_TOLERANCE_PX = 1.0
 
@@ -118,9 +120,13 @@ def boundary_scores(
         Predicted instance labels, same shape and convention.
     scales : tuple of float, optional
         Tolerances to score at, each a fraction of the mean annotated
-        pore diameter. The full curve is reported so that the result's
-        sensitivity to the tolerance is visible rather than asserted;
-        ``DECISION_SCALE`` is the one the checkpoint tie-break reads.
+        pore diameter. Defaults to ``BOUNDARY_SCALES``, which holds
+        the single decision tolerance: the cost of this metric grows
+        with the square of the tolerance and dominates the evaluation
+        budget, so a run scores one. ``DIAGNOSTIC_SCALES`` is the
+        wider sweep, for the one-off study of how much the choice of
+        tolerance changes the ordering of two policies; running it on
+        every evaluation would cost several times the training.
 
     Returns
     -------

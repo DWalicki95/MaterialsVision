@@ -16,6 +16,7 @@ from materials_vision.evaluation.aggregate import (CROSS_SECTION_KEYS,
                                                    scale_outlier_report)
 from materials_vision.evaluation.boundary import (BOUNDARY_SCALES,
                                                   DECISION_SCALE,
+                                                  DIAGNOSTIC_SCALES,
                                                   BoundaryScore,
                                                   boundary_scores)
 from materials_vision.evaluation.matching import (InstanceMatch, MatchedPair,
@@ -46,6 +47,7 @@ __all__ = [
     "BOUNDARY_SCALES",
     "CROSS_SECTION_KEYS",
     "DECISION_SCALE",
+    "DIAGNOSTIC_SCALES",
     "SIZE_BIN_LABELS",
     "AggregateResult",
     "AreaNumberDensity",

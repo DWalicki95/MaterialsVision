@@ -14,6 +14,7 @@ from cellpose.metrics import boundary_scores as cellpose_boundary_scores
 
 from materials_vision.evaluation.boundary import (BOUNDARY_SCALES,
                                                   DECISION_SCALE,
+                                                  DIAGNOSTIC_SCALES,
                                                   boundary_scores)
 
 FRAME = (60, 80)
@@ -66,7 +67,7 @@ def test_a_looser_tolerance_never_scores_worse():
     gt = _pores_away_from_the_edge()
     pred = np.roll(gt, 3, axis=0)
 
-    scores = boundary_scores(gt, pred)
+    scores = boundary_scores(gt, pred, scales=DIAGNOSTIC_SCALES)
     ordered = [scores[scale].f1 for scale in sorted(scores)]
 
     assert ordered == sorted(ordered)
@@ -76,10 +77,11 @@ def test_matches_cellpose_when_nothing_touches_the_frame_edge():
     gt = _pores_away_from_the_edge()
     pred = np.roll(gt, 2, axis=0)
 
-    ours = boundary_scores(gt, pred)
-    reference = cellpose_boundary_scores([gt], [pred], list(BOUNDARY_SCALES))
+    ours = boundary_scores(gt, pred, scales=DIAGNOSTIC_SCALES)
+    reference = cellpose_boundary_scores([gt], [pred],
+                                         list(DIAGNOSTIC_SCALES))
 
-    for index, scale in enumerate(BOUNDARY_SCALES):
+    for index, scale in enumerate(DIAGNOSTIC_SCALES):
         assert ours[scale].precision == pytest.approx(reference[0][index, 0])
         assert ours[scale].recall == pytest.approx(reference[1][index, 0])
         assert ours[scale].f1 == pytest.approx(reference[2][index, 0])
@@ -101,11 +103,22 @@ def test_frame_edge_outlines_are_actually_dropped():
 def test_tolerance_is_reported_and_scales_with_pore_size():
     gt = _pores_away_from_the_edge()
 
-    scores = boundary_scores(gt, gt.copy())
+    scores = boundary_scores(gt, gt.copy(), scales=DIAGNOSTIC_SCALES)
     tolerances = [scores[scale].tolerance_px for scale in sorted(scores)]
 
     assert tolerances == sorted(tolerances)
     assert all(tolerance >= 1.0 for tolerance in tolerances)
+
+
+def test_a_run_scores_one_tolerance_and_it_is_the_decision_one():
+    """The default is what an evaluation pays for on every image.
+
+    Scoring the wider sweep on every evaluation would cost several
+    times the training it is meant to judge, so the default holds the
+    decision tolerance alone and the sweep is a separate study.
+    """
+    assert BOUNDARY_SCALES == (DECISION_SCALE,)
+    assert DECISION_SCALE in DIAGNOSTIC_SCALES
 
 
 def test_tolerance_comes_from_the_annotation_not_the_prediction():

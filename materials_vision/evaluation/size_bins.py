@@ -264,39 +264,41 @@ def load_size_bins(path: Path) -> SizeBins:
 
 def instance_areas_um2(
     labels: np.ndarray, *, pixel_size_um: float
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Area of every instance in a label image, in square micrometres.
+
+    Labels need not be dense. Ground-truth masks are numbered ``1..n``
+    by the loader, but a prediction is under no such obligation and a
+    caller may hand over an annotation it has already filtered, so the
+    labels present are reported alongside their areas rather than
+    assumed to be positions.
 
     Parameters
     ----------
     labels : np.ndarray
-        Instance labels numbered ``1..n``, 0 as background.
+        Instance label image, 0 as background.
     pixel_size_um : float
         Physical size of one pixel, in micrometres.
 
     Returns
     -------
-    np.ndarray
-        Area per instance, indexed by ``label - 1``.
+    tuple of np.ndarray
+        The labels present, in ascending order, and the area of each.
 
     Raises
     ------
     ValueError
-        If the pixel size is not positive, or the labels are not dense.
+        If the pixel size is not positive.
     """
     if not np.isfinite(pixel_size_um) or pixel_size_um <= 0:
         raise ValueError(
             f"pixel_size_um must be positive, got {pixel_size_um}"
         )
     counts = np.bincount(labels.ravel())
-    if counts.size == 1:
-        return np.empty(0, dtype=float)
-    if np.any(counts[1:] == 0):
-        raise ValueError(
-            "labels are not densely numbered; an area indexed by "
-            "label would not line up with the instances"
-        )
-    return counts[1:].astype(float) * pixel_size_um ** 2
+    present = np.nonzero(counts)[0]
+    present = present[present > 0]
+    areas = counts[present].astype(float) * pixel_size_um ** 2
+    return present, areas
 
 
 def recall_per_size_bin(
@@ -311,7 +313,8 @@ def recall_per_size_bin(
     Parameters
     ----------
     gt_labels : np.ndarray
-        Ground-truth instance labels, densely numbered ``1..n``.
+        Ground-truth instance labels, 0 as background. Dense
+        numbering is not required.
     matched_gt_ids : np.ndarray
         Labels of the annotated instances the model found, i.e. the
         ``gt_id`` of every matched pair.
@@ -328,20 +331,26 @@ def recall_per_size_bin(
     Raises
     ------
     ValueError
-        If a matched label does not exist in the ground truth.
+        If a matched label does not exist in the ground truth, which
+        means the match was computed against a different image.
     """
-    areas = instance_areas_um2(gt_labels, pixel_size_um=pixel_size_um)
-    n_instances = areas.size
+    present, areas = instance_areas_um2(
+        gt_labels, pixel_size_um=pixel_size_um
+    )
 
     matched = np.asarray(matched_gt_ids, dtype=np.int64).ravel()
-    if matched.size and (matched.min() < 1 or matched.max() > n_instances):
+    position = np.searchsorted(present, matched)
+    if matched.size and (
+        np.any(position >= present.size)
+        or np.any(present[np.minimum(position, present.size - 1)] != matched)
+    ):
         raise ValueError(
-            f"matched ids fall outside the 1..{n_instances} labels "
-            f"present in gt_labels"
+            "matched ids include labels that are absent from "
+            "gt_labels"
         )
 
-    found = np.zeros(n_instances, dtype=bool)
-    found[matched - 1] = True
+    found = np.zeros(present.size, dtype=bool)
+    found[position] = True
     assignment = bins.assign(areas)
 
     return tuple(
