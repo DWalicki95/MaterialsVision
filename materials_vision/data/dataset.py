@@ -105,9 +105,14 @@ class InstanceSegmentationDataset(Dataset):
         ``build_label_transform()``.
     transform : Callable, optional
         Augmentation policy, called as ``transform(image, labels,
-        seed=...)`` and returning a new ``(image, labels)`` pair.
-        ``None`` means no augmentation, which is both the baseline
-        condition and the correct setting for validation.
+        record=..., seed=...)`` and returning a new ``(image, labels)``
+        pair. ``None`` means no augmentation, which is both the
+        baseline condition and the correct setting for validation.
+        The record is passed because scale augmentation is conditioned
+        on the sample's own calibration: the magnification range is
+        allowed on the coarse scale bin and pinned to 1.0 on the fine
+        one, so a policy that could not see ``scale_bin`` would have to
+        guess.
     run_seed : int, optional
         Seed of this run, mixed with the epoch and the sample index to
         seed augmentation.
@@ -211,6 +216,7 @@ class InstanceSegmentationDataset(Dataset):
             return prepared.image, prepared.labels
         return self._transform(
             prepared.image, prepared.labels,
+            record=prepared.record,
             seed=self.sample_seed(index),
         )
 

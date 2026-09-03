@@ -355,6 +355,36 @@ def border_instance_labels(labels: np.ndarray) -> np.ndarray:
     return touching[touching > 0]
 
 
+def is_densely_numbered(labels: np.ndarray) -> bool:
+    """Whether instance ids run ``1..n`` with no gaps.
+
+    Two consumers rely on dense numbering for different reasons and
+    report a gap through different exceptions: mask loading treats it
+    as a corrupt file, augmentation as a broken transform. The
+    predicate is shared so the two can never disagree on what "dense"
+    means; the wording of the failure stays with each caller.
+
+    An empty label image counts as dense - there is no id to be
+    missing.
+
+    Parameters
+    ----------
+    labels : np.ndarray
+        Instance label image, 0 as background.
+
+    Returns
+    -------
+    bool
+    """
+    present = np.unique(labels)
+    present = present[present > 0]
+    if present.size == 0:
+        return True
+    return bool(
+        np.array_equal(present, np.arange(1, present.size + 1))
+    )
+
+
 def _border_flags(
     relabelled: np.ndarray, n_instances: int
 ) -> np.ndarray:

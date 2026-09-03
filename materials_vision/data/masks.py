@@ -20,6 +20,8 @@ from typing import Optional
 import numpy as np
 import tifffile
 
+from materials_vision.data.instances import is_densely_numbered
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,16 +100,15 @@ def _check_dense_ids(labels: np.ndarray, path: Path) -> None:
     MaskLoadError
         If any id between 1 and the maximum is unused.
     """
+    if is_densely_numbered(labels):
+        return
     present = np.unique(labels)
     present = present[present > 0]
-    if present.size == 0:
-        return
     expected = np.arange(1, present.size + 1)
-    if not np.array_equal(present, expected):
-        missing = sorted(set(expected.tolist()) - set(present.tolist()))
-        raise MaskLoadError(
-            f"Mask {path} numbers {present.size} instance(s) up to id "
-            f"{int(present.max())}, leaving gaps at {missing[:10]}; "
-            f"ids must run 1..n so that instance count and maximum id "
-            f"agree"
-        )
+    missing = sorted(set(expected.tolist()) - set(present.tolist()))
+    raise MaskLoadError(
+        f"Mask {path} numbers {present.size} instance(s) up to id "
+        f"{int(present.max())}, leaving gaps at {missing[:10]}; "
+        f"ids must run 1..n so that instance count and maximum id "
+        f"agree"
+    )

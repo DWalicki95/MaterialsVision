@@ -94,7 +94,7 @@ def test_without_a_transform_the_sample_passes_through(dataset):
 def test_augmentation_receives_a_seed_and_its_output_is_used(dataset):
     seen = {}
 
-    def transform(image, labels, *, seed):
+    def transform(image, labels, *, record, seed):
         seen["seed"] = seed
         return image + 1, labels
 
@@ -103,6 +103,27 @@ def test_augmentation_receives_a_seed_and_its_output_is_used(dataset):
 
     assert seen["seed"] == dataset.sample_seed(2)
     assert float(x.max()) == 103.0
+
+
+def test_augmentation_receives_the_sample_record(dataset):
+    """Scale augmentation is conditioned on the sample's calibration.
+
+    How far an image may be magnified depends on how many micrometres
+    one of its pixels covers, which only the record knows. Without it a
+    policy would have to magnify every image by the same amount and
+    would push the finely sampled ones past the resolution that was
+    actually photographed.
+    """
+    seen = {}
+
+    def transform(image, labels, *, record, seed):
+        seen["image_id"] = record.image_id
+        return image, labels
+
+    dataset._transform = transform
+    dataset[1]
+
+    assert seen["image_id"] == "img_1"
 
 
 def test_augmentation_seed_depends_on_index_and_epoch(dataset):
