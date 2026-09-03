@@ -34,6 +34,7 @@ import albumentations as A
 import numpy as np
 
 from materials_vision.augmentation.config import (FAMILY_BLUR,
+                                                  FAMILY_MASK_AWARE,
                                                   FAMILY_ORIENTATION,
                                                   FAMILY_SCALE, FAMILY_TONAL,
                                                   MASK_CHANGING_FAMILIES,
@@ -43,6 +44,8 @@ from materials_vision.augmentation.integrity import (check_connectivity,
                                                      check_labels_preserved,
                                                      check_mask_untouched,
                                                      check_sample)
+from materials_vision.augmentation.mask_aware import (
+    build_mask_aware, summarize_darkening_params, summarize_field_params)
 from materials_vision.augmentation.photometric import (build_blur, build_tonal,
                                                        summarize_blur_params)
 from materials_vision.augmentation.records import (AugmentationRecord,
@@ -61,6 +64,8 @@ logger = logging.getLogger(__name__)
 PARAM_SUMMARIES = {
     "GaussianBlur": summarize_blur_params,
     "MultiScaleCrop": summarize_scale_params,
+    "PoreBrightnessField": summarize_field_params,
+    "PoreDarkening": summarize_darkening_params,
 }
 
 # Keys the library adds to every transformation's parameters describing
@@ -334,6 +339,12 @@ def _build_steps(
             FAMILY_ORIENTATION,
             ("D4",),
             build_orientation(config.orientation),
+        ))
+    if config.mask_aware is not None:
+        steps.append((
+            FAMILY_MASK_AWARE,
+            ("PoreBrightnessField", "PoreDarkening"),
+            build_mask_aware(config.mask_aware),
         ))
     if config.tonal is not None:
         steps.append((

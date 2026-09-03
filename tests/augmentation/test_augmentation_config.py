@@ -1,10 +1,11 @@
 """Tests for the frozen family parameters and how a run records them."""
 from materials_vision.augmentation.config import (FAMILY_BLUR,
+                                                  FAMILY_MASK_AWARE,
                                                   FAMILY_ORIENTATION,
                                                   FAMILY_SCALE, FAMILY_SEPTUM,
                                                   FAMILY_TONAL,
                                                   MASK_CHANGING_FAMILIES,
-                                                  BlurConfig,
+                                                  BlurConfig, MaskAwareConfig,
                                                   OrientationConfig,
                                                   PolicyConfig, ScaleConfig,
                                                   TonalConfig,
@@ -51,16 +52,25 @@ def test_families_are_listed_in_the_order_they_apply():
     config = PolicyConfig(
         blur=BlurConfig(), tonal=TonalConfig(),
         orientation=OrientationConfig(), scale=ScaleConfig(),
+        mask_aware=MaskAwareConfig(),
     )
 
     assert config.families == (
-        FAMILY_SCALE, FAMILY_ORIENTATION, FAMILY_TONAL, FAMILY_BLUR,
+        FAMILY_SCALE, FAMILY_ORIENTATION, FAMILY_MASK_AWARE,
+        FAMILY_TONAL, FAMILY_BLUR,
     )
 
 
 def test_a_policy_that_cuts_a_window_can_change_the_mask():
     """What the integrity checks key off after every sample."""
     assert PolicyConfig(scale=ScaleConfig()).changes_mask is True
+
+
+def test_shading_inside_pores_does_not_count_as_changing_the_mask():
+    """It reads the annotation to place itself and writes to none."""
+    config = PolicyConfig(mask_aware=MaskAwareConfig())
+
+    assert config.changes_mask is False
 
 
 def test_only_cutting_and_dividing_can_change_the_mask():

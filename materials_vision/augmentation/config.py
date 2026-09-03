@@ -35,6 +35,9 @@ FAMILY_SEPTUM = "F5_septum"
 # what the integrity checks verify after every sample.
 MASK_CHANGING_FAMILIES = frozenset({FAMILY_SCALE, FAMILY_SEPTUM})
 
+# Shapes the shading inside a pore may take.
+FIELD_KINDS = frozenset({"constant", "gradient", "random"})
+
 
 @dataclass(frozen=True)
 class OrientationConfig:
@@ -263,6 +266,156 @@ class BlurConfig:
 
 
 @dataclass(frozen=True)
+class MaskAwareConfig:
+    """Shading painted inside pores, leaving the annotation alone.
+
+    Two things inside a pore can be mistaken for its edge: a slow
+    change of brightness across the interior, and a dark patch where
+    the surface has fallen away and the image looks deeper into the
+    material. Neither is a boundary. A model that reads them as one
+    reports a single pore as two, which is the error this family
+    exists to suppress.
+
+    The two are alternatives, never both on the same sample: applied
+    together they would compound inside the same pore and produce an
+    interior no photograph would show.
+
+    Parameters
+    ----------
+    p : float
+        Probability that one of the two fires.
+    pore_fraction : tuple of float
+        Share of the eligible pores the shading covers, drawn per
+        sample. Not all of them: an image where every pore is shaded
+        teaches the shading as a property of the material rather than
+        as a variation to be ignored.
+    strength : tuple of float
+        Amplitude of the shading, as a fraction of the image's own
+        tonal range. Measured against the image rather than against
+        the full scale because the images come from two microscopes
+        whose exposures differ, and a fixed number of grey levels
+        would be a strong effect on one and invisible on the other.
+    field_kinds : tuple of str
+        Shapes the shading may take: one value across the pore, a
+        linear gradient, or a smooth random surface.
+    field_grid_sides : tuple of int
+        Side of the coarse grid the random surface is drawn on before
+        being smoothed out to the pore's size. Small on purpose - the
+        shading has to stay lower in frequency than anything the
+        annotation calls a boundary.
+    min_core_distance_px : float
+        A pore is left alone unless some pixel of it lies at least
+        this far from anything outside it. Below that the shading
+        would be squeezed into the fade-out and amount to nothing,
+        and the dark patch would have nowhere to sit clear of the
+        boundary.
+    darkened_pores : tuple of int
+        How many pores may receive a dark patch, drawn inclusively.
+    darkened_area : tuple of float
+        Area of the patch as a share of the pore holding it.
+    darkening_factor : tuple of float
+        What the patch multiplies the image by at its centre. Below
+        one, so the patch is always darker than its surroundings.
+    darkening_margin_px : float
+        Distance the patch keeps from the pore's boundary. Touching
+        it would deform the edge the annotation describes, which is
+        the one thing this family must not do.
+    darkening_edge_softness : float
+        Width of the patch's fade-out, as a share of its radius. A
+        hard-edged patch is a new boundary drawn inside a pore, which
+        would teach exactly the mistake the family means to prevent.
+    darkening_max_attempts : int
+        Placements tried before a pore is left alone.
+
+    Notes
+    -----
+    The strength range is the setting for ordinary training. Judging
+    the family by eye is done with a weaker and a stronger one as
+    well, and a deliberately punishing variant - larger patches at a
+    lower factor - exists to find where recognizability breaks. All
+    three are expressed by building this object with other numbers,
+    which is why none of them is hard-coded anywhere else.
+    """
+
+    p: float = 0.3
+    pore_fraction: tuple[float, float] = (0.30, 0.50)
+    strength: tuple[float, float] = (0.08, 0.15)
+    field_kinds: tuple[str, ...] = ("constant", "gradient", "random")
+    field_grid_sides: tuple[int, ...] = (2, 3)
+    min_core_distance_px: float = 3.0
+    darkened_pores: tuple[int, int] = (1, 2)
+    darkened_area: tuple[float, float] = (0.05, 0.20)
+    darkening_factor: tuple[float, float] = (0.60, 0.85)
+    darkening_margin_px: float = 2.0
+    darkening_edge_softness: float = 0.25
+    darkening_max_attempts: int = 8
+
+    def __post_init__(self) -> None:
+        """Reject settings that could not describe a draw.
+
+        Raises
+        ------
+        ValueError
+        """
+        _check_range("pore_fraction", self.pore_fraction, 0.0, 1.0)
+        _check_range("strength", self.strength, 0.0, 1.0)
+        _check_range("darkened_area", self.darkened_area, 0.0, 1.0)
+        _check_range(
+            "darkening_factor", self.darkening_factor, 0.0, 1.0
+        )
+        if not self.field_kinds:
+            raise ValueError("field_kinds must offer at least one")
+        unknown = set(self.field_kinds) - FIELD_KINDS
+        if unknown:
+            raise ValueError(
+                f"unknown field kind(s) {sorted(unknown)}; known kinds "
+                f"are {sorted(FIELD_KINDS)}"
+            )
+        if any(side < 2 for side in self.field_grid_sides):
+            raise ValueError(
+                "a random field needs a grid of at least 2 per side"
+            )
+        low, high = self.darkened_pores
+        if low < 1 or high < low:
+            raise ValueError(
+                f"darkened_pores must be an increasing range of at "
+                f"least one pore, got {self.darkened_pores}"
+            )
+        if self.darkening_margin_px >= self.min_core_distance_px:
+            raise ValueError(
+                f"a pore eligible at {self.min_core_distance_px} px "
+                f"from its boundary has no room for a patch kept "
+                f"{self.darkening_margin_px} px clear of it"
+            )
+        if not 0.0 < self.darkening_edge_softness <= 1.0:
+            raise ValueError(
+                f"darkening_edge_softness must be a share of the "
+                f"radius in (0, 1], got "
+                f"{self.darkening_edge_softness}"
+            )
+        if self.darkening_max_attempts < 1:
+            raise ValueError(
+                "darkening_max_attempts must allow at least one try"
+            )
+
+
+def _check_range(
+    name: str,
+    value: tuple[float, float],
+    lowest: float,
+    highest: float,
+) -> None:
+    """Reject a range that runs backwards or leaves its bounds."""
+    low, high = value
+    if low > high:
+        raise ValueError(f"{name} range {value} runs backwards")
+    if low < lowest or high > highest:
+        raise ValueError(
+            f"{name} must lie within [{lowest}, {highest}], got {value}"
+        )
+
+
+@dataclass(frozen=True)
 class PolicyConfig:
     """The families making up one augmentation policy.
 
@@ -275,6 +428,7 @@ class PolicyConfig:
     ----------
     scale : ScaleConfig, optional
     orientation : OrientationConfig, optional
+    mask_aware : MaskAwareConfig, optional
     tonal : TonalConfig, optional
     blur : BlurConfig, optional
 
@@ -286,6 +440,7 @@ class PolicyConfig:
 
     scale: Optional[ScaleConfig] = None
     orientation: Optional[OrientationConfig] = None
+    mask_aware: Optional[MaskAwareConfig] = None
     tonal: Optional[TonalConfig] = None
     blur: Optional[BlurConfig] = None
 
@@ -336,6 +491,7 @@ def enabled_families(
     declared = (
         (FAMILY_SCALE, config.scale),
         (FAMILY_ORIENTATION, config.orientation),
+        (FAMILY_MASK_AWARE, config.mask_aware),
         (FAMILY_TONAL, config.tonal),
         (FAMILY_BLUR, config.blur),
     )

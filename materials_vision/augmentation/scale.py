@@ -38,6 +38,7 @@ import albumentations as A
 import numpy as np
 from skimage.transform import resize
 
+from materials_vision.augmentation.arrays import to_source_dtype
 from materials_vision.augmentation.config import ScaleConfig
 from materials_vision.data.instances import CroppedSample, apply_content_crop
 
@@ -341,12 +342,7 @@ def _magnify_image(
     magnified = resize(
         image, shape, order=1, preserve_range=True, anti_aliasing=False
     )
-    if np.issubdtype(image.dtype, np.integer):
-        limits = np.iinfo(image.dtype)
-        magnified = np.clip(
-            np.rint(magnified), limits.min, limits.max
-        )
-    return magnified.astype(image.dtype, copy=False)
+    return to_source_dtype(magnified, image)
 
 
 def _magnify_labels(
