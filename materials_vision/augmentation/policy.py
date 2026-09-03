@@ -35,9 +35,12 @@ import numpy as np
 
 from materials_vision.augmentation.config import (FAMILY_BLUR,
                                                   FAMILY_ORIENTATION,
-                                                  FAMILY_TONAL, PolicyConfig)
+                                                  FAMILY_SCALE, FAMILY_TONAL,
+                                                  MASK_CHANGING_FAMILIES,
+                                                  PolicyConfig)
 from materials_vision.augmentation.geometric import build_orientation
-from materials_vision.augmentation.integrity import (check_labels_preserved,
+from materials_vision.augmentation.integrity import (check_connectivity,
+                                                     check_labels_preserved,
                                                      check_mask_untouched,
                                                      check_sample)
 from materials_vision.augmentation.photometric import (build_blur, build_tonal,
@@ -45,6 +48,8 @@ from materials_vision.augmentation.photometric import (build_blur, build_tonal,
 from materials_vision.augmentation.records import (AugmentationRecord,
                                                    AugmentedSample,
                                                    TransformRecord, log_record)
+from materials_vision.augmentation.scale import (build_scale,
+                                                 summarize_scale_params)
 
 if TYPE_CHECKING:
     from materials_vision.data.samples import SampleRecord
@@ -53,7 +58,10 @@ logger = logging.getLogger(__name__)
 
 # Transformations whose reported parameters are rewritten before they
 # are recorded, because what they report is not what a reader needs.
-PARAM_SUMMARIES = {"GaussianBlur": summarize_blur_params}
+PARAM_SUMMARIES = {
+    "GaussianBlur": summarize_blur_params,
+    "MultiScaleCrop": summarize_scale_params,
+}
 
 # Keys the library adds to every transformation's parameters describing
 # the frame it worked on. They are not draws, and keeping them would
@@ -88,7 +96,6 @@ class AugmentationPolicy:
             [transform for _, _, transform in self._steps],
             save_applied_params=True,
         )
-        self._changes_mask = config.changes_mask
         self._moves_pixels = config.orientation is not None
 
     @property
@@ -168,6 +175,11 @@ class AugmentationPolicy:
         image : np.ndarray
         labels : np.ndarray
         record : SampleRecord
+            Three of its fields reach the pipeline: the identifier,
+            which names the sample in log lines and error messages,
+            and the two describing the sample's physical scale, which
+            the crop needs because how far an image may be magnified
+            is a property of the image and not of the policy.
         seed : int
 
         Returns
@@ -182,21 +194,28 @@ class AugmentationPolicy:
         """
         image_id = record.image_id
         self._compose.set_random_seed(int(seed))
-        result = self._compose(image=image, mask=labels)
+        result = self._compose(
+            image=image,
+            mask=labels,
+            scale_bin=record.scale_bin,
+            q_max_i=record.q_max_i,
+        )
         augmented_image = result["image"]
         augmented_labels = result["mask"]
 
+        transforms = self._transform_records(
+            result.get("applied_transforms", ())
+        )
         context = f"{image_id} after {'+'.join(self.families)}"
         self._verify(
-            labels, augmented_image, augmented_labels, context
+            labels, augmented_image, augmented_labels, context,
+            transforms,
         )
 
         augmentation = AugmentationRecord(
             image_id=str(image_id),
             seed=int(seed),
-            transforms=self._transform_records(
-                result.get("applied_transforms", ())
-            ),
+            transforms=transforms,
         )
         log_record(augmentation)
         return AugmentedSample(
@@ -211,15 +230,24 @@ class AugmentationPolicy:
         augmented_image: np.ndarray,
         augmented_labels: np.ndarray,
         context: str,
+        transforms: tuple[TransformRecord, ...],
     ) -> None:
-        """Check the augmented sample against what the policy may do.
+        """Check the augmented sample against what actually happened.
 
-        The strongest applicable statement is used. A policy that only
-        changes brightness must leave the mask bitwise identical; one
-        that also moves pixels may rearrange it but not change any
-        instance's area; one that cuts or divides instances is checked
-        by the transformation responsible, which is the only place that
-        knows what change was intended.
+        The strongest applicable statement is used, and which one that
+        is depends on the sample rather than on the policy. A policy
+        able to cut or divide instances does so on only some of its
+        samples; on the rest the mask is either untouched or merely
+        rearranged, and holding those to the weaker check would give
+        up the stronger one for nothing.
+
+        Where the mask really did change, the requirement that remains
+        is that no instance ended up in two pieces. That is not
+        cosmetic: the training targets are built per instance from a
+        distance transform, so two pieces become two basins and teach
+        the model to divide a pore the annotation regards as whole.
+        The check costs a labelling pass over the frame, which is why
+        it runs only on the samples that need it.
         """
         check_sample(
             augmented_image,
@@ -227,9 +255,9 @@ class AugmentationPolicy:
             context=context,
             expect_instances=int(labels.max()) > 0,
         )
-        if self._changes_mask:
-            return
-        if self._moves_pixels:
+        if _mask_was_changed(transforms):
+            check_connectivity(augmented_labels, context=context)
+        elif self._moves_pixels:
             check_labels_preserved(
                 labels, augmented_labels, context=context
             )
@@ -248,6 +276,13 @@ class AugmentationPolicy:
         one actually fires is part of what a comparison against it
         means, and it cannot be recovered from the samples that did
         fire.
+
+        A transformation that validates its own draw reports how many
+        draws it took and why it gave up, if it did. Those two are
+        lifted out of the reported values into their own fields, since
+        they describe the drawing rather than what was drawn, and one
+        of them has to be visible in the log without reading through
+        a family's parameters.
         """
         by_class = {name: params for name, params in applied}
         records = []
@@ -261,12 +296,17 @@ class AugmentationPolicy:
                     TransformRecord(family=family, applied=False)
                 )
                 continue
+            params = _readable_params(drawn, by_class[drawn])
+            attempts = int(params.pop("attempts", 1))
+            fallback = params.pop("fallback", None)
             records.append(
                 TransformRecord(
                     family=family,
                     applied=True,
                     name=drawn,
-                    params=_readable_params(drawn, by_class[drawn]),
+                    params=params,
+                    attempts=attempts,
+                    fallback=fallback,
                 )
             )
         return tuple(records)
@@ -283,6 +323,12 @@ def _build_steps(
     one name; no name belongs to two families.
     """
     steps: list[tuple[str, tuple[str, ...], Any]] = []
+    if config.scale is not None:
+        steps.append((
+            FAMILY_SCALE,
+            ("MultiScaleCrop",),
+            build_scale(config.scale),
+        ))
     if config.orientation is not None:
         steps.append((
             FAMILY_ORIENTATION,
@@ -302,6 +348,39 @@ def _build_steps(
             build_blur(config.blur),
         ))
     return tuple(steps)
+
+
+def _mask_was_changed(
+    transforms: Iterable[TransformRecord],
+) -> bool:
+    """Whether a family entitled to change the mask actually did.
+
+    Three conditions, all necessary: the family must be one of those
+    allowed to cut or divide instances, it must have fired, and it
+    must report having changed anything. The third matters because
+    such a family can fire and still leave the mask alone - a crop
+    that draws the identity magnification is the ordinary case, not a
+    corner one, and paying for a labelling pass on those samples would
+    be paying for nothing.
+
+    A family that reports nothing is treated as having changed the
+    mask, so a transformation that forgets to say gets the safe answer
+    rather than the cheap one.
+
+    Parameters
+    ----------
+    transforms : Iterable of TransformRecord
+
+    Returns
+    -------
+    bool
+    """
+    return any(
+        entry.applied
+        and entry.family in MASK_CHANGING_FAMILIES
+        and bool(entry.params.get("changed_mask", True))
+        for entry in transforms
+    )
 
 
 def _readable_params(

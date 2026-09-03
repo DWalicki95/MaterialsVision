@@ -33,7 +33,9 @@ from materials_vision.augmentation.config import (FAMILY_BLUR,
                                                   MASK_CHANGING_FAMILIES,
                                                   BlurConfig,
                                                   OrientationConfig,
-                                                  PolicyConfig, TonalConfig,
+                                                  PolicyConfig, ScaleConfig,
+                                                  TonalConfig,
+                                                  enabled_families,
                                                   policy_run_metadata)
 from materials_vision.augmentation.integrity import (IntegrityError,
                                                      check_connectivity,
@@ -44,6 +46,7 @@ from materials_vision.augmentation.policy import AugmentationPolicy
 from materials_vision.augmentation.records import (AugmentationRecord,
                                                    AugmentedSample,
                                                    TransformRecord)
+from materials_vision.augmentation.scale import MultiScaleCrop
 
 __all__ = [
     "FAMILY_BLUR",
@@ -58,13 +61,16 @@ __all__ = [
     "AugmentedSample",
     "BlurConfig",
     "IntegrityError",
+    "MultiScaleCrop",
     "OrientationConfig",
     "PolicyConfig",
+    "ScaleConfig",
     "TonalConfig",
     "TransformRecord",
     "check_connectivity",
     "check_labels_preserved",
     "check_mask_untouched",
     "check_sample",
+    "enabled_families",
     "policy_run_metadata",
 ]

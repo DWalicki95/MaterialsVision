@@ -6,7 +6,8 @@ from materials_vision.augmentation.config import (FAMILY_BLUR,
                                                   MASK_CHANGING_FAMILIES,
                                                   BlurConfig,
                                                   OrientationConfig,
-                                                  PolicyConfig, TonalConfig,
+                                                  PolicyConfig, ScaleConfig,
+                                                  TonalConfig,
                                                   policy_run_metadata)
 
 
@@ -14,6 +15,7 @@ def test_the_starting_values_are_the_ones_that_were_approved():
     """Changing any of these changes every run that uses them."""
     tonal = TonalConfig()
     blur = BlurConfig()
+    scale = ScaleConfig()
 
     assert tonal.brightness_limit == (-0.10, 0.10)
     assert tonal.contrast_limit == (-0.15, 0.15)
@@ -23,6 +25,15 @@ def test_the_starting_values_are_the_ones_that_were_approved():
     assert blur.sigma_px == (0.2, 0.8)
     assert blur.p == 0.2
     assert OrientationConfig().p == 1.0
+    assert scale.bands == (
+        (0.50, 1.00, 1.00), (0.30, 1.05, 1.15), (0.20, 1.15, 1.30),
+    )
+    assert scale.q_max == 1.30
+    assert scale.magnified_bins == ("coarse",)
+    assert scale.min_instances == 3
+    assert scale.max_retries == 5
+    assert scale.min_fragment_area_px2 == 432.0
+    assert scale.p == 1.0
 
 
 def test_an_empty_policy_enables_nothing():
@@ -30,14 +41,26 @@ def test_an_empty_policy_enables_nothing():
 
 
 def test_families_are_listed_in_the_order_they_apply():
+    """The order is the pipeline's, not the order they were named.
+
+    Cutting a window out of the frame comes first: adjusting the
+    brightness of a frame the model never sees would measure the wrong
+    statistics, and turning the sample first would only mean turning
+    it twice.
+    """
     config = PolicyConfig(
         blur=BlurConfig(), tonal=TonalConfig(),
-        orientation=OrientationConfig(),
+        orientation=OrientationConfig(), scale=ScaleConfig(),
     )
 
     assert config.families == (
-        FAMILY_ORIENTATION, FAMILY_TONAL, FAMILY_BLUR,
+        FAMILY_SCALE, FAMILY_ORIENTATION, FAMILY_TONAL, FAMILY_BLUR,
     )
+
+
+def test_a_policy_that_cuts_a_window_can_change_the_mask():
+    """What the integrity checks key off after every sample."""
+    assert PolicyConfig(scale=ScaleConfig()).changes_mask is True
 
 
 def test_only_cutting_and_dividing_can_change_the_mask():

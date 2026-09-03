@@ -66,6 +66,124 @@ class OrientationConfig:
 
 
 @dataclass(frozen=True)
+class ScaleConfig:
+    """A window cut from the frame and magnified back to fill it.
+
+    The dataset was photographed at two scales that differ by a factor
+    of about 1.3, and the coarser one accounts for 88% of it. Left
+    alone, a model learns the pore size typical of that majority.
+    Cutting a smaller window and magnifying it back shows the same
+    foam at the finer scale without inventing detail: every pixel of
+    the window is real, only spread further apart.
+
+    Parameters
+    ----------
+    bands : tuple of tuple
+        The distribution of the magnification ``q``, as
+        ``(weight, low, high)`` triples. A band is drawn by weight and
+        ``q`` then uniformly from its range; a band whose bounds are
+        equal contributes that value exactly. The first band is the
+        identity, so half of the samples come through untouched.
+    magnified_bins : tuple of str
+        Scale bins allowed to magnify. Only the coarse bin is: an
+        image already at the finest scale in the dataset has nothing
+        to be magnified towards, and the six close-ups are three to
+        thirteen times finer than everything else, so their headroom
+        is an artefact of their being a different imaging task.
+    min_instances : int
+        Instances a window must contain to be accepted.
+    max_retries : int
+        Re-draws allowed after a rejected window, so a sample costs at
+        most ``max_retries + 1`` draws before it gives up.
+    min_fragment_area_px2 : float
+        Smallest area, in source pixels squared, a fragment cut by the
+        window may keep and still count as an instance. The first
+        percentile of the real annotated areas, so the window never
+        manufactures a label smaller than anything an annotator drew.
+    p : float
+        Probability the family fires. One, because the identity is a
+        member of the distribution rather than the alternative to it -
+        the same arrangement as the orientation family.
+
+    Notes
+    -----
+    ``q >= 1`` throughout: the window is always smaller than the frame
+    and is always magnified, never reduced. Reduction would ask the
+    model to recognize pores finer than any that were photographed.
+
+    Only the window position is re-drawn on a rejection, never ``q``.
+    Re-drawing ``q`` would let a rejection push the sample towards the
+    weaker bands, and the measured distribution would then differ from
+    the frozen one by an amount nobody chose.
+    """
+
+    bands: tuple[tuple[float, float, float], ...] = (
+        (0.50, 1.00, 1.00),
+        (0.30, 1.05, 1.15),
+        (0.20, 1.15, 1.30),
+    )
+    magnified_bins: tuple[str, ...] = ("coarse",)
+    min_instances: int = 3
+    max_retries: int = 5
+    min_fragment_area_px2: float = 432.0
+    p: float = 1.0
+
+    def __post_init__(self) -> None:
+        """Reject a distribution that does not describe a draw.
+
+        The other families hold single numbers, which are wrong only
+        by being wrong values. This one holds a distribution, which
+        can also be malformed - weights that do not sum to one, a
+        range running backwards, a magnification below one - and each
+        of those would produce samples silently unlike the frozen
+        policy rather than an error.
+
+        Raises
+        ------
+        ValueError
+        """
+        if not self.bands:
+            raise ValueError("bands must describe at least one band")
+        total = sum(weight for weight, _, _ in self.bands)
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError(
+                f"band weights must sum to 1, got {total}"
+            )
+        for weight, low, high in self.bands:
+            if weight < 0:
+                raise ValueError(f"band weight {weight} is negative")
+            if low < 1.0:
+                raise ValueError(
+                    f"q must be >= 1; band lower bound is {low}"
+                )
+            if high < low:
+                raise ValueError(f"band range [{low}, {high}] is empty")
+        if self.min_instances < 1:
+            raise ValueError(
+                f"min_instances must be >= 1, got {self.min_instances}"
+            )
+        if self.max_retries < 0:
+            raise ValueError(
+                f"max_retries must be >= 0, got {self.max_retries}"
+            )
+        if self.min_fragment_area_px2 < 0:
+            raise ValueError(
+                f"min_fragment_area_px2 must be >= 0, got "
+                f"{self.min_fragment_area_px2}"
+            )
+
+    @property
+    def q_max(self) -> float:
+        """Largest magnification the distribution can produce.
+
+        Returns
+        -------
+        float
+        """
+        return max(high for _, _, high in self.bands)
+
+
+@dataclass(frozen=True)
 class TonalConfig:
     """Brightness/contrast or gamma, drawn one at a time.
 
@@ -155,11 +273,18 @@ class PolicyConfig:
 
     Parameters
     ----------
+    scale : ScaleConfig, optional
     orientation : OrientationConfig, optional
     tonal : TonalConfig, optional
     blur : BlurConfig, optional
+
+    Notes
+    -----
+    The fields are declared in the order the pipeline applies them, so
+    reading the class is reading the order.
     """
 
+    scale: Optional[ScaleConfig] = None
     orientation: Optional[OrientationConfig] = None
     tonal: Optional[TonalConfig] = None
     blur: Optional[BlurConfig] = None
@@ -175,12 +300,7 @@ class PolicyConfig:
         -------
         tuple of str
         """
-        enabled = (
-            (FAMILY_ORIENTATION, self.orientation),
-            (FAMILY_TONAL, self.tonal),
-            (FAMILY_BLUR, self.blur),
-        )
-        return tuple(name for name, cfg in enabled if cfg is not None)
+        return tuple(name for name, _ in enabled_families(self))
 
     @property
     def changes_mask(self) -> bool:
@@ -191,6 +311,37 @@ class PolicyConfig:
         bool
         """
         return bool(MASK_CHANGING_FAMILIES.intersection(self.families))
+
+
+def enabled_families(
+    config: PolicyConfig,
+) -> tuple[tuple[str, Any], ...]:
+    """Pair each enabled family's code with its configuration.
+
+    One statement of the pipeline order, in the one place both the
+    policy's own listing and a run's record read it from. Written out
+    twice, the two could drift, and a run would then record an order
+    different from the one it applied.
+
+    Parameters
+    ----------
+    config : PolicyConfig
+
+    Returns
+    -------
+    tuple of tuple
+        ``(family_code, family_config)``, in application order,
+        omitting families that are switched off.
+    """
+    declared = (
+        (FAMILY_SCALE, config.scale),
+        (FAMILY_ORIENTATION, config.orientation),
+        (FAMILY_TONAL, config.tonal),
+        (FAMILY_BLUR, config.blur),
+    )
+    return tuple(
+        (name, cfg) for name, cfg in declared if cfg is not None
+    )
 
 
 def policy_run_metadata(config: PolicyConfig) -> dict[str, Any]:
@@ -209,14 +360,9 @@ def policy_run_metadata(config: PolicyConfig) -> dict[str, Any]:
     -------
     dict
     """
-    parameters: dict[str, Any] = {}
-    for name, cfg in (
-        (FAMILY_ORIENTATION, config.orientation),
-        (FAMILY_TONAL, config.tonal),
-        (FAMILY_BLUR, config.blur),
-    ):
-        if cfg is not None:
-            parameters[name] = vars(cfg).copy()
+    parameters: dict[str, Any] = {
+        name: vars(cfg).copy() for name, cfg in enabled_families(config)
+    }
     return {
         "families": list(config.families),
         "order": list(config.families),

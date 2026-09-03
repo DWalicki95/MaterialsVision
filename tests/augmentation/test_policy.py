@@ -15,9 +15,11 @@ import pytest
 
 from materials_vision.augmentation.config import (FAMILY_BLUR,
                                                   FAMILY_ORIENTATION,
-                                                  FAMILY_TONAL, BlurConfig,
+                                                  FAMILY_SCALE, FAMILY_TONAL,
+                                                  BlurConfig,
                                                   OrientationConfig,
-                                                  PolicyConfig, TonalConfig)
+                                                  PolicyConfig, ScaleConfig,
+                                                  TonalConfig)
 from materials_vision.augmentation.integrity import IntegrityError
 from materials_vision.augmentation.policy import AugmentationPolicy
 
@@ -25,11 +27,14 @@ SEEDS = (11, 12, 13, 14, 15, 16, 17, 18)
 
 
 class _FakeRecord:
-    """Stands in for SampleRecord; the policy only reads the id."""
+    """Stands in for SampleRecord; the policy reads three fields."""
 
-    def __init__(self, image_id="AS1_40_x1", scale_bin="coarse"):
+    def __init__(
+        self, image_id="AS1_40_x1", scale_bin="coarse", q_max_i=1.31
+    ):
         self.image_id = image_id
         self.scale_bin = scale_bin
+        self.q_max_i = q_max_i
 
 
 def _sample(height=40, width=64):
@@ -57,11 +62,11 @@ def test_families_are_applied_in_a_fixed_order():
     """Order follows the pipeline, not the order they were named."""
     policy = AugmentationPolicy(PolicyConfig(
         blur=BlurConfig(), orientation=OrientationConfig(),
-        tonal=TonalConfig(),
+        tonal=TonalConfig(), scale=ScaleConfig(),
     ))
 
     assert policy.families == (
-        FAMILY_ORIENTATION, FAMILY_TONAL, FAMILY_BLUR,
+        FAMILY_SCALE, FAMILY_ORIENTATION, FAMILY_TONAL, FAMILY_BLUR,
     )
 
 
@@ -69,7 +74,7 @@ def test_the_policy_and_its_configuration_agree_on_the_order():
     """Two places state the order; they must not be able to diverge."""
     config = PolicyConfig(
         orientation=OrientationConfig(), tonal=TonalConfig(),
-        blur=BlurConfig(),
+        blur=BlurConfig(), scale=ScaleConfig(),
     )
 
     assert AugmentationPolicy(config).families == config.families
@@ -131,6 +136,51 @@ def test_orientation_preserves_every_instance_area():
         assert np.array_equal(
             np.sort(np.bincount(result.labels.ravel())[1:]), expected
         )
+
+
+def test_a_crop_may_change_instance_areas_and_a_turn_may_not():
+    """The checks after a sample follow the sample, not the policy.
+
+    Cutting a window legitimately takes area off the instances it
+    crosses, so the rule that every area survives a transformation
+    cannot apply to a sample that was cut. It still applies to the
+    samples the same policy left uncut, which is why the choice is
+    made per sample.
+    """
+    image, labels = _sample(height=64, width=64)
+    labels[:] = 0
+    labels[8:56, 8:24] = 1
+    labels[8:56, 28:44] = 2
+    labels[8:56, 48:60] = 3
+    policy = _policy(
+        scale=ScaleConfig(
+            bands=((1.0, 1.30, 1.30),), min_fragment_area_px2=20.0,
+        ),
+        orientation=OrientationConfig(),
+    )
+    before = np.sort(np.bincount(labels.ravel())[1:])
+
+    result = policy.apply(image, labels, record=_FakeRecord(), seed=4)
+    after = np.sort(np.bincount(result.labels.ravel())[1:])
+
+    assert not np.array_equal(before, after)
+
+
+def test_a_policy_that_can_cut_still_guards_the_samples_it_did_not():
+    """An identity draw leaves the mask exactly as it was."""
+    image, labels = _sample()
+    policy = _policy(
+        scale=ScaleConfig(bands=((1.0, 1.00, 1.00),)),
+        tonal=TonalConfig(p=1.0),
+    )
+
+    for seed in SEEDS:
+        result = policy.apply(
+            image, labels, record=_FakeRecord(), seed=seed
+        )
+
+        assert np.array_equal(result.labels, labels)
+        assert result.labels.dtype == labels.dtype
 
 
 def test_the_mask_never_gains_an_id_nobody_annotated():
@@ -270,6 +320,7 @@ def test_augmentation_does_not_touch_the_global_random_state():
     """
     image, labels = _sample()
     policy = _policy(
+        scale=ScaleConfig(min_fragment_area_px2=20.0),
         orientation=OrientationConfig(), tonal=TonalConfig(p=1.0),
         blur=BlurConfig(p=1.0),
     )
