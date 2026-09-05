@@ -42,18 +42,23 @@ def build_tonal(config: TonalConfig) -> A.OneOf:
     -------
     A.OneOf
         Fires with the configured probability and then draws one of the
-        two members with equal weight.
+        configured members with equal weight. A configuration naming
+        one member still returns a container, so what the pipeline
+        reports - and therefore what a record says fired - does not
+        depend on how many members were left in.
     """
+    members = {
+        "brightness_contrast": lambda: A.RandomBrightnessContrast(
+            brightness_limit=config.brightness_limit,
+            contrast_limit=config.contrast_limit,
+            p=1.0,
+        ),
+        "gamma": lambda: A.RandomGamma(
+            gamma_limit=config.gamma_limit, p=1.0
+        ),
+    }
     return A.OneOf(
-        [
-            A.RandomBrightnessContrast(
-                brightness_limit=config.brightness_limit,
-                contrast_limit=config.contrast_limit,
-                p=1.0,
-            ),
-            A.RandomGamma(gamma_limit=config.gamma_limit, p=1.0),
-        ],
-        p=config.p,
+        [members[name]() for name in config.members], p=config.p
     )
 
 

@@ -440,13 +440,16 @@ def build_mask_aware(config: MaskAwareConfig) -> A.OneOf:
     -------
     A.OneOf
         Fires with the configured probability and then draws one of
-        the two members with equal weight. They are alternatives: a
-        pore carrying both a shading and a dark patch would show an
-        interior no photograph produces.
+        the configured members with equal weight. They are
+        alternatives: a pore carrying both a shading and a dark patch
+        would show an interior no photograph produces.
     """
+    members = {
+        "field": lambda: PoreBrightnessField(config),
+        "darkening": lambda: PoreDarkening(config),
+    }
     return A.OneOf(
-        [PoreBrightnessField(config), PoreDarkening(config)],
-        p=config.p,
+        [members[name]() for name in config.members], p=config.p
     )
 
 

@@ -38,6 +38,15 @@ MASK_CHANGING_FAMILIES = frozenset({FAMILY_SCALE, FAMILY_SEPTUM})
 # Shapes the shading inside a pore may take.
 FIELD_KINDS = frozenset({"constant", "gradient", "random"})
 
+# The alternatives inside the two families built as a ``OneOf``. Naming
+# them makes a family expressible with one member switched off, which
+# two things need: judging a member by eye on its own, since a panel
+# showing whichever of the two was drawn cannot compare a weak setting
+# against a strong one, and the decomposition the plan holds in reserve
+# for a joint result that comes out negative or inconclusive.
+TONAL_MEMBERS = ("brightness_contrast", "gamma")
+MASK_AWARE_MEMBERS = ("field", "darkening")
+
 
 @dataclass(frozen=True)
 class OrientationConfig:
@@ -210,15 +219,29 @@ class TonalConfig:
         Multiplicative contrast range, as a fraction.
     gamma_limit : tuple of int
         Gamma range in percent; 100 is the identity.
+    members : tuple of str
+        Which alternatives the container may draw, from
+        ``TONAL_MEMBERS``. Both by default; one of them expresses the
+        decomposition, and is how a member is inspected on its own.
     p : float
-        Probability that the container fires. The two members carry
-        equal weight inside it, written out rather than left implicit.
+        Probability that the container fires. The members carry equal
+        weight inside it, written out rather than left implicit.
     """
 
     brightness_limit: tuple[float, float] = (-0.10, 0.10)
     contrast_limit: tuple[float, float] = (-0.15, 0.15)
     gamma_limit: tuple[int, int] = (90, 110)
+    members: tuple[str, ...] = TONAL_MEMBERS
     p: float = 0.5
+
+    def __post_init__(self) -> None:
+        """Reject a container that could draw nothing.
+
+        Raises
+        ------
+        ValueError
+        """
+        _check_members("tonal", self.members, TONAL_MEMBERS)
 
 
 @dataclass(frozen=True)
@@ -326,6 +349,12 @@ class MaskAwareConfig:
         would teach exactly the mistake the family means to prevent.
     darkening_max_attempts : int
         Placements tried before a pore is left alone.
+    members : tuple of str
+        Which alternatives the container may draw, from
+        ``MASK_AWARE_MEMBERS``. Both by default; one of them is how a
+        member is judged on its own, since the two look nothing alike
+        and a panel showing whichever was drawn cannot compare one
+        strength setting against another.
 
     Notes
     -----
@@ -349,6 +378,7 @@ class MaskAwareConfig:
     darkening_margin_px: float = 2.0
     darkening_edge_softness: float = 0.25
     darkening_max_attempts: int = 8
+    members: tuple[str, ...] = MASK_AWARE_MEMBERS
 
     def __post_init__(self) -> None:
         """Reject settings that could not describe a draw.
@@ -357,6 +387,7 @@ class MaskAwareConfig:
         ------
         ValueError
         """
+        _check_members("mask-aware", self.members, MASK_AWARE_MEMBERS)
         _check_range("pore_fraction", self.pore_fraction, 0.0, 1.0)
         _check_range("strength", self.strength, 0.0, 1.0)
         _check_range("darkened_area", self.darkened_area, 0.0, 1.0)
@@ -515,6 +546,28 @@ class SeptumConfig:
             raise ValueError(
                 f"max_retries must be >= 0, got {self.max_retries}"
             )
+
+
+def _check_members(
+    family: str, members: tuple[str, ...], known: tuple[str, ...]
+) -> None:
+    """Reject a member list that is empty, unknown or repeated."""
+    if not members:
+        raise ValueError(
+            f"the {family} family must offer at least one member; "
+            f"switching it off is done by leaving it out of the policy"
+        )
+    unknown = [name for name in members if name not in known]
+    if unknown:
+        raise ValueError(
+            f"unknown {family} member(s) {unknown}; known members are "
+            f"{list(known)}"
+        )
+    if len(set(members)) != len(members):
+        raise ValueError(
+            f"{family} members {list(members)} repeat, which would "
+            f"weight one of them twice"
+        )
 
 
 def _check_range(
