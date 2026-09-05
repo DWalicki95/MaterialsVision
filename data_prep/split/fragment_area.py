@@ -12,7 +12,9 @@ the smallest real annotations.
 The manifest cannot answer this - it stores per-image minimum, median
 and maximum equivalent diameters, not per-instance areas - so the
 areas are recomputed here from the Label Studio polygons, reusing the
-inventory's own rasterizer.
+inventory's own rasterizer. It therefore measures the same population
+the masks hold: pores only, node polygons excluded by the shared
+annotation reader.
 
 Two properties of this measurement matter:
 
@@ -38,7 +40,8 @@ from data_prep.annotations import (AnnotationLookupError,
                                    require_annotation)
 from data_prep.inventory.annotation_stats import rasterize_annotation
 from data_prep.inventory.config import load_config
-from data_prep.inventory.issues import IssueCollector, PolygonConversionError
+from data_prep.inventory.issues import (IssueCollector, PolygonConversionError,
+                                        PolygonLabelError)
 from data_prep.split.models import FragmentAreaResult, MinFragmentAreaConfig
 
 logger = logging.getLogger(__name__)
@@ -200,7 +203,7 @@ def compute_min_fragment_area(
                     collector,
                     str(row.image_id),
                 )
-            except PolygonConversionError as e:
+            except (PolygonConversionError, PolygonLabelError) as e:
                 raise FragmentAreaError(
                     f"Cannot rasterize {row.image_id}: {e}"
                 ) from e

@@ -1,11 +1,12 @@
 """
 Shared access to the polygon annotations of a Label Studio export.
 
-Two pipelines need the same thing from an export - the polygons of one
-specific annotation, in pixel coordinates: the mask builder, which
-rasterizes them, and the fragment-area calibration, which measures
-their areas. Both go through here so they can never disagree about
-which annotation belongs to an image or how a polygon maps to pixels.
+Two pipelines need the same thing from an export - the pore polygons
+of one specific annotation, in pixel coordinates: the mask builder,
+which rasterizes them, and the fragment-area calibration, which
+measures their areas. Both go through here so they can never disagree
+about which annotation belongs to an image, which of its polygons are
+pores, or how a polygon maps to pixels.
 
 Annotations are looked up by their own id rather than by re-running
 the "which annotator wins" selection. The manifest already recorded
@@ -97,10 +98,16 @@ def polygons_in_pixels(
     collector: IssueCollector,
     image_ref: str,
 ) -> list[np.ndarray]:
-    """Convert one annotation's polygons to pixel coordinates.
+    """Convert one annotation's pore polygons to pixel coordinates.
 
     Polygons are returned in export order, which is the order the
     rasterizer paints them in.
+
+    Only pores are returned. The export also holds node polygons -
+    the solid junctions between struts, a different structure that is
+    not a segmentation target - and they are dropped by
+    ``iter_polygon_results``, which every consumer reads through so
+    that no two of them can disagree about what a mask contains.
 
     Parameters
     ----------

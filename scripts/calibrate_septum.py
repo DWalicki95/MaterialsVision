@@ -48,11 +48,11 @@ logger = logging.getLogger(__name__)
 EXIT_OK = 0
 EXIT_FATAL = 2
 
-DEFAULT_MANIFEST = Path("/home/dwalicki/dane/manifests/v2/manifest_v2.csv")
+DEFAULT_MANIFEST = Path("/home/dwalicki/dane/manifests/v3/manifest_v3.csv")
 
 DEFAULT_SPLIT = Path("/home/dwalicki/dane/splits/split_v1.csv")
 
-A_MIN_FRAGMENT_PX2 = 432.0
+A_MIN_FRAGMENT_PX2 = 388.43
 
 # What the model sees relative to the source files: the longer side of
 # every image is resized to the encoder's input width. Wall widths are

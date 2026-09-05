@@ -21,8 +21,10 @@ from data_prep.inventory.issues import (AnnotationSelectionError,
                                         Issue, IssueCollector, IssueLevel,
                                         ManifestBuildAborted,
                                         ManifestSchemaError,
-                                        PolygonConversionError, RejectionLog)
-from data_prep.inventory.label_studio import (iter_polygon_results, load_tasks,
+                                        PolygonConversionError,
+                                        PolygonLabelError, RejectionLog)
+from data_prep.inventory.label_studio import (count_excluded_polygons,
+                                              iter_polygon_results, load_tasks,
                                               polygon_to_pixels,
                                               select_annotation)
 from data_prep.inventory.models import (InventoryConfig, ParsedName,
@@ -124,6 +126,7 @@ MANIFEST_COLUMNS: tuple[str, ...] = (
     # 5.7 F. annotation statistics
     "n_annotations", "n_instances", "n_border_instances",
     "n_instances_below_crop_bbox",
+    "n_node_polygons_excluded",
     "n_degenerate_polygons", "overlap_px_fraction",
     "has_significant_overlap",
     "pore_equivalent_diameter_min_px",
@@ -520,7 +523,16 @@ def _process_one_image(
             str(e),
         )
         return None, issue
+    except PolygonLabelError as e:
+        issue = collector.add(
+            IssueLevel.FATAL, "polygon_class_unreadable", parsed.image_id,
+            str(e),
+        )
+        return None, issue
 
+    n_node_polygons_excluded = count_excluded_polygons(
+        selection.annotation
+    )
     n_instances_below_crop_bbox = _count_instances_below_crop_bbox(
         polygons, region.content_bbox
     )
@@ -549,7 +561,8 @@ def _process_one_image(
         pixel_size_source, geometry_rescaled, panel_cropped_px,
         pixel_size_consistency, microscope, microscope_source,
         load_crop_bbox, scale_bin, q_max_i,
-        n_instances_below_crop_bbox, selection, stats, config,
+        n_instances_below_crop_bbox, n_node_polygons_excluded,
+        selection, stats, config,
     )
     return row, None
 
@@ -810,6 +823,7 @@ def _build_row(
     scale_bin: Optional[str],
     q_max_i: Optional[float],
     n_instances_below_crop_bbox: int,
+    n_node_polygons_excluded: int,
     selection,
     stats,
     config: InventoryConfig,
@@ -882,6 +896,7 @@ def _build_row(
         "n_instances": stats.n_instances,
         "n_border_instances": stats.n_border_instances,
         "n_instances_below_crop_bbox": n_instances_below_crop_bbox,
+        "n_node_polygons_excluded": n_node_polygons_excluded,
         "n_degenerate_polygons": stats.n_degenerate_polygons,
         "overlap_px_fraction": stats.overlap_px_fraction,
         "has_significant_overlap": (

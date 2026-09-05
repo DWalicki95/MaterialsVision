@@ -4,10 +4,22 @@ import pytest
 
 from data_prep.inventory.issues import (AnnotationSelectionError,
                                         IssueCollector, IssueLevel,
-                                        PolygonConversionError)
-from data_prep.inventory.label_studio import (iter_polygon_results,
-                                              polygon_to_pixels,
+                                        PolygonConversionError,
+                                        PolygonLabelError)
+from data_prep.inventory.label_studio import (NODE_LABEL, PORE_LABEL,
+                                              count_excluded_polygons,
+                                              iter_polygon_results,
+                                              polygon_label, polygon_to_pixels,
                                               select_annotation)
+
+
+def _polygon(result_id, label=PORE_LABEL, points=None):
+    value = {"points": points if points is not None else [[0.0, 0.0]]}
+    if label is not None:
+        value["polygonlabels"] = (
+            label if isinstance(label, list) else [label]
+        )
+    return {"type": "polygonlabels", "id": result_id, "value": value}
 
 
 def _annotation(
@@ -209,13 +221,27 @@ class TestSelectAnnotation:
         assert "annotator_fallback_unavailable" not in codes
 
 
+class TestPolygonLabel:
+    def test_reads_the_single_class(self):
+        assert polygon_label(_polygon("a"), "img") == PORE_LABEL
+
+    @pytest.mark.parametrize("label", [None, [], [PORE_LABEL, NODE_LABEL]])
+    def test_rejects_anything_but_one_class(self, label):
+        with pytest.raises(PolygonLabelError):
+            polygon_label(_polygon("a", label=label), "img")
+
+    def test_rejects_an_unknown_class(self):
+        with pytest.raises(PolygonLabelError):
+            polygon_label(_polygon("a", label="Sciana"), "img")
+
+
 class TestIterPolygonResults:
     def test_filters_non_polygon_types(self):
         annotation = {
             "result": [
-                {"type": "polygonlabels", "id": "a"},
+                _polygon("a"),
                 {"type": "rectanglelabels", "id": "b"},
-                {"type": "polygonlabels", "id": "c"},
+                _polygon("c"),
             ]
         }
         collector = IssueCollector()
@@ -227,6 +253,76 @@ class TestIterPolygonResults:
         assert [r["id"] for r in results] == ["a", "c"]
         codes = [i.code for i in collector.all()]
         assert codes == ["unexpected_result_type"]
+
+    def test_drops_node_polygons(self):
+        annotation = {
+            "result": [
+                _polygon("a"),
+                _polygon("b", label=NODE_LABEL),
+                _polygon("c"),
+            ]
+        }
+        collector = IssueCollector()
+        results = list(
+            iter_polygon_results(
+                annotation, collector=collector, image_ref="img"
+            )
+        )
+        assert [r["id"] for r in results] == ["a", "c"]
+        codes = [i.code for i in collector.all()]
+        assert codes == ["polygons_excluded_by_class"]
+
+    def test_records_nothing_when_every_polygon_is_a_pore(self):
+        annotation = {"result": [_polygon("a"), _polygon("b")]}
+        collector = IssueCollector()
+        list(
+            iter_polygon_results(
+                annotation, collector=collector, image_ref="img"
+            )
+        )
+        assert collector.all() == []
+
+    def test_an_all_node_annotation_yields_nothing(self):
+        annotation = {"result": [_polygon("a", label=NODE_LABEL)]}
+        collector = IssueCollector()
+        assert list(
+            iter_polygon_results(
+                annotation, collector=collector, image_ref="img"
+            )
+        ) == []
+
+    def test_the_exclusion_is_recorded_before_the_caller_iterates(self):
+        annotation = {"result": [_polygon("a", label=NODE_LABEL)]}
+        collector = IssueCollector()
+        iter_polygon_results(
+            annotation, collector=collector, image_ref="img"
+        )
+        codes = [i.code for i in collector.all()]
+        assert codes == ["polygons_excluded_by_class"]
+
+    def test_an_unreadable_class_stops_the_read(self):
+        annotation = {"result": [_polygon("a", label="Sciana")]}
+        collector = IssueCollector()
+        with pytest.raises(PolygonLabelError):
+            iter_polygon_results(
+                annotation, collector=collector, image_ref="img"
+            )
+
+
+class TestCountExcludedPolygons:
+    def test_counts_only_node_polygons(self):
+        annotation = {
+            "result": [
+                _polygon("a"),
+                _polygon("b", label=NODE_LABEL),
+                _polygon("c", label=NODE_LABEL),
+                {"type": "rectanglelabels", "id": "d"},
+            ]
+        }
+        assert count_excluded_polygons(annotation) == 2
+
+    def test_zero_without_nodes(self):
+        assert count_excluded_polygons({"result": [_polygon("a")]}) == 0
 
 
 class TestPolygonToPixels:

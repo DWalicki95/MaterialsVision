@@ -1,6 +1,11 @@
-manifest_version: v2
-output_dir: /home/dwalicki/dane/manifests
-mask_root: /home/dwalicki/dane/masks
+# v3 is v2 with the annotation-class filter applied: node (Wezel)
+# polygons no longer become mask instances. Both the manifest and the
+# masks are versioned together because the manifest's n_instances and
+# mask_path must describe the same objects; v2 and its masks are left
+# in place, paired with each other.
+manifest_version: v3
+output_dir: /home/dwalicki/dane/manifests/v3
+mask_root: /home/dwalicki/dane/masks/v3
 
 sources:
   - series: AS

@@ -6,6 +6,12 @@ is a third frozen artifact alongside the manifest and the split, and
 is recorded the same way: the rules that produced it, the hash of the
 manifest it was built against, and a per-image tally of what the
 rasterization cost.
+
+Only pore polygons become instances. The export also holds node
+polygons - the solid junctions between struts - and the per-image
+tally records how many were dropped, so a mask holding fewer
+instances than the export holds polygons is explained by the artifact
+itself.
 """
 import json
 import logging
@@ -19,6 +25,8 @@ import tifffile
 from data_prep.annotations import (load_annotation_index, polygons_in_pixels,
                                    require_annotation)
 from data_prep.inventory.issues import IssueCollector
+from data_prep.inventory.label_studio import (CLASS_FILTER_RULE,
+                                              count_excluded_polygons)
 from data_prep.masks.rasterize import (CONNECTIVITY_RULE, MASK_DTYPE,
                                        OVERLAP_RULE, rasterize_instances)
 from data_prep.run_provenance import (git_commit, library_versions,
@@ -64,6 +72,7 @@ class MaskBuildResult:
         dict of str to int
         """
         columns = (
+            "n_node_polygons_excluded",
             "n_polygons", "n_instances", "n_vanished_polygons",
             "n_repaired_instances", "n_pieces_removed", "discarded_px",
             "overlap_px", "covered_px",
@@ -174,6 +183,9 @@ def build_masks(
             "mask_path": str(target),
             "height_px": int(row.height_px),
             "width_px": int(row.width_px),
+            "n_node_polygons_excluded": count_excluded_polygons(
+                annotation
+            ),
             "n_polygons": mask.n_polygons,
             "n_instances": mask.n_instances,
             "n_instances_manifest": int(row.n_instances),
@@ -279,6 +291,7 @@ def write_build_artifacts(
         "n_masks": result.n_written,
         "dtype": MASK_DTYPE.__name__,
         "rules": {
+            "class_filter": CLASS_FILTER_RULE,
             "overlap": OVERLAP_RULE,
             "connectivity": CONNECTIVITY_RULE,
         },
@@ -312,6 +325,7 @@ def summarize(result: MaskBuildResult) -> str:
     instances = totals["n_instances"] or 1
     return "\n".join([
         f"  masks written        {result.n_written}",
+        f"  node polygons out    {totals['n_node_polygons_excluded']}",
         f"  polygons             {totals['n_polygons']}",
         f"  instances            {totals['n_instances']}",
         f"  vanished polygons    {totals['n_vanished_polygons']}",

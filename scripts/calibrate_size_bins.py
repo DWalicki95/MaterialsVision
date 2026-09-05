@@ -43,8 +43,7 @@ import numpy as np
 import pandas as pd
 import tifffile
 
-from materials_vision.data.instances import (apply_content_crop,
-                                             parse_crop_bbox)
+from materials_vision.data.instances import apply_content_crop, parse_crop_bbox
 from materials_vision.evaluation.size_bins import calibrate_size_bins
 from materials_vision.logging_config import setup_logging
 
@@ -53,13 +52,13 @@ logger = logging.getLogger(__name__)
 EXIT_OK = 0
 EXIT_FATAL = 2
 
-DEFAULT_MANIFEST = Path("/home/dwalicki/dane/manifests/v2/manifest_v2.csv")
+DEFAULT_MANIFEST = Path("/home/dwalicki/dane/manifests/v3/manifest_v3.csv")
 
 DEFAULT_SPLIT = Path("/home/dwalicki/dane/splits/split_v1.csv")
 
 DEFAULT_OUTPUT = Path("/home/dwalicki/dane/splits/size_bins_v1.json")
 
-A_MIN_FRAGMENT_PX2 = 432.0
+A_MIN_FRAGMENT_PX2 = 388.43
 
 SIZE_BINS_ID = "size_bins_v1"
 

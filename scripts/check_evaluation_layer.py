@@ -65,13 +65,13 @@ EXIT_OK = 0
 EXIT_FAILED_CHECKS = 1
 EXIT_FATAL = 2
 
-DEFAULT_MANIFEST = Path("/home/dwalicki/dane/manifests/v2/manifest_v2.csv")
+DEFAULT_MANIFEST = Path("/home/dwalicki/dane/manifests/v3/manifest_v3.csv")
 
 DEFAULT_SPLIT = Path("/home/dwalicki/dane/splits/split_v1.csv")
 
 DEFAULT_SIZE_BINS = Path("/home/dwalicki/dane/splits/size_bins_v1.json")
 
-A_MIN_FRAGMENT_PX2 = 432.0
+A_MIN_FRAGMENT_PX2 = 388.43
 
 DEFAULT_N_IMAGES = 12
 

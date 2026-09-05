@@ -7,14 +7,24 @@ is not part of the dataset, and the export is the only record of what
 was actually annotated. This module never touches the filesystem
 beyond reading the export itself.
 
+**Two annotated classes, one of which is not a pore.** The annotators
+outlined two kinds of object: ``Por``, a pore, and ``Wezel``, a node -
+the solid junction where several struts of the foam meet. They are
+different structures and only pores are the segmentation target, so
+node polygons are dropped here, at the single point every consumer of
+the export reads polygons through. Filtering by class is the only
+reliable way to separate them: their sizes overlap heavily (median
+equivalent diameter about 81 px for nodes against 118 px for pores),
+so no threshold on geometry would divide them.
+
 Note on collector parameters: ``select_annotation``,
 ``polygon_to_pixels`` and ``iter_polygon_results`` all take an
 ``IssueCollector`` as a required keyword argument. They have to -
 each can encounter a condition that must be reported rather than
 silently resolved ("multiple annotations", "ground truth present",
 "empty annotation", "unexpected result type", "LS/file dimension
-mismatch", "annotator fallback"), and nothing may vanish from the
-run's record.
+mismatch", "annotator fallback", "polygons excluded by class"), and
+nothing may vanish from the run's record.
 """
 import logging
 from typing import Any, Iterator, Mapping
@@ -23,13 +33,24 @@ import numpy as np
 
 from data_prep.inventory.issues import (AnnotationSelectionError,
                                         IssueCollector, IssueLevel,
-                                        PolygonConversionError)
+                                        PolygonConversionError,
+                                        PolygonLabelError)
 from data_prep.inventory.models import AnnotationSelection
 
 logger = logging.getLogger(__name__)
 
 _SELECTION_RULE = "latest_updated_at_then_max_id"
 _SELECTION_RULE_WITH_FALLBACK = _SELECTION_RULE + "+annotator_fallback"
+
+PORE_LABEL = "Por"
+
+NODE_LABEL = "Wezel"
+
+KNOWN_POLYGON_LABELS = frozenset({PORE_LABEL, NODE_LABEL})
+
+MASK_POLYGON_LABELS = frozenset({PORE_LABEL})
+
+CLASS_FILTER_RULE = f"keep_{PORE_LABEL}_drop_{NODE_LABEL}"
 
 
 def load_tasks(json_path) -> list[dict]:
@@ -178,13 +199,61 @@ def select_annotation(
     )
 
 
+def polygon_label(result: Mapping[str, Any], image_ref: str) -> str:
+    """Return the annotation class of one ``polygonlabels`` result.
+
+    Parameters
+    ----------
+    result : Mapping
+        A single ``polygonlabels`` result.
+    image_ref : str
+        Image identifier, for the error message.
+
+    Returns
+    -------
+    str
+        One of ``KNOWN_POLYGON_LABELS``.
+
+    Raises
+    ------
+    PolygonLabelError
+        If the result carries no class, more than one, or a class this
+        pipeline has never seen. None of the three can be resolved
+        here: a new class in a later export is a decision about what
+        the masks contain, and must be made deliberately rather than
+        by whichever branch this function happens to take.
+    """
+    names = result.get("value", {}).get("polygonlabels") or []
+    if len(names) != 1:
+        raise PolygonLabelError(
+            f"Polygon {result.get('id')!r} of {image_ref} carries "
+            f"{len(names)} class(es) {names}; exactly one is expected"
+        )
+    name = str(names[0])
+    if name not in KNOWN_POLYGON_LABELS:
+        raise PolygonLabelError(
+            f"Polygon {result.get('id')!r} of {image_ref} carries the "
+            f"unknown class {name!r}; the known classes are "
+            f"{sorted(KNOWN_POLYGON_LABELS)}"
+        )
+    return name
+
+
 def iter_polygon_results(
     annotation: Mapping[str, Any],
     *,
     collector: IssueCollector,
     image_ref: str,
 ) -> Iterator[dict]:
-    """Yield only ``polygonlabels`` results from an annotation.
+    """Return the mask-producing ``polygonlabels`` results.
+
+    Results are filtered twice: to ``polygonlabels`` (the only result
+    type these projects produce), and to the classes that become mask
+    instances - pores, never nodes.
+
+    The pass is eager rather than lazy so that the count of excluded
+    polygons is recorded when this is called, not whenever a caller
+    happens to exhaust the iterator.
 
     Parameters
     ----------
@@ -192,15 +261,24 @@ def iter_polygon_results(
         Selected annotation dict (``AnnotationSelection.annotation``).
     collector : IssueCollector
         Records ``unexpected_result_type`` (WARNING) for skipped
-        results.
+        results and ``polygons_excluded_by_class`` (INFO) for the
+        node polygons this image contributed.
     image_ref : str
         Image identifier, for the issue record.
 
-    Yields
+    Returns
+    -------
+    Iterator of dict
+        Each ``polygonlabels`` result whose class is in
+        ``MASK_POLYGON_LABELS``, in export order.
+
+    Raises
     ------
-    dict
-        Each ``polygonlabels`` result.
+    PolygonLabelError
+        Propagated from ``polygon_label``.
     """
+    kept: list[dict] = []
+    n_excluded = 0
     for result in annotation.get("result", []):
         if result.get("type") != "polygonlabels":
             collector.add(
@@ -210,7 +288,49 @@ def iter_polygon_results(
                 f"type={result.get('type')!r}, id={result.get('id')!r}",
             )
             continue
-        yield result
+        if polygon_label(result, image_ref) not in MASK_POLYGON_LABELS:
+            n_excluded += 1
+            continue
+        kept.append(result)
+
+    if n_excluded:
+        collector.add(
+            IssueLevel.INFO,
+            "polygons_excluded_by_class",
+            image_ref,
+            f"{n_excluded} of {n_excluded + len(kept)} polygon(s) "
+            f"dropped (rule={CLASS_FILTER_RULE})",
+        )
+    return iter(kept)
+
+
+def count_excluded_polygons(annotation: Mapping[str, Any]) -> int:
+    """Count the polygons the class filter drops from one annotation.
+
+    The frozen artifacts record this per image, so that a mask holding
+    fewer instances than the export holds polygons is explained by the
+    artifact itself rather than only by re-reading the export.
+
+    Parameters
+    ----------
+    annotation : Mapping
+        A Label Studio annotation.
+
+    Returns
+    -------
+    int
+        ``polygonlabels`` results whose class is not in
+        ``MASK_POLYGON_LABELS``. Results whose class cannot be read
+        are not counted here; ``iter_polygon_results`` reports them.
+    """
+    n_excluded = 0
+    for result in annotation.get("result", []):
+        if result.get("type") != "polygonlabels":
+            continue
+        names = result.get("value", {}).get("polygonlabels") or []
+        if len(names) == 1 and names[0] not in MASK_POLYGON_LABELS:
+            n_excluded += 1
+    return n_excluded
 
 
 def polygon_to_pixels(

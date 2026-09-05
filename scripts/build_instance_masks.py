@@ -48,7 +48,7 @@ DEFAULT_CONFIG = (
 )
 
 DEFAULT_MANIFEST = Path(
-    "/home/dwalicki/dane/manifests/v2/manifest_v2.csv"
+    "/home/dwalicki/dane/manifests/v3/manifest_v3.csv"
 )
 
 

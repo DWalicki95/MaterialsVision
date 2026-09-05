@@ -137,7 +137,7 @@ class ScaleConfig:
     magnified_bins: tuple[str, ...] = ("coarse",)
     min_instances: int = 3
     max_retries: int = 5
-    min_fragment_area_px2: float = 432.0
+    min_fragment_area_px2: float = 388.43
     p: float = 1.0
 
     def __post_init__(self) -> None:
@@ -502,7 +502,7 @@ class SeptumConfig:
     edge_softness_px: float = 1.0
     sag: tuple[float, float] = (0.0, 0.12)
     min_chord_share: float = 0.7
-    min_fragment_area_px2: float = 432.0
+    min_fragment_area_px2: float = 388.43
     max_retries: int = 5
 
     def __post_init__(self) -> None:

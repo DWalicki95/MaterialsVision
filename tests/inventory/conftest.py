@@ -70,16 +70,54 @@ def _write_sidecar(path: Path, fields: dict) -> None:
     )
 
 
-def _polygon_task(
-    task_id, image_url, width, height, ann_id, square=(20, 20, 40, 40)
-):
+def _square_points(square, width, height):
     x0, y0, x1, y1 = square
-    points = [
+    return [
         [x0 / width * 100, y0 / height * 100],
         [x1 / width * 100, y0 / height * 100],
         [x1 / width * 100, y1 / height * 100],
         [x0 / width * 100, y1 / height * 100],
     ]
+
+
+def _polygon_result(result_id, points, width, height, label):
+    return {
+        "original_width": width,
+        "original_height": height,
+        "image_rotation": 0,
+        "id": result_id,
+        "from_name": "poly_tool",
+        "to_name": "image",
+        "type": "polygonlabels",
+        "value": {
+            "points": points,
+            "closed": True,
+            "polygonlabels": [label],
+        },
+    }
+
+
+def _polygon_task(
+    task_id, image_url, width, height, ann_id,
+    square=(20, 20, 40, 40), node_square=None,
+):
+    """One task carrying a pore polygon, optionally a node beside it.
+
+    ``node_square`` puts a ``Wezel`` polygon in the annotation. Nodes
+    are a second annotated class that is not a pore and must never
+    reach a mask, so at least one fixture image has to carry one.
+    """
+    results = [_polygon_result(
+        f"res{ann_id}",
+        _square_points(square, width, height),
+        width, height, "Por",
+    )]
+    if node_square is not None:
+        results.append(_polygon_result(
+            f"res{ann_id}_node",
+            _square_points(node_square, width, height),
+            width, height, "Wezel",
+        ))
     return {
         "id": task_id,
         "data": {"image": image_url},
@@ -90,20 +128,7 @@ def _polygon_task(
             "ground_truth": False,
             "created_at": "2026-01-01T00:00:00.000000Z",
             "updated_at": "2026-01-01T00:00:00.000000Z",
-            "result": [{
-                "original_width": width,
-                "original_height": height,
-                "image_rotation": 0,
-                "id": f"res{ann_id}",
-                "from_name": "poly_tool",
-                "to_name": "image",
-                "type": "polygonlabels",
-                "value": {
-                    "points": points,
-                    "closed": True,
-                    "polygonlabels": ["Por"],
-                },
-            }],
+            "result": results,
         }],
     }
 
@@ -173,7 +198,10 @@ def mini_dataset(tmp_path) -> MiniDataset:
     _make_rgb_image(as_images / f"{name_orphan}.jpg", w, h, seed=50)
 
     as_tasks = [
-        _polygon_task(1, f"/data/upload/1/{name1}.jpg", w, h, 101),
+        _polygon_task(
+            1, f"/data/upload/1/{name1}.jpg", w, h, 101,
+            node_square=(60, 20, 70, 30),
+        ),
         _polygon_task(2, f"/data/upload/1/{name2}.jpg", w, h, 102),
         _polygon_task(3, f"/data/upload/1/{name3}.jpg", w, h, 103),
         _polygon_task(4, f"/data/upload/1/{name4}.jpg", w, h, 104),

@@ -23,3 +23,7 @@ mlflow.db
 # and superseded plan drafts stay out of the repository.
 .claude/*
 !.claude/plan_eksperymentu_augmentacji_peft_sam_v3_geometria.md
+review.json
+run_metadata.json
+dataset_summary.md
+validation_report.md

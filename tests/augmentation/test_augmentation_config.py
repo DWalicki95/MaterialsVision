@@ -33,7 +33,7 @@ def test_the_starting_values_are_the_ones_that_were_approved():
     assert scale.magnified_bins == ("coarse",)
     assert scale.min_instances == 3
     assert scale.max_retries == 5
-    assert scale.min_fragment_area_px2 == 432.0
+    assert scale.min_fragment_area_px2 == 388.43
     assert scale.p == 1.0
 
     septum = SeptumConfig()

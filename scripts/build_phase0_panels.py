@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 EXIT_OK = 0
 EXIT_FATAL = 2
 
-DEFAULT_MANIFEST = Path("/home/dwalicki/dane/manifests/v2/manifest_v2.csv")
+DEFAULT_MANIFEST = Path("/home/dwalicki/dane/manifests/v3/manifest_v3.csv")
 
 DEFAULT_SPLIT = Path("/home/dwalicki/dane/splits/split_v1.csv")
 
@@ -68,7 +68,7 @@ DEFAULT_GALLERY = Path(
 
 DEFAULT_OUTPUT_DIR = Path("/home/dwalicki/dane/faza0")
 
-A_MIN_FRAGMENT_PX2 = 432.0
+A_MIN_FRAGMENT_PX2 = 388.43
 
 RUN_SEED = 20260905
 

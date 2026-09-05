@@ -126,6 +126,16 @@ class PolygonConversionError(ValueError):
     """Raised when a polygon result cannot be converted to pixel coords."""
 
 
+class PolygonLabelError(ValueError):
+    """Raised when a polygon carries no usable annotation class.
+
+    The export's classes decide which polygons become instances, so a
+    polygon whose class cannot be read is not something a run may
+    resolve on its own: keeping it would put an unknown object in the
+    masks, dropping it would delete an annotation without a record.
+    """
+
+
 class ManifestSchemaError(ValueError):
     """Raised when the built manifest does not match the frozen schema."""
 

@@ -1,5 +1,5 @@
 split_id: split_v1
-manifest_path: /home/dwalicki/dane/manifests/v2/manifest_v2.csv
+manifest_path: /home/dwalicki/dane/manifests/v3/manifest_v3.csv
 output_dir: /home/dwalicki/dane/splits
 
 # Seed, candidate count and the cost weights below fully determine the

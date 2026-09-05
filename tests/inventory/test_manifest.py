@@ -421,8 +421,8 @@ class TestInstancesBelowCropBbox:
         import numpy as np
         from PIL import Image
 
-        from data_prep.inventory.manifest import (
-            PANEL_HEIGHT_ROWS_BY_MICROSCOPE)
+        from data_prep.inventory.manifest import \
+            PANEL_HEIGHT_ROWS_BY_MICROSCOPE
         from data_prep.inventory.models import InventoryConfig, SourceConfig
 
         images_dir = tmp_path / "images"
@@ -514,6 +514,26 @@ class TestInstancesBelowCropBbox:
         vab_id = "VAB1_prostopadly_m001"
         row = result.manifest.set_index("image_id").loc[vab_id]
         assert row["n_instances_below_crop_bbox"] == 0
+
+
+class TestNodePolygonsExcluded:
+    def test_a_node_is_not_counted_as_an_instance(self, mini_dataset):
+        result = build_manifest(mini_dataset.config)
+        rows = result.manifest.set_index("image_id")
+        with_node = rows.loc["AS1_40_1"]
+        assert with_node["n_node_polygons_excluded"] == 1
+        assert with_node["n_instances"] == 1
+
+    def test_images_without_nodes_record_zero(self, mini_dataset):
+        result = build_manifest(mini_dataset.config)
+        rows = result.manifest.set_index("image_id")
+        without_node = rows.drop(index="AS1_40_1")
+        assert (without_node["n_node_polygons_excluded"] == 0).all()
+
+    def test_the_exclusion_is_reported(self, mini_dataset):
+        result = build_manifest(mini_dataset.config)
+        codes = [i.code for i in result.issues]
+        assert codes.count("polygons_excluded_by_class") == 1
 
 
 class TestImageIdCollision:
