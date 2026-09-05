@@ -16,11 +16,12 @@ import pytest
 from materials_vision.augmentation.config import (FAMILY_BLUR,
                                                   FAMILY_MASK_AWARE,
                                                   FAMILY_ORIENTATION,
-                                                  FAMILY_SCALE, FAMILY_TONAL,
-                                                  BlurConfig, MaskAwareConfig,
+                                                  FAMILY_SCALE, FAMILY_SEPTUM,
+                                                  FAMILY_TONAL, BlurConfig,
+                                                  MaskAwareConfig,
                                                   OrientationConfig,
                                                   PolicyConfig, ScaleConfig,
-                                                  TonalConfig)
+                                                  SeptumConfig, TonalConfig)
 from materials_vision.augmentation.integrity import IntegrityError
 from materials_vision.augmentation.policy import AugmentationPolicy
 
@@ -64,12 +65,12 @@ def test_families_are_applied_in_a_fixed_order():
     policy = AugmentationPolicy(PolicyConfig(
         blur=BlurConfig(), orientation=OrientationConfig(),
         tonal=TonalConfig(), scale=ScaleConfig(),
-        mask_aware=MaskAwareConfig(),
+        mask_aware=MaskAwareConfig(), septum=SeptumConfig(),
     ))
 
     assert policy.families == (
         FAMILY_SCALE, FAMILY_ORIENTATION, FAMILY_MASK_AWARE,
-        FAMILY_TONAL, FAMILY_BLUR,
+        FAMILY_SEPTUM, FAMILY_TONAL, FAMILY_BLUR,
     )
 
 
@@ -78,7 +79,7 @@ def test_the_policy_and_its_configuration_agree_on_the_order():
     config = PolicyConfig(
         orientation=OrientationConfig(), tonal=TonalConfig(),
         blur=BlurConfig(), scale=ScaleConfig(),
-        mask_aware=MaskAwareConfig(),
+        mask_aware=MaskAwareConfig(), septum=SeptumConfig(),
     )
 
     assert AugmentationPolicy(config).families == config.families
@@ -327,6 +328,7 @@ def test_augmentation_does_not_touch_the_global_random_state():
         scale=ScaleConfig(min_fragment_area_px2=20.0),
         orientation=OrientationConfig(),
         mask_aware=MaskAwareConfig(p=1.0),
+        septum=SeptumConfig(p=1.0, min_fragment_area_px2=20.0),
         tonal=TonalConfig(p=1.0), blur=BlurConfig(p=1.0),
     )
     np.random.seed(0)

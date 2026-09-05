@@ -34,7 +34,7 @@ from materials_vision.augmentation.config import (FAMILY_BLUR,
                                                   BlurConfig, MaskAwareConfig,
                                                   OrientationConfig,
                                                   PolicyConfig, ScaleConfig,
-                                                  TonalConfig,
+                                                  SeptumConfig, TonalConfig,
                                                   enabled_families,
                                                   policy_run_metadata)
 from materials_vision.augmentation.integrity import (IntegrityError,
@@ -49,6 +49,10 @@ from materials_vision.augmentation.records import (AugmentationRecord,
                                                    AugmentedSample,
                                                    TransformRecord)
 from materials_vision.augmentation.scale import MultiScaleCrop
+from materials_vision.augmentation.structural import SyntheticSeptum
+from materials_vision.augmentation.walls import (WallSample, WallSummary,
+                                                 measure_walls,
+                                                 summarize_walls)
 
 __all__ = [
     "FAMILY_BLUR",
@@ -70,12 +74,18 @@ __all__ = [
     "PoreBrightnessField",
     "PoreDarkening",
     "ScaleConfig",
+    "SeptumConfig",
+    "SyntheticSeptum",
     "TonalConfig",
     "TransformRecord",
+    "WallSample",
+    "WallSummary",
     "check_connectivity",
     "check_labels_preserved",
     "check_mask_untouched",
     "check_sample",
     "enabled_families",
+    "measure_walls",
     "policy_run_metadata",
+    "summarize_walls",
 ]

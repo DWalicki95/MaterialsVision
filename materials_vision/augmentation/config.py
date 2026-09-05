@@ -399,6 +399,124 @@ class MaskAwareConfig:
             )
 
 
+@dataclass(frozen=True)
+class SeptumConfig:
+    """A wall drawn across a large pore, dividing it into two.
+
+    The error this targets is the opposite of the one the shading
+    families target: not one pore reported as two, but two pores
+    reported as one. It happens where neighbouring pores are separated
+    by a membrane thin enough to be missed, and the annotated images
+    hold far fewer such pairs than a model needs to learn the case.
+    Drawing the membrane in makes one, with both halves labelled, out
+    of a pore that was whole.
+
+    The two numbers describing the wall's appearance are measurements
+    of the walls already in the images, not choices. Both were taken
+    over every training image, on the middle line of each wall lying
+    between two different pores.
+
+    Parameters
+    ----------
+    p : float
+        Probability that a sample gets a wall drawn into it.
+    candidate_fraction : tuple of float
+        Share of the pores, largest first, a wall may be drawn into.
+        A wall needs room on both sides of it, and dividing a pore
+        already at the small end of the distribution would create two
+        instances smaller than anything annotated.
+    fragment_ratio : float
+        Smallest share of the divided pore either half may end up
+        with. Below it the wall has clipped a corner rather than
+        divided anything, which is not the case worth teaching.
+    thickness_px : tuple of float
+        Width of the wall in source pixels. The thin half of the
+        measured distribution of real walls: its upper half is struts
+        and the junctions where walls meet, which are structural
+        members rather than membranes between neighbours.
+    contrast : float
+        How far the wall's centre sits above the interior of the pore
+        it divides, as a share of that image's tonal range. Recorded
+        as a contrast rather than a grey level because the images come
+        from two microscopes exposed differently, and the same wall
+        photographed by both has two different grey levels but one
+        contrast.
+    edge_softness_px : float
+        Width of the wall's fade-out into the pore on either side. A
+        wall with no fade-out is a drawn line: real ones blur into
+        their surroundings over about a pixel.
+    sag : tuple of float
+        How far the wall may bow away from the straight line between
+        its ends, as a share of that line's length. Drawn either way
+        round, so a value near zero gives a straight wall and the two
+        cases need not be chosen between.
+    min_chord_share : float
+        How far apart the wall's two ends must be, as a share of the
+        furthest two points of the pore's outline. Keeps both ends on
+        genuinely different parts of the outline, so the wall crosses
+        the pore instead of cutting off a lobe.
+    min_fragment_area_px2 : float
+        Smallest area either half may have and still count as an
+        instance, in source pixels squared.
+    max_retries : int
+        Re-draws allowed after a rejected wall, so a sample costs at
+        most ``max_retries + 1`` attempts before it gives up.
+    """
+
+    p: float = 0.20
+    candidate_fraction: tuple[float, float] = (0.20, 0.30)
+    fragment_ratio: float = 0.25
+    thickness_px: tuple[float, float] = (2.0, 4.0)
+    contrast: float = 0.2034
+    edge_softness_px: float = 1.0
+    sag: tuple[float, float] = (0.0, 0.12)
+    min_chord_share: float = 0.7
+    min_fragment_area_px2: float = 432.0
+    max_retries: int = 5
+
+    def __post_init__(self) -> None:
+        """Reject settings that could not describe a draw.
+
+        Raises
+        ------
+        ValueError
+        """
+        _check_range(
+            "candidate_fraction", self.candidate_fraction, 0.0, 1.0
+        )
+        _check_range("sag", self.sag, 0.0, 1.0)
+        if not 0.0 < self.fragment_ratio <= 0.5:
+            raise ValueError(
+                f"fragment_ratio is the smaller half's share and must "
+                f"lie in (0, 0.5], got {self.fragment_ratio}"
+            )
+        low, high = self.thickness_px
+        if low <= 0.0 or high < low:
+            raise ValueError(
+                f"thickness_px must be an increasing range of positive "
+                f"widths, got {self.thickness_px}"
+            )
+        if self.edge_softness_px <= 0.0:
+            raise ValueError(
+                f"edge_softness_px must be positive, got "
+                f"{self.edge_softness_px}"
+            )
+        if not 0.0 < self.min_chord_share <= 1.0:
+            raise ValueError(
+                f"min_chord_share must lie in (0, 1], got "
+                f"{self.min_chord_share}"
+            )
+        if self.min_fragment_area_px2 < 0:
+            raise ValueError(
+                f"min_fragment_area_px2 must be >= 0, got "
+                f"{self.min_fragment_area_px2}"
+            )
+        if self.max_retries < 0:
+            raise ValueError(
+                f"max_retries must be >= 0, got {self.max_retries}"
+            )
+
+
 def _check_range(
     name: str,
     value: tuple[float, float],
@@ -429,6 +547,7 @@ class PolicyConfig:
     scale : ScaleConfig, optional
     orientation : OrientationConfig, optional
     mask_aware : MaskAwareConfig, optional
+    septum : SeptumConfig, optional
     tonal : TonalConfig, optional
     blur : BlurConfig, optional
 
@@ -441,6 +560,7 @@ class PolicyConfig:
     scale: Optional[ScaleConfig] = None
     orientation: Optional[OrientationConfig] = None
     mask_aware: Optional[MaskAwareConfig] = None
+    septum: Optional[SeptumConfig] = None
     tonal: Optional[TonalConfig] = None
     blur: Optional[BlurConfig] = None
 
@@ -492,6 +612,7 @@ def enabled_families(
         (FAMILY_SCALE, config.scale),
         (FAMILY_ORIENTATION, config.orientation),
         (FAMILY_MASK_AWARE, config.mask_aware),
+        (FAMILY_SEPTUM, config.septum),
         (FAMILY_TONAL, config.tonal),
         (FAMILY_BLUR, config.blur),
     )

@@ -8,7 +8,7 @@ from materials_vision.augmentation.config import (FAMILY_BLUR,
                                                   BlurConfig, MaskAwareConfig,
                                                   OrientationConfig,
                                                   PolicyConfig, ScaleConfig,
-                                                  TonalConfig,
+                                                  SeptumConfig, TonalConfig,
                                                   policy_run_metadata)
 
 
@@ -36,6 +36,13 @@ def test_the_starting_values_are_the_ones_that_were_approved():
     assert scale.min_fragment_area_px2 == 432.0
     assert scale.p == 1.0
 
+    septum = SeptumConfig()
+    assert septum.p == 0.20
+    assert septum.candidate_fraction == (0.20, 0.30)
+    assert septum.fragment_ratio == 0.25
+    assert septum.thickness_px == (2.0, 4.0)
+    assert septum.contrast == 0.2034
+
 
 def test_an_empty_policy_enables_nothing():
     assert PolicyConfig().families == ()
@@ -52,12 +59,12 @@ def test_families_are_listed_in_the_order_they_apply():
     config = PolicyConfig(
         blur=BlurConfig(), tonal=TonalConfig(),
         orientation=OrientationConfig(), scale=ScaleConfig(),
-        mask_aware=MaskAwareConfig(),
+        mask_aware=MaskAwareConfig(), septum=SeptumConfig(),
     )
 
     assert config.families == (
         FAMILY_SCALE, FAMILY_ORIENTATION, FAMILY_MASK_AWARE,
-        FAMILY_TONAL, FAMILY_BLUR,
+        FAMILY_SEPTUM, FAMILY_TONAL, FAMILY_BLUR,
     )
 
 

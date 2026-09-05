@@ -36,7 +36,8 @@ import numpy as np
 from materials_vision.augmentation.config import (FAMILY_BLUR,
                                                   FAMILY_MASK_AWARE,
                                                   FAMILY_ORIENTATION,
-                                                  FAMILY_SCALE, FAMILY_TONAL,
+                                                  FAMILY_SCALE, FAMILY_SEPTUM,
+                                                  FAMILY_TONAL,
                                                   MASK_CHANGING_FAMILIES,
                                                   PolicyConfig)
 from materials_vision.augmentation.geometric import build_orientation
@@ -53,6 +54,8 @@ from materials_vision.augmentation.records import (AugmentationRecord,
                                                    TransformRecord, log_record)
 from materials_vision.augmentation.scale import (build_scale,
                                                  summarize_scale_params)
+from materials_vision.augmentation.structural import (build_septum,
+                                                      summarize_septum_params)
 
 if TYPE_CHECKING:
     from materials_vision.data.samples import SampleRecord
@@ -66,6 +69,7 @@ PARAM_SUMMARIES = {
     "MultiScaleCrop": summarize_scale_params,
     "PoreBrightnessField": summarize_field_params,
     "PoreDarkening": summarize_darkening_params,
+    "SyntheticSeptum": summarize_septum_params,
 }
 
 # Keys the library adds to every transformation's parameters describing
@@ -345,6 +349,12 @@ def _build_steps(
             FAMILY_MASK_AWARE,
             ("PoreBrightnessField", "PoreDarkening"),
             build_mask_aware(config.mask_aware),
+        ))
+    if config.septum is not None:
+        steps.append((
+            FAMILY_SEPTUM,
+            ("SyntheticSeptum",),
+            build_septum(config.septum),
         ))
     if config.tonal is not None:
         steps.append((
