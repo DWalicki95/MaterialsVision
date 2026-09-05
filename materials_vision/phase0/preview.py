@@ -188,6 +188,46 @@ def _resize(batched: torch.Tensor, mode: str) -> torch.Tensor:
     return resize_isotropic(batched)
 
 
+def place_mask_on_canvas(
+    mask: np.ndarray, model_input: ModelInput, threshold: float = 0.25
+) -> np.ndarray:
+    """Follow a source-resolution mask onto the encoder's canvas.
+
+    Resized the same way the image was, then thresholded, so a pixel
+    counts as covered when the source region behind it really does
+    contain the mask. Sampling the mask at the new grid instead would
+    be wrong for exactly the structures worth measuring: a wall two
+    pixels across becomes 1.6 after the resize, and a grid sample can
+    step over it entirely and report the pore beside it.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        ``(H, W)`` boolean, at source resolution.
+    model_input : ModelInput
+        The result the mask is being followed into.
+    threshold : float, optional
+        Share of a canvas pixel that must come from the mask. The
+        default keeps a thin structure that lands between two pixels
+        while excluding the faint spill of the interpolation.
+
+    Returns
+    -------
+    np.ndarray
+        ``(1024, 1024)`` boolean, in the canvas's frame.
+    """
+    batched = torch.from_numpy(
+        mask.astype(np.float32)[None, None]
+    ).repeat(1, 3, 1, 1)
+    resized = _resize(batched, model_input.mode)
+    height, width = model_input.content_shape
+    placed = np.zeros(model_input.image.shape, dtype=bool)
+    placed[:height, :width] = (
+        resized[0, 0].numpy() > threshold
+    )
+    return placed
+
+
 def to_model_coordinates(
     box: tuple[int, int, int, int], model_input: ModelInput
 ) -> tuple[int, int, int, int]:
