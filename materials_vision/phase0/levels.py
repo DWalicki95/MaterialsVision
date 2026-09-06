@@ -224,9 +224,9 @@ def _orientation_levels() -> tuple[ReviewLevel, ...]:
                 orientation=OrientationConfig(p=1.0)
             ),
             note=(
-                "one of the eight symmetries, drawn; check that the "
-                "mask travelled with the image and that a quarter "
-                "turn left the geometry 890 or 960 by 1280"
+                "jedna z osmiu symetrii, wylosowana; sprawdz, czy "
+                "maska pojechala razem z obrazem i czy cwierc obrotu "
+                "zostawila geometrie 890 albo 960 na 1280"
             ),
             repeats=2,
         ),
@@ -256,16 +256,21 @@ def _scale_levels() -> tuple[ReviewLevel, ...]:
         for level, q, note in (
             (
                 "low", 1.00,
-                "the identity; nothing may differ from the original",
+                "identycznosc - NIC nie moze sie roznic od oryginalu; "
+                "to jedyna kontrola, ze skrot przy q = 1.00 naprawde "
+                "zostawia probke nietknieta, wiec brak roznicy jest "
+                "tu wynikiem poprawnym, nie usterka",
             ),
             (
                 "nominal", 1.15,
-                "a window of 87% of the frame, magnified back",
+                "okno 87% boku kadru (76% powierzchni), powiekszone "
+                "z powrotem do pelnego rozmiaru",
             ),
             (
                 "high", 1.30,
-                "the end of the frozen range; the thin walls here are "
-                "the ones the model will see reduced by another 0.8",
+                "koniec zamrozonego zakresu: okno 77% boku (59% "
+                "powierzchni); cienkie sciany, ktore tu widac, model "
+                "zobaczy jeszcze raz pomniejszone o 0.8",
             ),
         )
     )
@@ -274,30 +279,55 @@ def _scale_levels() -> tuple[ReviewLevel, ...]:
 def _tonal_levels() -> tuple[ReviewLevel, ...]:
     """Brightness and contrast, then gamma, each on its own images.
 
-    The strong settings sit at the ends of the frozen ranges. Neither
-    member can destroy a structure - both are monotone maps of the
-    intensity scale - so what a panel is judged on is plausibility:
-    whether the result still looks like a micrograph from this
-    material rather than a processed copy of one.
+    **The magnitude is pinned and only the direction is drawn.** These
+    ranges are symmetric about the identity, so a panel that drew from
+    one uniformly showed the strong setting as something near the
+    original about as often as not - and a reviewer reporting no
+    difference was then describing that draw rather than the range they
+    were asked to judge. Pinned, every panel carries the full strength
+    of its level and the two directions appear across the level's
+    images.
+
+    **The strong setting is the end of the frozen range, not past it.**
+    The criterion asks whether the numbers in use are believable, so
+    the levels are read off V.3 - brightness 0.10, contrast 0.15,
+    gamma 90 to 110 - and the weaker two are fractions of those.
+    Bracketing from outside would measure where the family stops being
+    believable, which is a different question and gates nothing.
+
+    Neither member can destroy a structure - both are monotone maps of
+    the intensity scale - so what a panel is judged on is plausibility:
+    whether the result still looks like a micrograph from this material
+    rather than a processed copy of one.
     """
+    frozen = TonalConfig()
+    brightness_max = frozen.brightness_limit[1]
+    contrast_max = frozen.contrast_limit[1]
+    gamma_max = frozen.gamma_limit[1] - 100
     ranges = (
-        ("low", (-0.05, 0.05), (-0.075, 0.075), (95, 105)),
-        ("nominal", (-0.10, 0.10), (-0.15, 0.15), (90, 110)),
-        ("high", (-0.15, 0.15), (-0.25, 0.25), (85, 115)),
+        ("low", 0.4), ("nominal", 0.7), ("high", 1.0),
     )
     levels = []
-    for name, brightness, contrast, gamma in ranges:
+    for name, share in ranges:
+        brightness = round(brightness_max * share, 4)
+        contrast = round(contrast_max * share, 4)
+        gamma = int(round(gamma_max * share))
         levels.append(ReviewLevel(
             family=FAMILY_TONAL,
             level=f"bc_{name}",
             kind=KIND_GATE,
             config=PolicyConfig(tonal=TonalConfig(
-                brightness_limit=brightness,
-                contrast_limit=contrast,
+                brightness_limit=(-brightness, brightness),
+                contrast_limit=(-contrast, contrast),
                 members=("brightness_contrast",),
+                pin_magnitude=True,
                 p=1.0,
             )),
-            note=f"brightness and contrast, {name} end of the range",
+            note=(
+                f"jasnosc {brightness:+.3f} i kontrast {contrast:+.3f} "
+                f"zakresu, poziom {name}; kierunek losowany, sila "
+                f"przypieta"
+            ),
             image_offset=0,
             image_stride=2,
         ))
@@ -306,15 +336,42 @@ def _tonal_levels() -> tuple[ReviewLevel, ...]:
             level=f"gamma_{name}",
             kind=KIND_GATE,
             config=PolicyConfig(tonal=TonalConfig(
-                gamma_limit=gamma,
+                gamma_limit=(100 - gamma, 100 + gamma),
                 members=("gamma",),
+                pin_magnitude=True,
                 p=1.0,
             )),
-            note=f"gamma, {name} end of the range; the mid and dark "
-                 f"tones move most",
+            note=(
+                f"gamma {100 - gamma} albo {100 + gamma}, poziom "
+                f"{name}; najmocniej ruszaja sie tony srednie i ciemne"
+            ),
             image_offset=1,
             image_stride=2,
         ))
+    # Gamma at the end of its frozen range moves the mid tones by about
+    # nine grey levels, which sits under what the reviewer could see on
+    # this family. Brightness and contrast need no such candidate: at
+    # the same end they move them by forty-five. The candidate is
+    # diagnostic - it is evidence for widening V.3, not a verdict on
+    # the range that is frozen today.
+    levels.append(ReviewLevel(
+        family=FAMILY_TONAL,
+        level="gamma_candidate",
+        kind=KIND_DIAGNOSTIC,
+        config=PolicyConfig(tonal=TonalConfig(
+            gamma_limit=(75, 125),
+            members=("gamma",),
+            pin_magnitude=True,
+            p=1.0,
+        )),
+        note=(
+            "kandydat poza zamrozonym zakresem: gamma 75 albo 125, "
+            "czyli okolo 22 poziomow szarosci wobec 9 przy zamrozonym "
+            "koncu; poza bramka"
+        ),
+        image_offset=1,
+        image_stride=2,
+    ))
     return tuple(levels)
 
 
@@ -323,8 +380,14 @@ def _blur_levels() -> tuple[ReviewLevel, ...]:
 
     This is the family the thin-wall criterion was written for. A
     source sigma of 0.8 acts like 0.64 at the resolution the model
-    works in, which no pore is troubled by; a wall three pixels across
-    might be.
+    works in, which no pore is troubled by; a wall two to three pixels
+    across at that resolution might be.
+
+    The weakest setting is the weakest the family can now draw, not the
+    weakest it once could: below about 0.3 a Gaussian keeps all of its
+    weight on the centre pixel of any kernel and returns the image
+    untouched, so a panel at 0.2 reviewed the identity and said nothing
+    about the blur.
     """
     return tuple(
         ReviewLevel(
@@ -337,12 +400,15 @@ def _blur_levels() -> tuple[ReviewLevel, ...]:
             note=note,
             )
         for level, sigma, note in (
-            ("low", 0.2, "the weakest blur the family can draw"),
-            ("nominal", 0.5, "the middle of the frozen range"),
+            (
+                "low", 0.4,
+                "najslabsze rozmycie, jakie rodzina moze wylosowac",
+            ),
+            ("nominal", 0.6, "srodek zamrozonego zakresu"),
             (
                 "high", 0.8,
-                "the strongest; the kernel truncates it to about 0.69 "
-                "effective, and the walls have to survive it",
+                "najmocniejsze; jadro jest dobrane tak, ze zadana "
+                "sigma jest tez zastosowana, a sciany maja to przezyc",
             ),
         )
     )
@@ -367,8 +433,10 @@ def _mask_aware_levels() -> tuple[ReviewLevel, ...]:
                 p=1.0,
             )),
             note=(
-                f"shading at {strength:.3f} of the tonal range, "
-                f"{level} end; it must fade to nothing at the boundary"
+                f"cieniowanie o sile {strength:.3f} rozpietosci "
+                f"tonalnej obrazu, poziom {level}; musi zanikac do "
+                f"zera na granicy pora. Amplituda w poziomach "
+                f"szarosci zalezy od obrazu i jest podana nizej"
             ),
             image_offset=0,
             image_stride=2,
@@ -389,9 +457,9 @@ def _mask_aware_levels() -> tuple[ReviewLevel, ...]:
                 p=1.0,
             )),
             note=(
-                f"a patch over {area:.0%} of the pore at {factor:.2f} "
-                f"of its brightness, {level} end; its edge must stay "
-                f"soft and clear of the boundary"
+                f"plama na {area:.0%} powierzchni pora, przy "
+                f"{factor:.2f} jego jasnosci, poziom {level}; jej "
+                f"krawedz ma zostac miekka i nie dotykac granicy"
             ),
             image_offset=1,
             image_stride=2,
@@ -400,6 +468,56 @@ def _mask_aware_levels() -> tuple[ReviewLevel, ...]:
             ("low", 0.05, 0.85),
             ("nominal", 0.125, 0.725),
             ("high", 0.20, 0.60),
+        )
+    )
+    # Three ways of setting the shading's amplitude, shown side by side
+    # on the same images because the choice between them is not
+    # decidable from the numbers alone. As a share of each image's own
+    # tonal range, the frozen 0.15 leaves 78.5% of the training set
+    # below what the reviewer could see at all - and the gallery, whose
+    # tonal ranges run to 129 against a training median of 57, made
+    # that look like a handful of dark images rather than most of the
+    # set. Raising the share alone reaches 62 grey levels on the most
+    # contrasty image, which may stop being a believable shadow;
+    # bounding it alone leaves the share meaningless on the images the
+    # bound overrides. The ladder is rendered so the choice is made on
+    # the pictures.
+    ladder = tuple(
+        ReviewLevel(
+            family=FAMILY_MASK_AWARE,
+            level=f"field_candidate_{name}",
+            kind=KIND_DIAGNOSTIC,
+            config=PolicyConfig(mask_aware=MaskAwareConfig(
+                strength=(share, share),
+                min_amplitude_grey=floor,
+                max_amplitude_grey=ceiling,
+                members=("field",),
+                p=1.0,
+            )),
+            note=note,
+            image_offset=0,
+            image_stride=2,
+        )
+        for name, share, floor, ceiling, note in (
+            (
+                "share30", 0.30, None, None,
+                "wariant A: sam ulamek podniesiony do 0.30, bez "
+                "ograniczen; na najbardziej kontrastowym obrazie "
+                "zbioru daje 62 poziomy szarosci",
+            ),
+            (
+                "floor11", 0.15, 11.0, None,
+                "wariant B: zamrozone 0.15 z podloga 11 poziomow "
+                "szarosci; podloga wiaze na 78.5% zbioru, wiec dla "
+                "wiekszosci obrazow zastepuje regule zamiast ja "
+                "ograniczac",
+            ),
+            (
+                "clip25", 0.25, 11.0, 30.0,
+                "wariant C: ulamek 0.25 z podloga 11 i sufitem 30; "
+                "proporcjonalny na 86% zbioru, podloga wiaze na ~12%, "
+                "sufit na ~2%",
+            ),
         )
     )
     stress = (
@@ -414,42 +532,68 @@ def _mask_aware_levels() -> tuple[ReviewLevel, ...]:
                 p=1.0,
             )),
             note=(
-                "deliberately beyond the frozen range: where does a "
-                "dark patch stop being a shadow and start being a "
-                "second pore"
+                "celowo poza zamrozonym zakresem: gdzie ciemna plama "
+                "przestaje byc cieniem, a zaczyna byc drugim porem; "
+                "poza bramka"
             ),
             image_offset=1,
             image_stride=4,
         ),
     )
-    return field + patch + stress
+    return field + patch + ladder + stress
 
 
 def _septum_levels() -> tuple[ReviewLevel, ...]:
-    """The synthetic wall at three widths, plus a faint one.
+    """The synthetic wall at three contrasts, plus the hardest corner.
 
-    Width is the whole question here. Two source pixels is 1.6 at the
-    resolution the model works in, and a wall that disappears there has
-    taught the model to divide a pore on evidence it cannot see. The
-    faint variant pairs the thinnest wall with the tenth percentile of
-    the measured contrast, which is the hardest case the images
-    actually contain.
+    **The strength axis is contrast, not width.** The criterion for
+    this family is that the wall is still visible once the model has
+    reduced the image, and width barely moves that: reviewed at two,
+    three and four source pixels, the measured visibility of one wall
+    ran 45, 34 and 31 grey levels - it fell as the wall got wider. What
+    sets visibility is how far the wall's brightness sits from the pore
+    it divides, and that is the contrast. Varying width therefore
+    produced three levels that differed in something other than the
+    quantity being judged, and a reviewer reporting that the strong
+    setting was still too faint was reporting exactly that.
+
+    The three contrasts are the tenth percentile, the mean and the
+    ninetieth percentile of the contrast measured on real walls in the
+    training set, so the range reviewed is the range the images
+    themselves contain. Width is pinned at the middle of its calibrated
+    range throughout, which keeps it out of the comparison.
+
+    The diagnostic pairs the faintest contrast with the thinnest wall -
+    the hardest corner of both ranges at once - and runs on the same
+    images as the gates. Given its own subset it landed on five images
+    whose walls were brighter than average, so the setting labelled the
+    hardest case in the data measured easier than the settings it was
+    meant to bracket.
     """
+    measured = SeptumConfig()
+    thin, thick = measured.thickness_px
+    middle = round((thin + thick) / 2.0, 2)
     gates = tuple(
         ReviewLevel(
             family=FAMILY_SEPTUM,
             level=level,
             kind=KIND_GATE,
             config=PolicyConfig(septum=SeptumConfig(
-                thickness_px=(thickness, thickness), p=1.0
+                thickness_px=(middle, middle),
+                contrast=contrast,
+                p=1.0,
             )),
             note=(
-                f"a wall {thickness:.1f} source pixels across, "
-                f"{thickness * 0.8:.1f} as the model sees it"
+                f"kontrast sciany {contrast:.3f} rozpietosci tonalnej "
+                f"({description}); szerokosc {middle:.1f} px "
+                f"zrodlowych, {middle * 0.8:.1f} px tak, jak widzi to "
+                f"model"
             ),
         )
-        for level, thickness in (
-            ("low", 2.0), ("nominal", 3.0), ("high", 4.0)
+        for level, contrast, description in (
+            ("low", 0.111, "p10 zmierzonych scian"),
+            ("nominal", measured.contrast, "srednia zmierzonych scian"),
+            ("high", 0.280, "p90 zmierzonych scian"),
         )
     )
     faint = (
@@ -458,14 +602,13 @@ def _septum_levels() -> tuple[ReviewLevel, ...]:
             level="faint",
             kind=KIND_DIAGNOSTIC,
             config=PolicyConfig(septum=SeptumConfig(
-                thickness_px=(2.0, 2.0), contrast=0.111, p=1.0
+                thickness_px=(thin, thin), contrast=0.111, p=1.0
             )),
             note=(
-                "the thinnest wall at the faintest contrast measured "
-                "in the training set; the hardest case the data holds"
+                "najciensza sciana przy najslabszym zmierzonym "
+                "kontrascie - najtrudniejszy przypadek, jaki zawieraja "
+                "dane; poza bramka"
             ),
-            image_offset=0,
-            image_stride=4,
         ),
     )
     return gates + faint

@@ -122,18 +122,18 @@ def test_neither_half_is_a_sliver():
     for result in _divided(policy, image, labels):
         params = _entry(result).params
 
-        assert params["fragment_ratio"] >= 0.25
-        assert min(params["fragment_areas_px2"]) >= 200.0
+        assert min(params["fragment_ratios"]) >= 0.25
+        assert params["smallest_fragment_px2"] >= 200.0
 
 
-def test_only_the_divided_pore_changes():
+def test_only_the_divided_pores_change():
     """Every other instance keeps its identity and its every pixel."""
     image, labels = _sample()
     policy = _policy()
 
     for result in _divided(policy, image, labels):
-        divided = _entry(result).params["divided_instance"]
-        untouched = (labels > 0) & (labels != divided)
+        divided = _entry(result).params["divided_instances"]
+        untouched = (labels > 0) & ~np.isin(labels, divided)
 
         assert np.array_equal(
             result.labels[untouched], labels[untouched]
@@ -146,21 +146,20 @@ def test_the_wall_is_background_in_the_annotation():
     policy = _policy()
 
     for result in _divided(policy, image, labels):
-        divided = _entry(result).params["divided_instance"]
-        was_pore = labels == divided
-        halves = result.labels[was_pore]
+        for divided in _entry(result).params["divided_instances"]:
+            halves = result.labels[labels == divided]
 
-        assert np.count_nonzero(halves == 0) > 0
+            assert np.count_nonzero(halves == 0) > 0
 
 
-def test_the_wall_is_drawn_only_inside_the_pore_it_divides():
-    """It joins the walls already there; it does not paint over them."""
+def test_the_walls_are_drawn_only_inside_the_pores_they_divide():
+    """They join the walls already there; they do not paint over them."""
     image, labels = _sample()
     policy = _policy()
 
     for result in _divided(policy, image, labels):
-        divided = _entry(result).params["divided_instance"]
-        elsewhere = labels != divided
+        divided = _entry(result).params["divided_instances"]
+        elsewhere = ~np.isin(labels, divided)
 
         assert np.array_equal(
             result.image[elsewhere], image[elsewhere]
@@ -181,26 +180,30 @@ def test_the_wall_is_brighter_than_the_pore_it_divides():
 
     for result in _divided(policy, image, labels):
         params = _entry(result).params
-        was_pore = labels == params["divided_instance"]
-        changed = was_pore & (result.image != image)
-        core = was_pore & (result.labels == 0)
+        for divided, target in zip(
+            params["divided_instances"], params["target_intensities"]
+        ):
+            was_pore = labels == divided
+            changed = was_pore & (result.image != image)
+            core = was_pore & (result.labels == 0)
 
-        assert changed.any()
-        assert np.median(result.image[changed]) > np.median(
-            image[changed]
-        )
-        assert float(
-            np.median(result.image[core])
-        ) == pytest.approx(params["target_intensity"], abs=2.0)
+            assert changed.any()
+            assert np.median(result.image[changed]) > np.median(
+                image[changed]
+            )
+            assert float(
+                np.median(result.image[core])
+            ) == pytest.approx(target, abs=2.0)
 
 
-def test_the_wall_is_as_wide_as_a_real_one():
-    """Its width is a measurement, so it has to come out as measured."""
+def test_the_walls_are_as_wide_as_real_ones():
+    """Their width is a measurement, so it has to come out as measured."""
     image, labels = _sample()
     policy = _policy()
 
     for result in _divided(policy, image, labels):
-        assert 2.0 <= _entry(result).params["thickness_px"] <= 4.0
+        for thickness in _entry(result).params["thickness_px"]:
+            assert 2.0 <= thickness <= 4.0
 
 
 def test_the_wall_survives_the_scale_the_model_works_at():
@@ -216,21 +219,21 @@ def test_the_wall_survives_the_scale_the_model_works_at():
     policy = _policy()
 
     for result in _divided(policy, image, labels):
-        divided = _entry(result).params["divided_instance"]
-        was_pore = labels == divided
-        shape = (
-            round(image.shape[0] * 0.8), round(image.shape[1] * 0.8)
-        )
-        before = resize(
-            np.where(was_pore, image, 0), shape, order=1,
-            preserve_range=True, anti_aliasing=True,
-        )
-        after = resize(
-            np.where(was_pore, result.image, 0), shape, order=1,
-            preserve_range=True, anti_aliasing=True,
-        )
+        for divided in _entry(result).params["divided_instances"]:
+            was_pore = labels == divided
+            shape = (
+                round(image.shape[0] * 0.8), round(image.shape[1] * 0.8)
+            )
+            before = resize(
+                np.where(was_pore, image, 0), shape, order=1,
+                preserve_range=True, anti_aliasing=True,
+            )
+            after = resize(
+                np.where(was_pore, result.image, 0), shape, order=1,
+                preserve_range=True, anti_aliasing=True,
+            )
 
-        assert float(np.abs(after - before).max()) > 5.0
+            assert float(np.abs(after - before).max()) > 5.0
 
 
 def test_only_the_larger_pores_are_ever_divided():
@@ -242,7 +245,7 @@ def test_only_the_larger_pores_are_ever_divided():
     policy = _policy(candidate_fraction=(0.5, 0.5))
 
     for result in _divided(policy, image, labels):
-        assert _entry(result).params["divided_instance"] == 1
+        assert _entry(result).params["divided_instances"] == (1,)
 
 
 def test_a_frame_with_no_pore_large_enough_is_left_alone():
@@ -323,13 +326,134 @@ def test_the_divided_arrays_never_reach_the_record():
                    for value in params.values())
 
 
+def _dense_sample():
+    """A frame of twenty-five pores, so a pool worth sharing exists."""
+    return _sample(height=300, width=300, rows=5, cols=5)
+
+
+def test_a_sample_receives_several_walls():
+    """The reference work divides many pores per image; one wall on an
+    image of dozens leaves the error being trained against too rare in
+    the sample to be learned from."""
+    image, labels = _dense_sample()
+    policy = _policy()
+
+    counts = {
+        _entry(result).params["n_septa_drawn"]
+        for result in _divided(policy, image, labels)
+    }
+
+    assert max(counts) > 1
+
+
+def test_no_pore_is_divided_twice():
+    """Cutting a fragment again would make slivers in a chain."""
+    image, labels = _dense_sample()
+    policy = _policy()
+
+    for result in _divided(policy, image, labels):
+        divided = _entry(result).params["divided_instances"]
+
+        assert len(set(divided)) == len(divided)
+
+
+def test_the_instance_count_grows_by_the_number_of_walls():
+    """Each wall turns one pore into two and nothing else changes."""
+    image, labels = _dense_sample()
+    policy = _policy()
+
+    for result in _divided(policy, image, labels):
+        params = _entry(result).params
+
+        assert params["n_instances_after"] - params[
+            "n_instances_before"
+        ] == params["n_septa_drawn"]
+        assert int(result.labels.max()) == params["n_instances_after"]
+
+
+def test_the_numbering_stays_dense_across_several_walls():
+    """A gap silently shifts every per-instance array downstream, and
+    each wall adds an id, so the risk grows with the count."""
+    image, labels = _dense_sample()
+    policy = _policy()
+
+    for result in _divided(policy, image, labels):
+        present = np.unique(result.labels)
+
+        assert np.array_equal(present, np.arange(present.max() + 1))
+
+
+def test_every_half_of_every_wall_is_whole():
+    image, labels = _dense_sample()
+    policy = _policy()
+
+    for result in _divided(policy, image, labels):
+        components = connected_components(
+            result.labels, background=0, connectivity=1
+        )
+
+        assert int(components.max()) == int(result.labels.max())
+
+
+def test_the_count_follows_the_size_of_the_pool():
+    """A share of the pool, so a sparse and a dense image are treated
+    alike relative to what each of them offers."""
+    policy = _policy(rate=(0.5, 0.5))
+    sparse = _sample(height=300, width=300, rows=2, cols=2)
+    dense = _dense_sample()
+
+    def drawn(sample):
+        results = _divided(policy, *sample)
+        return max(
+            _entry(result).params["n_septa_drawn"] for result in results
+        )
+
+    assert drawn(dense) > drawn(sparse)
+
+
+def test_the_area_cap_bounds_what_a_sample_may_lose():
+    """Walls go into the biggest pores, so a count alone does not say
+    how much of the image changed."""
+    image, labels = _dense_sample()
+    policy = _policy(max_divided_area_share=0.15, rate=(1.0, 1.0))
+
+    for result in _divided(policy, image, labels):
+        params = _entry(result).params
+
+        assert params["divided_area_share"] <= 0.15
+        assert params["n_septa_drawn"] < params["n_septa_requested"]
+
+
+def test_the_count_never_exceeds_its_cap():
+    image, labels = _dense_sample()
+    policy = _policy(rate=(1.0, 1.0), count_cap=2)
+
+    for result in _divided(policy, image, labels):
+        assert _entry(result).params["n_septa_drawn"] <= 2
+
+
+def test_the_record_says_what_was_asked_for_and_what_was_drawn():
+    """Without both, a sample short of walls cannot be told from one
+    that never wanted them."""
+    image, labels = _dense_sample()
+    policy = _policy()
+
+    for result in _divided(policy, image, labels):
+        params = _entry(result).params
+
+        assert params["n_septa_requested"] >= params["n_septa_drawn"]
+        assert params["candidate_pool"] >= params["n_septa_requested"]
+        assert 0.0 < params["divided_area_share"] <= 1.0
+
+
 def test_walls_are_drawn_both_straight_and_curved():
     image, labels = _sample()
     policy = _policy()
 
     sags = {
-        round(_entry(result).params["sag"], 3)
+        round(sag, 3)
         for result in _divided(policy, image, labels)
+        for sag in _entry(result).params["sags"]
     }
 
     assert len(sags) > 1

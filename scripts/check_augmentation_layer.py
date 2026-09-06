@@ -283,7 +283,7 @@ def observe_mask_aware(
 
 
 def observe_septum(tally: Tally, prepared: Any, result: Any) -> None:
-    """A wall divides one pore in two and touches nothing else."""
+    """Each wall divides one pore in two and touches nothing else."""
     observe_common(tally, prepared, result)
     image_id = prepared.record.image_id
     entry = result.record.transforms[0]
@@ -293,12 +293,21 @@ def observe_septum(tally: Tally, prepared: Any, result: Any) -> None:
         return
 
     tally.notes["divided"] += 1
-    if int(result.labels.max()) != int(prepared.labels.max()) + 1:
-        tally.violate(image_id, "the division did not add exactly one pore")
-    divided = entry.params["divided_instance"]
-    elsewhere = prepared.labels != divided
+    divided = entry.params["divided_instances"]
+    tally.notes[f"septa_{len(divided)}"] += 1
+    if len(set(divided)) != len(divided):
+        tally.violate(image_id, "a pore was divided more than once")
+    if int(result.labels.max()) != int(prepared.labels.max()) + len(divided):
+        tally.violate(
+            image_id, "the divisions did not add one pore per wall"
+        )
+    if entry.params["divided_area_share"] > (
+        SeptumConfig().max_divided_area_share
+    ):
+        tally.violate(image_id, "more area was divided than the cap allows")
+    elsewhere = ~np.isin(prepared.labels, divided)
     if not np.array_equal(result.image[elsewhere], prepared.image[elsewhere]):
-        tally.violate(image_id, "the wall was painted outside its own pore")
+        tally.violate(image_id, "a wall was painted outside its own pore")
     if not np.array_equal(
         result.labels[elsewhere], prepared.labels[elsewhere]
     ):

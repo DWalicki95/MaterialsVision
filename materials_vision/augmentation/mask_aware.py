@@ -141,7 +141,7 @@ class PoreBrightnessField(A.ImageOnlyTransform):
 
         kind = self.py_random.choice(config.field_kinds)
         strength = self.py_random.uniform(*config.strength)
-        amplitude = strength * span
+        amplitude = _bounded_amplitude(strength * span, config)
         chosen = self._choose(eligible)
 
         boxes = find_objects(labels)
@@ -502,6 +502,32 @@ def _tonal_span(image: np.ndarray) -> float:
     """Width of an image's tonal range, ignoring its extremes."""
     low, high = np.percentile(image, TONAL_PERCENTILES)
     return float(high) - float(low)
+
+
+def _bounded_amplitude(
+    amplitude: float, config: MaskAwareConfig
+) -> float:
+    """Hold the shading between the bounds the configuration sets.
+
+    The shading is a share of each image's own tonal range, which
+    carries an assumption: that a flat image should be shaded flatly,
+    because both its flatness and its shading come from the same
+    detector response. The assumption has a limit at each end. These
+    micrographs run from a tonal range of 34 to one of 208, so the
+    same share is a few grey levels on one image and dozens on
+    another - too little to be a signal at one end, too much to be a
+    believable shadow at the other.
+
+    Both bounds are optional and off unless set. When they are set
+    they are meant to catch the tails: a bound that binds on most of
+    the set has stopped being a bound and become the rule, and the
+    share it overrides then means nothing on the images it overrides.
+    """
+    if config.min_amplitude_grey is not None:
+        amplitude = max(amplitude, config.min_amplitude_grey)
+    if config.max_amplitude_grey is not None:
+        amplitude = min(amplitude, config.max_amplitude_grey)
+    return amplitude
 
 
 def _eligible_labels(

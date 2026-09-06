@@ -5,7 +5,8 @@ from materials_vision.augmentation.config import (FAMILY_BLUR,
                                                   FAMILY_MASK_AWARE,
                                                   FAMILY_ORIENTATION,
                                                   FAMILY_SCALE, FAMILY_SEPTUM,
-                                                  FAMILY_TONAL)
+                                                  FAMILY_TONAL, BlurConfig,
+                                                  SeptumConfig, TonalConfig)
 from materials_vision.phase0.levels import (KIND_DIAGNOSTIC, KIND_GATE,
                                             ReviewLevel, level_by_key,
                                             levels_for, review_levels)
@@ -92,16 +93,72 @@ class TestTheNumbers:
             level.level: level.config.blur.sigma_px
             for level in gate_levels(FAMILY_BLUR)
         }
-        assert drawn["low"] == (0.2, 0.2)
+        assert drawn["low"] == (0.4, 0.4)
         assert drawn["high"] == (0.8, 0.8)
 
-    def test_the_wall_widths_bracket_the_measured_range(self) -> None:
+    def test_no_tonal_level_reaches_past_the_frozen_range(self) -> None:
+        """The criterion asks whether the numbers in use are
+        believable. Bracketing from outside measures where the family
+        stops being believable, which gates nothing - and a verdict
+        given on settings nobody proposes using is not a verdict on the
+        policy."""
+        frozen = TonalConfig()
+        for level in gate_levels(FAMILY_TONAL):
+            tonal = level.config.tonal
+            assert abs(tonal.brightness_limit[1]) <= abs(
+                frozen.brightness_limit[1]
+            ) + 1e-9
+            assert abs(tonal.contrast_limit[1]) <= abs(
+                frozen.contrast_limit[1]
+            ) + 1e-9
+            assert frozen.gamma_limit[0] <= tonal.gamma_limit[0]
+            assert tonal.gamma_limit[1] <= frozen.gamma_limit[1]
+
+    def test_the_strong_tonal_level_is_the_frozen_end(self) -> None:
+        frozen = TonalConfig()
+        strong = {
+            level.level: level.config.tonal
+            for level in gate_levels(FAMILY_TONAL)
+        }
+
+        assert strong["bc_high"].brightness_limit == (
+            -frozen.brightness_limit[1], frozen.brightness_limit[1]
+        )
+        assert strong["gamma_high"].gamma_limit == frozen.gamma_limit
+
+    def test_every_tonal_level_pins_its_magnitude(self) -> None:
+        """Drawn from a symmetric range, a level labelled strong shows
+        the identity about as often as not."""
+        for level in gate_levels(FAMILY_TONAL):
+            assert level.config.tonal.pin_magnitude
+
+    def test_no_blur_level_reviews_the_identity(self) -> None:
+        """Below what a pixel grid can represent a Gaussian returns the
+        image untouched, so the panel would review nothing."""
+        for level in gate_levels(FAMILY_BLUR):
+            assert level.config.blur.sigma_px[0] >= (
+                BlurConfig.MIN_REPRESENTABLE_SIGMA_PX
+            )
+
+    def test_the_wall_contrasts_bracket_the_measured_range(self) -> None:
+        """Contrast is what decides whether a wall survives the resize;
+        width barely moves it, and reviewing width produced three
+        levels differing in something other than what was judged."""
         drawn = {
-            level.level: level.config.septum.thickness_px
+            level.level: level.config.septum.contrast
             for level in gate_levels(FAMILY_SEPTUM)
         }
-        assert drawn["low"] == (2.0, 2.0)
-        assert drawn["high"] == (4.0, 4.0)
+        assert drawn["low"] == 0.111
+        assert drawn["nominal"] == SeptumConfig().contrast
+        assert drawn["high"] == 0.280
+
+    def test_the_wall_width_is_held_still_across_the_levels(self) -> None:
+        """Otherwise two things vary at once and neither is measured."""
+        widths = {
+            level.config.septum.thickness_px
+            for level in gate_levels(FAMILY_SEPTUM)
+        }
+        assert len(widths) == 1
 
     def test_the_faint_wall_uses_the_lowest_measured_contrast(
         self,
@@ -211,9 +268,23 @@ class TestImageShares:
 
     def test_a_diagnostic_takes_a_quarter(self) -> None:
         images = tuple(f"image_{i}" for i in range(16))
-        level = level_by_key("F5_septum__faint")
+        level = level_by_key("F4_mask_aware__patch_stress")
         assert level is not None
         assert len(level.images(images)) == 4
+
+    def test_the_faint_wall_runs_on_the_same_images_as_the_gates(
+        self,
+    ) -> None:
+        """On a subset of its own it landed on five images whose walls
+        were brighter than average, so the setting meant to be the
+        hardest case in the data measured easier than the settings it
+        was meant to bracket."""
+        images = tuple(f"image_{i}" for i in range(16))
+        faint = level_by_key("F5_septum__faint")
+        gate = level_by_key("F5_septum__high")
+
+        assert faint is not None and gate is not None
+        assert faint.images(images) == gate.images(images)
 
     def test_the_orientation_family_is_drawn_twice_per_image(
         self,

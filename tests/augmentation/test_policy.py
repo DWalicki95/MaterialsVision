@@ -273,20 +273,23 @@ def test_the_record_drops_the_frame_size_the_library_adds():
 
 
 def test_blur_records_the_width_it_actually_applied():
-    """Holding the kernel fixed truncates the widest draws.
+    """A kernel narrower than the Gaussian truncates it, so the drawn
+    sigma and the applied one are different numbers.
 
-    The drawn sigma and the applied one are therefore different
-    numbers, and only the second describes what the model saw.
+    Sizing the kernel from the range brings them together, and it is
+    the applied one that describes what the model saw.
     """
     image, labels = _sample()
-    policy = _policy(blur=BlurConfig(p=1.0))
+    config = BlurConfig(p=1.0)
+    policy = _policy(blur=config)
 
     entry = policy.apply(
         image, labels, record=_FakeRecord(), seed=5
     ).record.transforms[0]
 
-    assert entry.params["kernel_px"] == 3
-    assert 0.0 < entry.params["sigma_effective_px"] < 0.8
+    low, high = config.sigma_px
+    assert entry.params["kernel_px"] == config.kernel_px
+    assert low - 0.01 <= entry.params["sigma_effective_px"] <= high
     assert "kernel" not in entry.params
 
 

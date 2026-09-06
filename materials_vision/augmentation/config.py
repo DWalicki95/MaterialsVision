@@ -19,6 +19,7 @@ training comparison, and one that helps may afterwards be retried with
 a stronger or weaker range. A number changed here changes every run
 that uses it, which makes it a decision rather than a convenience.
 """
+import math
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -226,6 +227,22 @@ class TonalConfig:
     p : float
         Probability that the container fires. The members carry equal
         weight inside it, written out rather than left implicit.
+    pin_magnitude : bool
+        Draw only the ends of the ranges rather than uniformly across
+        them. **A review setting, not a training one**, and off by
+        default: a training run wants the whole range, including the
+        weak draws, because that variety is the augmentation.
+
+        A review panel wants the opposite. These ranges are symmetric
+        about the identity, so drawing uniformly from one puts a fair
+        share of the draws near zero, and a panel labelled "strong"
+        then shows an image barely distinguishable from the original -
+        which reviews the draw rather than the setting, and says
+        nothing about whether the setting is safe. Pinned, the
+        magnitude is always the end of the range and only the
+        direction is drawn, so both a brighter and a darker result
+        appear across a level's images while every one of them carries
+        the full strength.
     """
 
     brightness_limit: tuple[float, float] = (-0.10, 0.10)
@@ -233,6 +250,7 @@ class TonalConfig:
     gamma_limit: tuple[int, int] = (90, 110)
     members: tuple[str, ...] = TONAL_MEMBERS
     p: float = 0.5
+    pin_magnitude: bool = False
 
     def __post_init__(self) -> None:
         """Reject a container that could draw nothing.
@@ -256,36 +274,93 @@ class BlurConfig:
 
     Parameters
     ----------
-    kernel_px : int
-        Kernel side in source pixels, held fixed.
     sigma_px : tuple of float
-        Standard deviation range, in source pixels.
+        Standard deviation range, in source pixels. The lower end must
+        stay above what a pixel grid can represent; see the notes.
     p : float
 
     Notes
     -----
-    Kernel size and sigma are not independent in the library used here.
-    Left to itself it derives the kernel from sigma as
-    ``int(sigma * 3.5) * 2 + 1``, which at the lower end of the range
-    below yields a kernel of 1 - no blur at all - so the family would
-    fire measurably less often than its own ``p`` claims. The kernel is
-    therefore pinned. The price is that the largest sigma is truncated
-    one pixel either side of centre, giving an effective width nearer
-    0.69 than 0.8; the kernel is renormalized, so no brightness is
-    lost, and strength stays monotone in sigma, which is what comparing
-    a weak, a nominal and a strong setting requires.
+    **The kernel is derived, not chosen.** A Gaussian narrower than its
+    kernel is truncated, and a truncated kernel realizes a smaller
+    width than the one drawn: held at three pixels, a sigma of 0.8
+    comes out as 0.69. The kernel is therefore sized from the widest
+    sigma the range can draw, at three standard deviations either side
+    of centre, which puts the truncated tail below a thousandth of the
+    kernel's mass and makes the sigma applied equal to the sigma drawn.
+    The library used here would otherwise size the kernel from each
+    individual draw and return one pixel for the weakest of them.
+
+    **The lower end of the range is bounded by the sampling grid, not
+    by taste.** A Gaussian with sigma 0.2 keeps essentially all of its
+    mass inside the centre pixel - measured on a discrete kernel,
+    0.00 per cent of the weight reaches a neighbour at any kernel size
+    - so it returns the image unchanged whatever kernel is used around
+    it. Widening the kernel does not rescue it; only raising sigma
+    does. Below roughly 0.3 the family is the identity wearing a
+    probability, which is worse than an absent family because it costs
+    a screening run to discover.
 
     Scale matters for judging safety. The model sees the image at 0.8
-    of its source resolution, so a source sigma of 0.8 acts like 0.64
-    there, and the smallest annotated pore - about 5.5 pixels across at
-    that scale - survives it comfortably. The structure genuinely at
-    risk is the thin wall between two pores, whose thickness is not
-    recorded anywhere in the dataset and can only be judged by looking.
+    of its source resolution, so a source sigma acts at 0.8 of its
+    value there, and the smallest annotated pore - about 5.5 pixels
+    across at that scale - survives the range below comfortably. The
+    structure genuinely at risk is the thin wall between two pores,
+    measured at 1.6 to 3.2 pixels at working resolution, which is why
+    the strong end of this family is judged by eye on a wall rather
+    than accepted from the arithmetic.
     """
 
-    kernel_px: int = 3
-    sigma_px: tuple[float, float] = (0.2, 0.8)
+    sigma_px: tuple[float, float] = (0.4, 0.8)
     p: float = 0.2
+
+    # Below this a Gaussian cannot move weight off the centre pixel of
+    # a discrete kernel, so the transformation is the identity.
+    MIN_REPRESENTABLE_SIGMA_PX = 0.3
+
+    @property
+    def kernel_px(self) -> int:
+        """Kernel side that leaves the widest drawn sigma untruncated.
+
+        Returns
+        -------
+        int
+            Odd, at least three.
+        """
+        radius = max(1, math.ceil(3.0 * self.sigma_px[1]))
+        return 2 * radius + 1
+
+    def derived_parameters(self) -> dict[str, Any]:
+        """Numbers this family computes rather than being given.
+
+        Returns
+        -------
+        dict
+            Merged into the run's parameter record, so the width the
+            model saw is stored beside the range it was drawn from.
+        """
+        return {"kernel_px": self.kernel_px}
+
+    def __post_init__(self) -> None:
+        """Reject a range that cannot blur or does not describe a draw.
+
+        Raises
+        ------
+        ValueError
+        """
+        low, high = self.sigma_px
+        if high < low:
+            raise ValueError(
+                f"sigma_px must be an increasing range, got "
+                f"{self.sigma_px}"
+            )
+        if low < self.MIN_REPRESENTABLE_SIGMA_PX:
+            raise ValueError(
+                f"sigma_px starts at {low}, below the "
+                f"{self.MIN_REPRESENTABLE_SIGMA_PX} a pixel grid can "
+                f"represent; draws there return the image unchanged and "
+                f"the family would fire less often than its p states"
+            )
 
 
 @dataclass(frozen=True)
@@ -364,11 +439,26 @@ class MaskAwareConfig:
     lower factor - exists to find where recognizability breaks. All
     three are expressed by building this object with other numbers,
     which is why none of them is hard-coded anywhere else.
+
+    ``min_amplitude_grey`` and ``max_amplitude_grey`` bound the shading
+    in absolute grey levels, and are off unless set. The shading is
+    otherwise a share of each image's own tonal range, which assumes a
+    flat image should be shaded flatly - both its flatness and its
+    shading coming from the same detector response. The training
+    images run from a tonal range of 34 to one of 208, so that share
+    is a few grey levels at one end and dozens at the other, and the
+    assumption has a limit in both directions: too little to be a
+    signal, or too much to be a believable shadow. A bound is for
+    those tails. One that binds on most of the set has replaced the
+    rule rather than guarded it, and the share then means nothing on
+    the images it overrides.
     """
 
     p: float = 0.3
     pore_fraction: tuple[float, float] = (0.30, 0.50)
     strength: tuple[float, float] = (0.08, 0.15)
+    min_amplitude_grey: Optional[float] = None
+    max_amplitude_grey: Optional[float] = None
     field_kinds: tuple[str, ...] = ("constant", "gradient", "random")
     field_grid_sides: tuple[int, ...] = (2, 3)
     min_core_distance_px: float = 3.0
@@ -450,12 +540,26 @@ class SeptumConfig:
     Parameters
     ----------
     p : float
-        Probability that a sample gets a wall drawn into it.
+        Probability that a sample gets walls drawn into it.
     candidate_fraction : tuple of float
         Share of the pores, largest first, a wall may be drawn into.
         A wall needs room on both sides of it, and dividing a pore
         already at the small end of the distribution would create two
         instances smaller than anything annotated.
+    rate : tuple of float
+        Share of the candidate pool to divide, drawn per sample. The
+        count follows from the image rather than being fixed, because
+        the images differ several-fold in how many pores they hold and
+        a fixed count would be most of the candidates on one image and
+        a rounding error on another.
+    count_cap : int
+        Most walls one sample may receive, whatever the rate implies.
+    max_divided_area_share : float
+        Largest share of the annotated area that may be divided. Walls
+        are drawn into the biggest pores, so a count alone does not
+        bound how much of the image is affected; without this a sample
+        of few large pores could have most of its area rebuilt. It is
+        a guard on the tail, not a second way of setting the count.
     fragment_ratio : float
         Smallest share of the divided pore either half may end up
         with. Below it the wall has clipped a corner rather than
@@ -496,6 +600,9 @@ class SeptumConfig:
 
     p: float = 0.20
     candidate_fraction: tuple[float, float] = (0.20, 0.30)
+    rate: tuple[float, float] = (0.20, 0.50)
+    count_cap: int = 10
+    max_divided_area_share: float = 0.40
     fragment_ratio: float = 0.25
     thickness_px: tuple[float, float] = (2.0, 4.0)
     contrast: float = 0.2034
@@ -515,7 +622,19 @@ class SeptumConfig:
         _check_range(
             "candidate_fraction", self.candidate_fraction, 0.0, 1.0
         )
+        _check_range("rate", self.rate, 0.0, 1.0)
         _check_range("sag", self.sag, 0.0, 1.0)
+        if self.count_cap < 1:
+            raise ValueError(
+                f"count_cap must be at least 1; switching the family "
+                f"off is done by leaving it out of the policy, got "
+                f"{self.count_cap}"
+            )
+        if not 0.0 < self.max_divided_area_share <= 1.0:
+            raise ValueError(
+                f"max_divided_area_share must lie in (0, 1], got "
+                f"{self.max_divided_area_share}"
+            )
         if not 0.0 < self.fragment_ratio <= 0.5:
             raise ValueError(
                 f"fragment_ratio is the smaller half's share and must "
@@ -690,9 +809,18 @@ def policy_run_metadata(config: PolicyConfig) -> dict[str, Any]:
     -------
     dict
     """
-    parameters: dict[str, Any] = {
-        name: vars(cfg).copy() for name, cfg in enabled_families(config)
-    }
+    parameters: dict[str, Any] = {}
+    for name, family_config in enabled_families(config):
+        values = vars(family_config).copy()
+        # A number a family computes for itself still describes what was
+        # applied, so it belongs in the record next to the ones that were
+        # written down. Only the blur has one today - its kernel follows
+        # from its sigma range - and leaving it out would make the record
+        # silent about the width the model actually saw.
+        derived = getattr(family_config, "derived_parameters", None)
+        if derived is not None:
+            values.update(derived())
+        parameters[name] = values
     return {
         "families": list(config.families),
         "order": list(config.families),

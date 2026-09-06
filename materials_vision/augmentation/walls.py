@@ -33,7 +33,7 @@ measured against the tonal range of their own image.
 """
 import logging
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Iterable, Optional, Sequence
 
 import numpy as np
 from scipy.ndimage import (distance_transform_edt, maximum_filter,
@@ -212,6 +212,40 @@ def summarize_walls(samples: Iterable[WallSample]) -> WallSummary:
         n_images=len(thicknesses),
         n_ridge_px=int(pooled.size),
     )
+
+
+def thinnest_wall_pixel(
+    labels: np.ndarray
+) -> Optional[tuple[int, int]]:
+    """Where the narrowest wall between two pores runs.
+
+    This is the place a blur destroys a boundary first, so it is where
+    a close-up has to be taken to answer whether a blur is safe.
+
+    Not every background pixel is a wall: the margin around the frame,
+    an unannotated corner and a dent in a single pore's outline are all
+    outside a pore while separating nothing. A wall is background lying
+    between **two different** pores, and only those pixels are
+    considered - taking the nearest background pixel instead would
+    return a point on the frame margin on almost every image.
+
+    Parameters
+    ----------
+    labels : np.ndarray
+        Instance mask.
+
+    Returns
+    -------
+    tuple of int or None
+        Row and column, or ``None`` when the frame holds no wall
+        between two pores.
+    """
+    ridge, distance = _wall_ridge(labels)
+    if not ridge.any():
+        return None
+    masked = np.where(ridge, distance, np.inf)
+    row, column = np.unravel_index(int(masked.argmin()), masked.shape)
+    return int(row), int(column)
 
 
 def _wall_ridge(labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

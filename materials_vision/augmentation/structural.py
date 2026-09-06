@@ -49,13 +49,16 @@ logger = logging.getLogger(__name__)
 
 RECORD_KEYS = (
     "changed_mask",
-    "divided_instance",
+    "divided_instances",
+    "n_septa_requested",
+    "n_septa_drawn",
+    "candidate_pool",
+    "divided_area_share",
     "thickness_px",
-    "sag",
-    "chord_px",
-    "fragment_areas_px2",
-    "fragment_ratio",
-    "target_intensity",
+    "sags",
+    "fragment_ratios",
+    "smallest_fragment_px2",
+    "target_intensities",
     "n_instances_before",
     "n_instances_after",
     "attempts",
@@ -64,7 +67,8 @@ RECORD_KEYS = (
 
 
 class SyntheticSeptum(A.DualTransform):
-    """Divide one large pore in two with a wall of measured width.
+    """Divide several large pores, each in two, with walls of measured
+    width.
 
     Parameters
     ----------
@@ -72,9 +76,27 @@ class SyntheticSeptum(A.DualTransform):
 
     Notes
     -----
-    One pore per sample. Drawing into several would change the size
-    distribution of a whole image at once, and the size distribution
-    is one of the things a run reports.
+    **How many walls a sample gets follows from the image.** The
+    training images differ several-fold in how many pores they hold,
+    so a fixed count would divide most of the candidates on a sparse
+    image and a small fraction of them on a dense one. The count is
+    therefore a share of the candidate pool, which makes it
+    proportionate on both without a special case for either.
+
+    **Each pore is divided at most once.** The pool is fixed before
+    the first wall is drawn and pores are taken from it without
+    replacement, so a fragment produced by one wall can never be cut
+    again - which would otherwise produce chains of slivers whose
+    sizes no annotator would have drawn.
+
+    **The area a sample may lose is bounded separately from the
+    count.** Walls go into the largest pores, so a count on its own
+    says little about how much of the image changes; a handful of
+    walls on an image of few large pores can rebuild most of its
+    annotated area. The share of divided area is capped as a guard on
+    that tail, and what it reached is recorded per sample, because
+    dividing pores moves the size distribution and the size
+    distribution is one of the things a run reports.
     """
 
     def __init__(self, config: SeptumConfig) -> None:
@@ -117,23 +139,75 @@ class SyntheticSeptum(A.DualTransform):
         if n_before == 0:
             return _undivided(0, "frame_holds_no_pore")
 
-        candidates = self._candidates(labels, n_before)
+        areas = np.bincount(labels.ravel(), minlength=n_before + 1)[1:]
+        candidates = self._candidates(areas, n_before)
         if candidates.size == 0:
             return _undivided(n_before, "no_pore_large_enough")
 
-        boxes = find_objects(labels)
-        for attempt in range(1, config.max_retries + 2):
-            label = int(self.py_random.choice(candidates.tolist()))
-            box = boxes[label - 1]
-            division = self._divide(image, labels, label, box)
-            if division is not None:
-                division["attempts"] = attempt
-                return division
+        requested = self._requested_count(candidates.size)
+        # The tonal range is read once, from the image as it arrived.
+        # Taken again after a wall had been painted in it would drift
+        # with the walls this call is drawing, so the last wall of a
+        # sample would be built to a slightly different brightness than
+        # the first for no reason anyone chose.
+        low, high = np.percentile(image, TONAL_PERCENTILES)
+        tonal_span = float(high) - float(low)
 
-        return _undivided(
-            n_before,
-            "no_wall_divided_the_pore_in_two",
-            attempts=config.max_retries + 1,
+        boxes = find_objects(labels)
+        budget = config.max_divided_area_share * float(areas.sum())
+        remaining = set(candidates.tolist())
+        divisions: list[dict[str, Any]] = []
+        attempts = 0
+        divided_area = 0.0
+        walled, divided = image, labels
+
+        while len(divisions) < requested:
+            affordable = sorted(
+                label for label in remaining
+                if areas[label - 1] <= budget
+            )
+            if not affordable:
+                break
+
+            label = int(self.py_random.choice(affordable))
+            remaining.discard(label)
+            for _ in range(config.max_retries + 1):
+                attempts += 1
+                division = self._divide(
+                    walled, divided, label, boxes[label - 1], tonal_span
+                )
+                if division is not None:
+                    walled = division.pop("walled_image")
+                    divided = division.pop("divided_labels")
+                    budget -= float(areas[label - 1])
+                    divided_area += float(areas[label - 1])
+                    divisions.append(division)
+                    break
+
+        if not divisions:
+            return _undivided(
+                n_before,
+                "no_wall_divided_the_pore_in_two",
+                attempts=attempts,
+                requested=requested,
+                pool=int(candidates.size),
+            )
+
+        return _summarize(
+            divisions, walled, divided, n_before, attempts, requested,
+            int(candidates.size), divided_area, float(areas.sum()),
+        )
+
+    def _requested_count(self, pool_size: int) -> int:
+        """How many walls this sample asks for.
+
+        A share of the pool rather than a fixed number, so an image of
+        eighty pores and one of twenty are treated alike relative to
+        what each of them offers.
+        """
+        rate = self.py_random.uniform(*self._config.rate)
+        return int(
+            min(max(round(rate * pool_size), 1), self._config.count_cap)
         )
 
     def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
@@ -169,7 +243,7 @@ class SyntheticSeptum(A.DualTransform):
         return mask if divided is None else divided
 
     def _candidates(
-        self, labels: np.ndarray, n_before: int
+        self, areas: np.ndarray, n_before: int
     ) -> np.ndarray:
         """The largest pores, the share of them drawn for this sample.
 
@@ -177,8 +251,12 @@ class SyntheticSeptum(A.DualTransform):
         from the small end of the distribution would produce two
         instances below anything an annotator drew, which is a worse
         error than not augmenting the sample at all.
+
+        The pool is settled here, once, before any wall is drawn, and
+        every wall of the sample is taken from it. Recomputing it after
+        each division would let a fragment re-enter as a candidate and
+        be cut again.
         """
-        areas = np.bincount(labels.ravel(), minlength=n_before + 1)[1:]
         share = self.py_random.uniform(*self._config.candidate_fraction)
         count = max(1, int(round(n_before * share)))
         largest = np.argsort(areas)[::-1][:count] + 1
@@ -192,6 +270,7 @@ class SyntheticSeptum(A.DualTransform):
         labels: np.ndarray,
         label: int,
         box: tuple[slice, ...],
+        tonal_span: float,
     ) -> Optional[dict[str, Any]]:
         """Try once to divide one pore, returning None if it failed."""
         config = self._config
@@ -226,7 +305,7 @@ class SyntheticSeptum(A.DualTransform):
 
         return self._build(
             image, labels, label, box, inside, weight, fragments,
-            areas, thickness, sag, chord,
+            areas, thickness, sag, tonal_span,
         )
 
     def _draw_ends(
@@ -272,9 +351,15 @@ class SyntheticSeptum(A.DualTransform):
         areas: np.ndarray,
         thickness: float,
         sag: float,
-        chord: float,
+        tonal_span: float,
     ) -> dict[str, Any]:
-        """Assemble the divided labels and the image with the wall."""
+        """Assemble the divided labels and the image with the wall.
+
+        The second fragment takes the next free id, which keeps the
+        numbering dense without a renumbering pass over the frame.
+        Called repeatedly for one sample, each call sees the ids the
+        previous one added, so the next free id is still next.
+        """
         n_before = int(labels.max())
         divided = labels.copy()
         window = divided[box]
@@ -282,11 +367,8 @@ class SyntheticSeptum(A.DualTransform):
         window[fragments == 1] = label
         window[fragments == 2] = n_before + 1
 
-        low, high = np.percentile(image, TONAL_PERCENTILES)
         interior = float(np.median(image[box][inside]))
-        target = interior + self._config.contrast * (
-            float(high) - float(low)
-        )
+        target = interior + self._config.contrast * tonal_span
         walled = image.copy()
         patch = walled[box].astype(np.float32)
         blend = np.where(inside, weight, 0.0).astype(np.float32)
@@ -295,19 +377,14 @@ class SyntheticSeptum(A.DualTransform):
         )
 
         return {
-            "changed_mask": True,
             "divided_instance": label,
             "thickness_px": round(thickness, 3),
             "sag": round(sag, 4),
-            "chord_px": round(chord, 2),
-            "fragment_areas_px2": tuple(int(area) for area in areas),
             "fragment_ratio": round(
                 float(areas.min()) / float(areas.sum()), 4
             ),
+            "smallest_fragment_px2": int(areas.min()),
             "target_intensity": round(target, 2),
-            "n_instances_before": n_before,
-            "n_instances_after": n_before + 1,
-            "fallback": None,
             "walled_image": walled,
             "divided_labels": divided,
         }
@@ -410,16 +487,82 @@ def _fragments(
 
 
 def _undivided(
-    n_before: int, fallback: str, attempts: int = 1
+    n_before: int,
+    fallback: str,
+    attempts: int = 1,
+    requested: int = 0,
+    pool: int = 0,
 ) -> dict[str, Any]:
     """Parameters for a sample no wall could be drawn into."""
     return {
         "changed_mask": False,
-        "divided_instance": None,
+        "divided_instances": (),
+        "n_septa_requested": requested,
+        "n_septa_drawn": 0,
+        "candidate_pool": pool,
+        "divided_area_share": 0.0,
+        "thickness_px": (),
+        "sags": (),
+        "fragment_ratios": (),
+        "smallest_fragment_px2": None,
+        "target_intensities": (),
         "n_instances_before": n_before,
         "n_instances_after": n_before,
         "attempts": attempts,
         "fallback": fallback,
         "walled_image": None,
         "divided_labels": None,
+    }
+
+
+def _summarize(
+    divisions: list[dict[str, Any]],
+    walled: np.ndarray,
+    divided: np.ndarray,
+    n_before: int,
+    attempts: int,
+    requested: int,
+    pool: int,
+    divided_area_px2: float,
+    annotated_area_px2: float,
+) -> dict[str, Any]:
+    """Fold the walls of one sample into a single record.
+
+    A sample now carries several walls, and the record has to describe
+    the set rather than the last of them. Two of these numbers are not
+    diagnostics: the walls drawn against those asked for is what says
+    whether the area cap or a run of failed draws bound this sample,
+    and the divided area share is what a run reports when asked how far
+    the family moved the size distribution it also measures.
+    """
+    return {
+        "changed_mask": True,
+        "divided_instances": tuple(
+            entry["divided_instance"] for entry in divisions
+        ),
+        "n_septa_requested": requested,
+        "n_septa_drawn": len(divisions),
+        "candidate_pool": pool,
+        "divided_area_share": round(
+            divided_area_px2 / annotated_area_px2, 4
+        ),
+        "thickness_px": tuple(
+            entry["thickness_px"] for entry in divisions
+        ),
+        "sags": tuple(entry["sag"] for entry in divisions),
+        "fragment_ratios": tuple(
+            entry["fragment_ratio"] for entry in divisions
+        ),
+        "smallest_fragment_px2": min(
+            entry["smallest_fragment_px2"] for entry in divisions
+        ),
+        "target_intensities": tuple(
+            entry["target_intensity"] for entry in divisions
+        ),
+        "n_instances_before": n_before,
+        "n_instances_after": int(divided.max()),
+        "attempts": attempts,
+        "fallback": None,
+        "walled_image": walled,
+        "divided_labels": divided,
     }

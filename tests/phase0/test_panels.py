@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from materials_vision.augmentation.config import FAMILY_BLUR
 from materials_vision.data.samples import PreparedSample, SampleRecord
 from materials_vision.phase0.levels import level_by_key
 from materials_vision.phase0.panels import (LOCAL_CHANGE_MAX_SHARE,
@@ -206,8 +207,52 @@ class TestMeasurements:
             pytest.skip("the wall found nothing to divide")
         assert (
             record.measurements["n_instances_after"]
-            == record.measurements["n_instances_before"] + 1
+            == record.measurements["n_instances_before"]
+            + record.measurements["n_septa_drawn"]
         )
+        assert record.measurements["n_septa_drawn"] >= 1
+
+    def test_the_magnitude_is_reported_not_only_the_extent(
+        self, sample, tmp_path
+    ) -> None:
+        """A change of two grey levels over the whole frame and one of
+        forty have the same extent and nothing else in common."""
+        level = level_by_key("F3a_tonal__bc_high")
+        record = render_panel(
+            sample, level, run_seed=1, repeat=0, output_dir=tmp_path
+        )
+        measurements = record.measurements
+
+        assert measurements["delta_median_grey"] > 0
+        assert (
+            measurements["delta_median_grey"]
+            <= measurements["delta_max_grey"]
+        )
+        assert measurements["delta_share_of_tonal_span"] > 0
+
+    def test_a_stronger_level_reports_a_larger_magnitude(
+        self, sample, tmp_path
+    ) -> None:
+        """Without this the three settings differ only by their label."""
+        deltas = []
+        for name in ("bc_low", "bc_high"):
+            record = render_panel(
+                sample, level_by_key(f"F3a_tonal__{name}"),
+                run_seed=1, repeat=0, output_dir=tmp_path,
+            )
+            deltas.append(record.measurements["delta_median_grey"])
+
+        assert deltas[1] > deltas[0]
+
+    def test_an_untouched_image_reports_no_magnitude(
+        self, sample, tmp_path
+    ) -> None:
+        record = render_panel(
+            sample, level_by_key("F2_scale__low"), run_seed=1,
+            repeat=0, output_dir=tmp_path,
+        )
+
+        assert record.measurements["delta_median_grey"] == 0.0
 
     def test_the_wall_is_measured_after_the_preprocessing(
         self, sample, tmp_path
@@ -258,6 +303,42 @@ class TestRegionOfInterest:
             image, changed, np.ones_like(image, dtype=np.int32), {}
         ) is None
 
+    def test_the_blur_gets_a_close_up_despite_changing_everything(
+        self
+    ) -> None:
+        """Its whole effect is a pixel wide, so on the reduced overview
+        it cannot be judged at all - which is how all three of its
+        settings came back reported as showing no difference."""
+        image = np.zeros((200, 200), dtype=np.uint8)
+        changed = image + 5
+        labels = np.zeros((200, 200), dtype=np.int32)
+        labels[20:90, 20:180] = 1
+        labels[92:170, 20:180] = 2
+
+        box = _region_of_interest(
+            image, changed, labels, {}, FAMILY_BLUR
+        )
+
+        assert box is not None
+        y0, x0, y1, x1 = box
+        assert y0 <= 91 <= y1
+
+    def test_the_blur_close_up_lands_on_the_thinnest_wall(self) -> None:
+        image = np.zeros((200, 200), dtype=np.uint8)
+        changed = image + 5
+        labels = np.zeros((200, 200), dtype=np.int32)
+        labels[10:60, 10:190] = 1
+        labels[70:120, 10:190] = 2
+        labels[121:180, 10:190] = 3
+
+        box = _region_of_interest(
+            image, changed, labels, {}, FAMILY_BLUR
+        )
+
+        assert box is not None
+        y0, _, y1, _ = box
+        assert y0 <= 120 and y1 >= 121
+
     def test_an_unchanged_image_gets_no_close_up(self) -> None:
         image = np.zeros((40, 40), dtype=np.uint8)
         assert _region_of_interest(
@@ -289,8 +370,27 @@ class TestRegionOfInterest:
         changed[199:201, 50:350] = 200
 
         box = _region_of_interest(
-            image, changed, labels, {"divided_instance": 3}
+            image, changed, labels, {"divided_instances": (3,)}
         )
         assert box is not None
         y0, x0, y1, x1 = box
         assert y0 <= 50 and y1 >= 350
+
+    def test_the_close_up_follows_the_smallest_divided_pore(self) -> None:
+        # A box holding every divided pore would span the frame, which
+        # is the one thing a close-up must not do. The smallest pore is
+        # where a wall of a given width is hardest to see.
+        labels = np.zeros((400, 400), dtype=np.int32)
+        labels[20:380, 20:180] = 1
+        labels[300:360, 300:360] = 2
+        image = np.zeros((400, 400), dtype=np.uint8)
+        changed = image.copy()
+        changed[199:201, 20:180] = 200
+        changed[329:331, 300:360] = 200
+
+        box = _region_of_interest(
+            image, changed, labels, {"divided_instances": (1, 2)}
+        )
+        assert box is not None
+        y0, x0, y1, x1 = box
+        assert y0 >= 200 and x0 >= 200

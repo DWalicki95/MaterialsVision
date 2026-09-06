@@ -22,8 +22,8 @@ def test_the_starting_values_are_the_ones_that_were_approved():
     assert tonal.contrast_limit == (-0.15, 0.15)
     assert tonal.gamma_limit == (90, 110)
     assert tonal.p == 0.5
-    assert blur.kernel_px == 3
-    assert blur.sigma_px == (0.2, 0.8)
+    assert blur.sigma_px == (0.4, 0.8)
+    assert blur.kernel_px == 7
     assert blur.p == 0.2
     assert OrientationConfig().p == 1.0
     assert scale.bands == (
@@ -103,7 +103,7 @@ def test_the_run_record_holds_every_number_of_every_family():
     assert metadata["order"] == [FAMILY_ORIENTATION, FAMILY_BLUR]
     assert metadata["changes_mask"] is False
     assert metadata["parameters"][FAMILY_BLUR] == {
-        "kernel_px": 3, "sigma_px": (0.2, 0.8), "p": 0.2,
+        "sigma_px": (0.4, 0.8), "p": 0.2, "kernel_px": 7,
     }
 
 

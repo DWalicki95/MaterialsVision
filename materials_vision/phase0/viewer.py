@@ -38,6 +38,16 @@ logger = logging.getLogger(__name__)
 # The acceptance criteria of the visual gate, phrased as the failure a
 # reviewer would be marking. The order is the plan's; the numbers are
 # what the keyboard shortcuts refer to.
+#
+# The last one is not in the plan's list, and is there because the
+# first review needed it and had nowhere to put it. Every criterion
+# above it describes a transformation that went too far. The reviewer's
+# most frequent observation was the opposite - that nothing appeared to
+# have happened - and with no box for it, it was recorded as free text
+# and as rejections, which read as "this transformation is disqualified"
+# when what was meant was "this transformation appears to do nothing".
+# Those are different findings with different remedies, so they get
+# different marks.
 CRITERIA = (
     "nie przypomina realnego SEM",
     "nie dalo by sie wiarygodnie zaanotowac",
@@ -47,6 +57,7 @@ CRITERIA = (
     "fotometria zmienila morfologie",
     "maksymalna sila niewiarygodna",
     "zly wynik po preprocessingu",
+    "zmiana niewidoczna albo za slaba",
 )
 
 VERDICTS = ("accepted", "revise", "rejected")

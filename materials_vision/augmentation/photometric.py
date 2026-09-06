@@ -47,6 +47,9 @@ def build_tonal(config: TonalConfig) -> A.OneOf:
         reports - and therefore what a record says fired - does not
         depend on how many members were left in.
     """
+    if config.pin_magnitude:
+        return _pinned_tonal(config)
+
     members = {
         "brightness_contrast": lambda: A.RandomBrightnessContrast(
             brightness_limit=config.brightness_limit,
@@ -62,6 +65,40 @@ def build_tonal(config: TonalConfig) -> A.OneOf:
     )
 
 
+def _pinned_tonal(config: TonalConfig) -> A.OneOf:
+    """Build the tonal container at the ends of its ranges only.
+
+    Each member becomes two alternatives of equal weight, one for each
+    end of its range, and each of those is a degenerate range - a
+    single value - so the magnitude cannot come out weaker than the
+    setting claims. The direction is what the draw decides.
+
+    This exists for the visual gate. Reviewing a symmetric range by
+    drawing from it uniformly means a panel labelled with the strong
+    setting frequently shows something close to the identity, and a
+    reviewer reporting "no difference" is then describing the draw and
+    not the range they were asked about.
+    """
+    alternatives: list[A.ImageOnlyTransform] = []
+    if "brightness_contrast" in config.members:
+        alternatives.extend(
+            A.RandomBrightnessContrast(
+                brightness_limit=(brightness, brightness),
+                contrast_limit=(contrast, contrast),
+                p=1.0,
+            )
+            for brightness, contrast in zip(
+                config.brightness_limit, config.contrast_limit
+            )
+        )
+    if "gamma" in config.members:
+        alternatives.extend(
+            A.RandomGamma(gamma_limit=(gamma, gamma), p=1.0)
+            for gamma in config.gamma_limit
+        )
+    return A.OneOf(alternatives, p=config.p)
+
+
 def build_blur(config: BlurConfig) -> A.GaussianBlur:
     """Build the blur transformation.
 
@@ -72,16 +109,21 @@ def build_blur(config: BlurConfig) -> A.GaussianBlur:
     Returns
     -------
     A.GaussianBlur
-        Fixed kernel, sigma drawn from the configured range.
+        Kernel sized to the range, sigma drawn from the configured
+        range.
 
     Notes
     -----
     The kernel is passed as a degenerate range so that it is held at
-    one value. Left free, the library derives it from sigma and the
-    weakest draws would produce a kernel of one pixel, which is the
-    identity - the family would then fire less often than its own
-    probability states, and the weakest of the three strength settings
-    used for inspection would be indistinguishable from no blur at all.
+    one value across every draw, and that value is sized from the
+    widest sigma the range can produce rather than picked. Two
+    failures are avoided at once. Left free, the library derives the
+    kernel from each individual draw and returns a single pixel for
+    the weakest of them, which is the identity - the family would then
+    fire less often than its own probability states. Held at three
+    pixels, the widest draws are truncated instead, and a sigma of 0.8
+    is applied as 0.69, so the strength recorded for a run would not be
+    the strength the model saw.
     """
     return A.GaussianBlur(
         blur_limit=(config.kernel_px, config.kernel_px),

@@ -44,11 +44,13 @@ import numpy as np
 from scipy.ndimage import distance_transform_edt
 from skimage.segmentation import find_boundaries
 
-from materials_vision.augmentation.config import (FAMILY_MASK_AWARE,
+from materials_vision.augmentation.config import (FAMILY_BLUR,
+                                                  FAMILY_MASK_AWARE,
                                                   FAMILY_SEPTUM)
 from materials_vision.augmentation.policy import AugmentationPolicy
+from materials_vision.augmentation.walls import thinnest_wall_pixel
 from materials_vision.data.samples import PreparedSample
-from materials_vision.phase0.levels import ReviewLevel
+from materials_vision.phase0.levels import KIND_DIAGNOSTIC, ReviewLevel
 from materials_vision.phase0.preview import (MODE_ISOTROPIC, ModelInput,
                                              place_mask_on_canvas,
                                              to_model_coordinates,
@@ -62,6 +64,17 @@ logger = logging.getLogger(__name__)
 # Above this share of changed pixels a close-up of the change is a
 # close-up of the whole frame, so it is left out.
 LOCAL_CHANGE_MAX_SHARE = 0.25
+
+# Families whose effect is a pixel wide and therefore invisible on the
+# reduced overview figure, however much of the frame they touch. They
+# get a close-up on the structure their criterion names, not on the
+# extent of their change.
+PIXEL_SCALE_FAMILIES = frozenset({FAMILY_BLUR})
+
+# Images whose panels are looked at but do not decide a family. The
+# close-ups are one per cent of the training set and their geometry is
+# unlike the rest of it.
+SCALE_BIN_EXCLUDED = "outlier"
 
 # Context kept around a local change, in source pixels. Enough to show
 # the pore the change sits in rather than the change alone.
@@ -212,11 +225,21 @@ def render_panel(
     )
     roi = _region_of_interest(
         sample.image, augmented.image, sample.labels,
-        transform.params,
+        transform.params, level.family,
     )
     measurements = _measure(
         sample, augmented.image, augmented.labels, model_input, roi,
         level.family, transform.params,
+    )
+
+    # A close-up is trained on but excluded from the verdict: it is one
+    # per cent of the set and its geometry is unlike anything else in
+    # it. That exclusion was stated when the gallery was built but never
+    # written into the panel, so nothing told the reviewer or the
+    # reducer, and a problem marked on one counted against its family.
+    kind = (
+        KIND_DIAGNOSTIC if record.scale_bin == SCALE_BIN_EXCLUDED
+        else level.kind
     )
 
     panel_id = (
@@ -231,7 +254,7 @@ def render_panel(
         panel_id=panel_id,
         family=level.family,
         level=level.level,
-        kind=level.kind,
+        kind=kind,
         fingerprint=level.fingerprint,
         image_id=record.image_id,
         formulation=record.formulation,
@@ -320,6 +343,9 @@ def _measure(
         "scale_x": round(model_input.scale_x, 4),
         "padding_share": round(model_input.padding_share, 4),
     }
+    measurements.update(
+        _amplitude(sample.image, augmented_image, changed)
+    )
     if family == FAMILY_MASK_AWARE and changed is not None and (
         changed.any()
     ):
@@ -330,10 +356,59 @@ def _measure(
         measurements["septum_peak_contrast_after_preprocessing"] = (
             _septum_visibility(
                 sample.labels, augmented_labels, model_input,
-                params.get("divided_instance"),
+                params.get("divided_instances") or (),
             )
         )
+        measurements["n_septa_drawn"] = params.get("n_septa_drawn", 0)
+        measurements["divided_area_share"] = params.get(
+            "divided_area_share", 0.0
+        )
     return measurements
+
+
+def _amplitude(
+    image: np.ndarray,
+    augmented_image: np.ndarray,
+    changed: Optional[np.ndarray],
+) -> dict[str, Any]:
+    """How far the pixels moved, not merely how many of them did.
+
+    The share of changed pixels answers whether anything happened. It
+    does not answer how much, and those are the two different things a
+    reviewer needs to tell apart: a change of two grey levels over the
+    whole frame and a change of forty over the whole frame have the
+    same share and nothing else in common. Without the magnitude a
+    reviewer asked whether a setting is too strong can only report
+    whether they happened to see it, which depends on how far the
+    figure was reduced to fit the page.
+
+    The magnitude is given twice: in grey levels, and as a share of
+    that image's own tonal range. The second is the one that compares
+    across images, because these micrographs differ several-fold in
+    how much of the scale they occupy, and the same absolute shift is
+    obvious on a flat image and invisible on a contrasty one.
+    """
+    if changed is None or not changed.any():
+        return {
+            "delta_median_grey": 0.0,
+            "delta_p99_grey": 0.0,
+            "delta_max_grey": 0.0,
+            "delta_share_of_tonal_span": 0.0,
+        }
+    difference = np.abs(
+        augmented_image.astype(np.int32) - image.astype(np.int32)
+    )[changed]
+    low, high = np.percentile(image, (5, 95))
+    span = max(float(high) - float(low), 1.0)
+    median = float(np.median(difference))
+    return {
+        "delta_median_grey": round(median, 2),
+        "delta_p99_grey": round(
+            float(np.percentile(difference, 99)), 2
+        ),
+        "delta_max_grey": round(float(difference.max()), 2),
+        "delta_share_of_tonal_span": round(median / span, 4),
+    }
 
 
 def _changed_pixels(
@@ -377,9 +452,9 @@ def _septum_visibility(
     labels: np.ndarray,
     augmented_labels: np.ndarray,
     model_input: ModelInput,
-    divided_instance: Optional[int],
+    divided_instances: tuple,
 ) -> Optional[float]:
-    """Peak contrast of the drawn wall once the model has resized it.
+    """Faintest of the drawn walls once the model has resized them.
 
     The acceptance criterion for the wall is that it is still visible
     after the full preprocessing, and visible means the grey levels
@@ -389,19 +464,39 @@ def _septum_visibility(
     whose brightness has nothing to do with whether this wall can be
     seen.
 
-    Returns ``None`` when the wall left no core to measure, i.e. the
+    A sample carries several walls, and the one that decides the
+    verdict is the weakest of them: a sample is only as good as the
+    wall a reviewer would fail to see. Reporting their average would
+    let a bright wall hide a wall that vanished.
+
+    Returns ``None`` when no wall left a core to measure, i.e. the
     family did not divide anything on this sample.
     """
-    core = (labels > 0) & (augmented_labels == 0)
-    if divided_instance is not None:
-        core &= labels == int(divided_instance)
+    visibilities = [
+        value for value in (
+            _one_wall_visibility(
+                labels, augmented_labels, model_input, int(instance)
+            )
+            for instance in divided_instances
+        ) if value is not None
+    ]
+    return min(visibilities) if visibilities else None
+
+
+def _one_wall_visibility(
+    labels: np.ndarray,
+    augmented_labels: np.ndarray,
+    model_input: ModelInput,
+    divided_instance: int,
+) -> Optional[float]:
+    """Peak contrast of one wall against the pore it divided."""
+    core = (
+        (labels == divided_instance) & (augmented_labels == 0)
+    )
     if not core.any():
         return None
 
-    interior = (
-        labels == int(divided_instance) if divided_instance is not None
-        else labels > 0
-    ) & ~core
+    interior = (labels == divided_instance) & ~core
     canvas_core = place_mask_on_canvas(core, model_input)
     canvas_interior = place_mask_on_canvas(
         interior, model_input, threshold=0.75
@@ -420,6 +515,7 @@ def _region_of_interest(
     augmented_image: np.ndarray,
     labels: np.ndarray,
     params: Mapping[str, Any],
+    family: str = "",
 ) -> Optional[tuple[int, int, int, int]]:
     """Where to look closely, or nothing if the change was everywhere.
 
@@ -428,6 +524,17 @@ def _region_of_interest(
     pore holding it, because the question asked of it - does this read
     as a boundary - cannot be answered without the surroundings.
 
+    **One family is exempt from that rule.** The blur touches every
+    pixel, so by extent alone it would never get a close-up - and it
+    is the one family whose entire effect lives at the scale of a
+    pixel, and whose acceptance criterion is about a wall two or three
+    pixels wide. Judged on a figure reduced to fit the page it cannot
+    be judged at all; the earlier review rejected all three of its
+    settings as showing no difference, including one that genuinely
+    showed none. It is therefore given a close-up regardless of
+    extent, placed on the thinnest wall in the frame, which is the
+    structure the criterion is written about.
+
     A family that turned the frame has changed everything by
     definition, and its two images cannot even be compared pixel for
     pixel; it gets no close-up either.
@@ -435,25 +542,64 @@ def _region_of_interest(
     changed = _changed_pixels(image, augmented_image)
     if changed is None:
         return None
-    share = float(changed.mean())
-    if not changed.any() or share > LOCAL_CHANGE_MAX_SHARE:
+    if not changed.any():
+        return None
+    if family in PIXEL_SCALE_FAMILIES:
+        return _thinnest_wall_box(labels, image.shape)
+    if float(changed.mean()) > LOCAL_CHANGE_MAX_SHARE:
         return None
 
     rows, columns = np.nonzero(changed)
     box = [rows.min(), columns.min(), rows.max() + 1, columns.max() + 1]
 
-    divided = params.get("divided_instance")
-    if divided is not None:
-        pore_rows, pore_columns = np.nonzero(labels == int(divided))
+    focus = _focus_instance(labels, params)
+    if focus is not None:
+        pore_rows, pore_columns = np.nonzero(labels == focus)
         if pore_rows.size:
             box = [
-                min(box[0], pore_rows.min()),
-                min(box[1], pore_columns.min()),
-                max(box[2], pore_rows.max() + 1),
-                max(box[3], pore_columns.max() + 1),
+                pore_rows.min(),
+                pore_columns.min(),
+                pore_rows.max() + 1,
+                pore_columns.max() + 1,
             ]
 
     return _padded_box(box, image.shape)
+
+
+def _thinnest_wall_box(
+    labels: np.ndarray, shape: tuple[int, ...]
+) -> Optional[tuple[int, int, int, int]]:
+    """A close-up centred on the narrowest wall between two pores.
+
+    Wall thickness is not recorded anywhere in the dataset, so the
+    place is found by the same measurement that calibrated the
+    synthetic wall's width.
+    """
+    pixel = thinnest_wall_pixel(labels)
+    if pixel is None:
+        return None
+    row, column = pixel
+    return _padded_box([row, column, row + 1, column + 1], shape)
+
+
+def _focus_instance(
+    labels: np.ndarray, params: Mapping[str, Any]
+) -> Optional[int]:
+    """Which divided pore the close-up should be taken around.
+
+    A sample carries several walls now, and a box holding all of them
+    spans most of the frame - which is the one thing a close-up must
+    not do. The smallest divided pore is chosen, because a wall of a
+    given width is hardest to see in the smallest pore it was allowed
+    into, and the close-up exists to answer whether the wall survives
+    the downscaling.
+    """
+    divided = params.get("divided_instances") or ()
+    areas = [
+        (int((labels == int(instance)).sum()), int(instance))
+        for instance in divided
+    ]
+    return min(areas)[1] if areas else None
 
 
 def _padded_box(
@@ -696,12 +842,24 @@ def _show_model_input(axis, model_input: ModelInput) -> None:
 
 
 def _mark_roi(axis, roi: tuple[int, int, int, int]) -> None:
-    """Mark on the full frame where the close-up was taken."""
+    """Mark on the full frame where the close-up was taken.
+
+    Labelled, because an unexplained rectangle drawn over the result is
+    read as part of the result: a tall narrow box is clipped by the
+    axes to its two vertical sides, and the first review reported those
+    as a yellow artefact the augmentation had produced.
+    """
     y0, x0, y1, x1 = roi
     axis.add_patch(plt.Rectangle(
         (x0, y0), x1 - x0, y1 - y0, fill=False, edgecolor="#ffd400",
         linewidth=1.4,
     ))
+    axis.text(
+        x0, max(y0 - 6, 8), "ramka zblizenia (nie jest czescia obrazu)",
+        color="#ffd400", fontsize=7.5,
+        bbox={"facecolor": "black", "alpha": 0.55, "pad": 1.5,
+              "edgecolor": "none"},
+    )
 
 
 def _colorize(labels: np.ndarray) -> np.ndarray:
