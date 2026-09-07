@@ -304,8 +304,13 @@ def _tonal_levels() -> tuple[ReviewLevel, ...]:
     brightness_max = frozen.brightness_limit[1]
     contrast_max = frozen.contrast_limit[1]
     gamma_max = frozen.gamma_limit[1] - 100
+    # The weakest level is the weakest draw the family can now make,
+    # not an arbitrary fraction: the range carries a floor of its own,
+    # and reviewing below it would review a setting no run produces.
     ranges = (
-        ("low", 0.4), ("nominal", 0.7), ("high", 1.0),
+        ("low", frozen.min_magnitude_share),
+        ("nominal", (1.0 + frozen.min_magnitude_share) / 2.0),
+        ("high", 1.0),
     )
     levels = []
     for name, share in ranges:
@@ -348,47 +353,36 @@ def _tonal_levels() -> tuple[ReviewLevel, ...]:
             image_offset=1,
             image_stride=2,
         ))
-    # Gamma at the end of its frozen range moves the mid tones by about
-    # nine grey levels, which sits under what the reviewer could see on
-    # this family. Brightness and contrast need no such candidate: at
-    # the same end they move them by forty-five. The candidate is
-    # diagnostic - it is evidence for widening V.3, not a verdict on
-    # the range that is frozen today.
-    levels.append(ReviewLevel(
-        family=FAMILY_TONAL,
-        level="gamma_candidate",
-        kind=KIND_DIAGNOSTIC,
-        config=PolicyConfig(tonal=TonalConfig(
-            gamma_limit=(75, 125),
-            members=("gamma",),
-            pin_magnitude=True,
-            p=1.0,
-        )),
-        note=(
-            "kandydat poza zamrozonym zakresem: gamma 75 albo 125, "
-            "czyli okolo 22 poziomow szarosci wobec 9 przy zamrozonym "
-            "koncu; poza bramka"
-        ),
-        image_offset=1,
-        image_stride=2,
-    ))
+    # The gamma candidate that used to sit here has been promoted: it
+    # showed 22 grey levels against the 9 the frozen range reached, the
+    # reviewer saw the first and not the second, and V.3 was widened to
+    # (75, 125) accordingly. A diagnostic exists to argue for a change,
+    # so it retires when the change is made - kept on, it would review
+    # a range identical to the gate beside it.
     return tuple(levels)
 
 
 def _blur_levels() -> tuple[ReviewLevel, ...]:
     """The blur at three widths, pinned rather than drawn.
 
-    This is the family the thin-wall criterion was written for. A
-    source sigma of 0.8 acts like 0.64 at the resolution the model
-    works in, which no pore is troubled by; a wall two to three pixels
-    across at that resolution might be.
+    This is the family the thin-wall criterion was written for, and it
+    is the family whose panels were misleading twice over. A blur is
+    judged on what reaches the encoder, and the encoder reads the image
+    at 0.8 of the size a panel shows it at - a reduction that is itself
+    a low-pass filter. Measured through it, the range this family used
+    to carry disappeared: at a source sigma of 0.4 the walls kept
+    100.0 per cent of their local contrast and the median pixel did not
+    move at all. The panel was not wrong; it was rendered at a
+    resolution the model never sees.
 
-    The weakest setting is the weakest the family can now draw, not the
-    weakest it once could: below about 0.3 a Gaussian keeps all of its
-    weight on the centre pixel of any kernel and returns the image
-    untouched, so a panel at 0.2 reviewed the identity and said nothing
-    about the blur.
+    The range now spans what the microscopes themselves vary over.
+    Sharpness across the training set runs from 8 to 15 grey levels of
+    wall contrast in the model's grid, median 11, so the strong end is
+    the sigma that takes a typical image down to a soft one - 1.6 - and
+    the weak end the one that takes it to the lower quartile - 0.8.
     """
+    frozen = BlurConfig()
+    low_sigma, high_sigma = frozen.sigma_px
     return tuple(
         ReviewLevel(
             family=FAMILY_BLUR,
@@ -401,14 +395,21 @@ def _blur_levels() -> tuple[ReviewLevel, ...]:
             )
         for level, sigma, note in (
             (
-                "low", 0.4,
-                "najslabsze rozmycie, jakie rodzina moze wylosowac",
+                "low", low_sigma,
+                "najslabsze rozmycie, jakie rodzina moze wylosowac; "
+                "odpowiada zejsciu obrazu typowego do dolnego kwartyla "
+                "ostrosci zbioru",
             ),
-            ("nominal", 0.6, "srodek zamrozonego zakresu"),
             (
-                "high", 0.8,
-                "najmocniejsze; jadro jest dobrane tak, ze zadana "
-                "sigma jest tez zastosowana, a sciany maja to przezyc",
+                "nominal", round((low_sigma + high_sigma) / 2.0, 2),
+                "srodek zamrozonego zakresu",
+            ),
+            (
+                "high", high_sigma,
+                "najmocniejsze: odtwarza zejscie z obrazu typowego na "
+                "najmiekszy dziesiaty percentyl zbioru; ocena nalezy "
+                "do zblizenia na najciensza sciane, bo tam rodzina "
+                "dziala, a nie na calym kadrze",
             ),
         )
     )
@@ -422,6 +423,8 @@ def _mask_aware_levels() -> tuple[ReviewLevel, ...]:
     patch with a hard edge draws a boundary inside a pore. Both are the
     error the family exists to suppress, so both are looked for.
     """
+    frozen = MaskAwareConfig()
+    weak, strong = frozen.strength
     field = tuple(
         ReviewLevel(
             family=FAMILY_MASK_AWARE,
@@ -442,7 +445,9 @@ def _mask_aware_levels() -> tuple[ReviewLevel, ...]:
             image_stride=2,
         )
         for level, strength in (
-            ("low", 0.08), ("nominal", 0.115), ("high", 0.15)
+            ("low", weak),
+            ("nominal", round((weak + strong) / 2.0, 3)),
+            ("high", strong),
         )
     )
     patch = tuple(
@@ -470,56 +475,17 @@ def _mask_aware_levels() -> tuple[ReviewLevel, ...]:
             ("high", 0.20, 0.60),
         )
     )
-    # Three ways of setting the shading's amplitude, shown side by side
-    # on the same images because the choice between them is not
-    # decidable from the numbers alone. As a share of each image's own
-    # tonal range, the frozen 0.15 leaves 78.5% of the training set
-    # below what the reviewer could see at all - and the gallery, whose
-    # tonal ranges run to 129 against a training median of 57, made
-    # that look like a handful of dark images rather than most of the
-    # set. Raising the share alone reaches 62 grey levels on the most
-    # contrasty image, which may stop being a believable shadow;
-    # bounding it alone leaves the share meaningless on the images the
-    # bound overrides. The ladder is rendered so the choice is made on
-    # the pictures.
-    ladder = tuple(
-        ReviewLevel(
-            family=FAMILY_MASK_AWARE,
-            level=f"field_candidate_{name}",
-            kind=KIND_DIAGNOSTIC,
-            config=PolicyConfig(mask_aware=MaskAwareConfig(
-                strength=(share, share),
-                min_amplitude_grey=floor,
-                max_amplitude_grey=ceiling,
-                members=("field",),
-                p=1.0,
-            )),
-            note=note,
-            image_offset=0,
-            image_stride=2,
-        )
-        for name, share, floor, ceiling, note in (
-            (
-                "share30", 0.30, None, None,
-                "wariant A: sam ulamek podniesiony do 0.30, bez "
-                "ograniczen; na najbardziej kontrastowym obrazie "
-                "zbioru daje 62 poziomy szarosci",
-            ),
-            (
-                "floor11", 0.15, 11.0, None,
-                "wariant B: zamrozone 0.15 z podloga 11 poziomow "
-                "szarosci; podloga wiaze na 78.5% zbioru, wiec dla "
-                "wiekszosci obrazow zastepuje regule zamiast ja "
-                "ograniczac",
-            ),
-            (
-                "clip25", 0.25, 11.0, 30.0,
-                "wariant C: ulamek 0.25 z podloga 11 i sufitem 30; "
-                "proporcjonalny na 86% zbioru, podloga wiaze na ~12%, "
-                "sufit na ~2%",
-            ),
-        )
-    )
+    # The three amplitude candidates that used to sit here have been
+    # withdrawn rather than resolved, because the question they asked
+    # was the wrong one. They bounded the amplitude; the amplitude was
+    # never what reached the image. Under the fade this family used to
+    # apply, full strength was reached at one pixel per pore and the
+    # median pixel carried a third of it, so all three candidates
+    # measured within one grey level of each other and of the setting
+    # they were meant to improve on - which is exactly what the
+    # reviewer reported seeing. The fade is now a share of the pore's
+    # depth, the amplitude arrives, and the choice between a floor, a
+    # ceiling and a larger share is not a choice anyone needs to make.
     stress = (
         ReviewLevel(
             family=FAMILY_MASK_AWARE,
@@ -540,7 +506,7 @@ def _mask_aware_levels() -> tuple[ReviewLevel, ...]:
             image_stride=4,
         ),
     )
-    return field + patch + ladder + stress
+    return field + patch + stress
 
 
 def _septum_levels() -> tuple[ReviewLevel, ...]:
@@ -573,6 +539,7 @@ def _septum_levels() -> tuple[ReviewLevel, ...]:
     measured = SeptumConfig()
     thin, thick = measured.thickness_px
     middle = round((thin + thick) / 2.0, 2)
+    faintest, brightest = measured.contrast
     gates = tuple(
         ReviewLevel(
             family=FAMILY_SEPTUM,
@@ -580,34 +547,47 @@ def _septum_levels() -> tuple[ReviewLevel, ...]:
             kind=KIND_GATE,
             config=PolicyConfig(septum=SeptumConfig(
                 thickness_px=(middle, middle),
-                contrast=contrast,
+                contrast=(contrast, contrast),
                 p=1.0,
             )),
             note=(
                 f"kontrast sciany {contrast:.3f} rozpietosci tonalnej "
                 f"({description}); szerokosc {middle:.1f} px "
                 f"zrodlowych, {middle * 0.8:.1f} px tak, jak widzi to "
-                f"model"
+                f"model. Na obrazie o malej rozpietosci podloga "
+                f"{measured.min_contrast_grey:.0f} poziomow szarosci "
+                f"podniesie ten kontrast - i tak ma byc"
             ),
         )
         for level, contrast, description in (
-            ("low", 0.111, "p10 zmierzonych scian"),
-            ("nominal", measured.contrast, "srednia zmierzonych scian"),
-            ("high", 0.280, "p90 zmierzonych scian"),
+            ("low", faintest, "p10 zmierzonych scian"),
+            (
+                "nominal", round((faintest + brightest) / 2.0, 4),
+                "srodek zmierzonego zakresu",
+            ),
+            ("high", brightest, "p90 zmierzonych scian"),
         )
     )
+    # What the floor keeps out, rendered so that keeping it out can be
+    # judged rather than asserted. The thinnest wall at the faintest
+    # measured contrast, with the floor switched off: this is the
+    # sample whose annotation would say two pores while its image, once
+    # the model had reduced it, showed one.
     faint = (
         ReviewLevel(
             family=FAMILY_SEPTUM,
             level="faint",
             kind=KIND_DIAGNOSTIC,
             config=PolicyConfig(septum=SeptumConfig(
-                thickness_px=(thin, thin), contrast=0.111, p=1.0
+                thickness_px=(thin, thin),
+                contrast=(faintest, faintest),
+                min_contrast_grey=0.0,
+                p=1.0,
             )),
             note=(
                 "najciensza sciana przy najslabszym zmierzonym "
-                "kontrascie - najtrudniejszy przypadek, jaki zawieraja "
-                "dane; poza bramka"
+                "kontrascie, z wylaczona podloga widocznosci - to jest "
+                "przypadek, ktory podloga usuwa ze zbioru; poza bramka"
             ),
         ),
     )

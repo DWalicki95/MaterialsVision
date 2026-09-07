@@ -1,6 +1,7 @@
 """Tests for reducing judged panels to one decision per family."""
 import json
 
+from materials_vision.augmentation.config import BlurConfig
 from materials_vision.phase0.review import (STATUS_ACCEPTED, STATUS_PENDING,
                                             STATUS_REJECTED, STATUS_REVISE,
                                             decision_sheet, family_status,
@@ -58,6 +59,75 @@ def verdict(
         "reason": reason,
         "family": key.split("__")[0], "level": key.split("__")[1],
     }
+
+
+class TestWhatGatesIsReadFromTheSetting:
+    """Not from whichever of its panels came first.
+
+    A close-up's panel carries ``diagnostic`` however its level was
+    declared, because a close-up is trained on and excluded from the
+    verdict. Reading the level's kind off a panel therefore turned a
+    whole gating level into a diagnostic whenever a close-up led its
+    subset - which happened to every setting of the septum, leaving a
+    family that could be neither accepted nor rejected and a report
+    that said so only by leaving a column empty.
+    """
+
+    def test_a_close_up_does_not_make_its_level_diagnostic(
+        self,
+    ) -> None:
+        panels = [
+            panel(
+                family="F5_septum", level="high",
+                image_id="VAB3_prostopadly_m008", kind="diagnostic",
+            ),
+            panel(
+                family="F5_septum", level="high", image_id="AS1_40_1",
+            ),
+        ]
+
+        summary, = summarize(panels, review())
+
+        assert summary.kind == "gate"
+
+    def test_a_problem_on_a_close_up_is_held_apart(self) -> None:
+        """It is worth knowing about and it cannot reject a range
+        nobody proposed using it on."""
+        close_up = panel(
+            family="F5_septum", level="high",
+            image_id="VAB3_prostopadly_m008", kind="diagnostic",
+        )
+        gated = panel(
+            family="F5_septum", level="high", image_id="AS1_40_1",
+        )
+
+        summary, = summarize([close_up, gated], review(decisions=[
+            decision(close_up, "problem", criteria=[4]),
+            decision(gated, "ok"),
+        ]))
+
+        assert summary.n_problems == 0
+        assert summary.n_problems_excluded == 1
+        assert summary.n_panels == 1
+        assert summary.n_decided == 1
+
+    def test_the_gate_does_not_wait_for_a_close_up(self) -> None:
+        """An excluded panel left undecided would hold a family at
+        pending over a picture that cannot decide anything."""
+        close_up = panel(
+            family="F5_septum", level="high",
+            image_id="VAB3_prostopadly_m008", kind="diagnostic",
+        )
+        gated = panel(
+            family="F5_septum", level="high", image_id="AS1_40_1",
+        )
+
+        summary, = summarize([close_up, gated], review(
+            decisions=[decision(gated, "ok")],
+            verdicts=[verdict(key="F5_septum__high")],
+        ))
+
+        assert summary.status == STATUS_ACCEPTED
 
 
 class TestCounting:
@@ -222,7 +292,8 @@ class TestDecisionSheet:
         approved = sheet["F3b_blur"]["faza0_wizualna"][
             "approved_parameters"
         ]["high"]
-        assert approved["sigma_px"] == (0.8, 0.8)
+        widest = BlurConfig().sigma_px[1]
+        assert approved["sigma_px"] == (widest, widest)
 
     def test_an_unaccepted_level_approves_nothing(self) -> None:
         entry = panel()

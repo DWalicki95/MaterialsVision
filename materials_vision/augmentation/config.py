@@ -220,6 +220,29 @@ class TonalConfig:
         Multiplicative contrast range, as a fraction.
     gamma_limit : tuple of int
         Gamma range in percent; 100 is the identity.
+    min_magnitude_share : float
+        Smallest magnitude a draw may take, as a share of the end of
+        the range. Zero restores drawing uniformly across the whole
+        range, including the identity at its centre.
+
+        The ranges are symmetric about the identity, so an unbounded
+        uniform draw spends a large part of its mass on shifts too
+        small to change anything: measured on this data, a tonal shift
+        under about eleven grey levels is one nobody can see, and the
+        family then fires less often than its own ``p`` states. That is
+        the same defect the blur had at the bottom of its range, and it
+        is worse than an absent family, because a screening run has to
+        be spent to discover it. The floor keeps the identity where it
+        belongs - in ``p`` - rather than hidden inside the range.
+
+        Half, rather than the smaller share that would put brightness
+        and contrast alone over the threshold. One share governs two
+        members that answer to it differently: at 0.4 of their ranges
+        brightness and contrast move a mid grey by 11 levels and gamma
+        by 9, so the weakest gamma draw would have sat just under what
+        the reviewer can see. The alternative was a floor per member,
+        which is one number more to justify for one grey level of
+        difference.
     members : tuple of str
         Which alternatives the container may draw, from
         ``TONAL_MEMBERS``. Both by default; one of them expresses the
@@ -245,9 +268,10 @@ class TonalConfig:
         the full strength.
     """
 
-    brightness_limit: tuple[float, float] = (-0.10, 0.10)
-    contrast_limit: tuple[float, float] = (-0.15, 0.15)
-    gamma_limit: tuple[int, int] = (90, 110)
+    brightness_limit: tuple[float, float] = (-0.07, 0.07)
+    contrast_limit: tuple[float, float] = (-0.105, 0.105)
+    gamma_limit: tuple[int, int] = (75, 125)
+    min_magnitude_share: float = 0.5
     members: tuple[str, ...] = TONAL_MEMBERS
     p: float = 0.5
     pin_magnitude: bool = False
@@ -260,6 +284,12 @@ class TonalConfig:
         ValueError
         """
         _check_members("tonal", self.members, TONAL_MEMBERS)
+        if not 0.0 <= self.min_magnitude_share <= 1.0:
+            raise ValueError(
+                f"min_magnitude_share is a share of the end of the "
+                f"range and must lie in [0, 1], got "
+                f"{self.min_magnitude_share}"
+            )
 
 
 @dataclass(frozen=True)
@@ -291,32 +321,54 @@ class BlurConfig:
     The library used here would otherwise size the kernel from each
     individual draw and return one pixel for the weakest of them.
 
-    **The lower end of the range is bounded by the sampling grid, not
-    by taste.** A Gaussian with sigma 0.2 keeps essentially all of its
-    mass inside the centre pixel - measured on a discrete kernel,
-    0.00 per cent of the weight reaches a neighbour at any kernel size
-    - so it returns the image unchanged whatever kernel is used around
-    it. Widening the kernel does not rescue it; only raising sigma
-    does. Below roughly 0.3 the family is the identity wearing a
-    probability, which is worse than an absent family because it costs
-    a screening run to discover.
+    **The lower end of the range is bounded twice over, and neither
+    bound is a matter of taste.** A Gaussian with sigma 0.2 keeps
+    essentially all of its mass inside the centre pixel - measured on a
+    discrete kernel, 0.00 per cent of the weight reaches a neighbour at
+    any kernel size - so it returns the image unchanged whatever kernel
+    surrounds it. That is the arithmetic bound, and it is the weaker of
+    the two.
 
-    Scale matters for judging safety. The model sees the image at 0.8
-    of its source resolution, so a source sigma acts at 0.8 of its
-    value there, and the smallest annotated pore - about 5.5 pixels
-    across at that scale - survives the range below comfortably. The
-    structure genuinely at risk is the thin wall between two pores,
-    measured at 1.6 to 3.2 pixels at working resolution, which is why
-    the strong end of this family is judged by eye on a wall rather
-    than accepted from the arithmetic.
+    The binding one is measured, and it is measured **after the model's
+    own resize**, which is the only resolution that decides anything.
+    Reducing an image to 0.8 of its size is itself a low-pass filter,
+    and a blur narrow enough disappears into it: at a source sigma of
+    0.4 the median pixel of the model's input moves by zero grey levels
+    and the walls between pores keep 100.0 per cent of their local
+    contrast. The whole lower half of the range this family used to
+    carry was therefore an identity that a panel at source resolution
+    could not reveal, because a panel is not what the model reads.
+
+    **The range is set by how much real acquisitions already differ.**
+    Sharpness varies across the training set for the reasons this
+    family exists to reproduce - focus, working distance, scan
+    settings - and that variation is measurable as the local contrast
+    at the middle of the walls, in the model's own grid: p10 8, median
+    11, p90 15 grey levels over 124 training images. Taking a typical
+    image down to a soft one means keeping 72.7 per cent of that
+    contrast, which a source sigma of 1.6 achieves and 0.8 does not;
+    0.8 reaches the quarter point. The range therefore spans the drop
+    from typical to soft, and asks the model for no tolerance the
+    microscopes do not already demand of it.
+
+    Safety was never the constraint here and the same measurement says
+    so: even at sigma 2.5 a wall keeps 64 per cent of its contrast. The
+    smallest annotated pore, about 5.5 pixels across at working
+    resolution, is untroubled throughout.
     """
 
-    sigma_px: tuple[float, float] = (0.4, 0.8)
+    sigma_px: tuple[float, float] = (0.8, 1.6)
     p: float = 0.2
 
     # Below this a Gaussian cannot move weight off the centre pixel of
     # a discrete kernel, so the transformation is the identity.
     MIN_REPRESENTABLE_SIGMA_PX = 0.3
+
+    # Below this it survives at source resolution but not the model's
+    # resize to 0.8, which is the resolution that decides. Measured,
+    # not derived: at 0.4 the walls keep all of their contrast and the
+    # median pixel of the model's input does not move at all.
+    MIN_EFFECTIVE_SIGMA_PX = 0.6
 
     @property
     def kernel_px(self) -> int:
@@ -361,6 +413,15 @@ class BlurConfig:
                 f"represent; draws there return the image unchanged and "
                 f"the family would fire less often than its p states"
             )
+        if low < self.MIN_EFFECTIVE_SIGMA_PX:
+            raise ValueError(
+                f"sigma_px starts at {low}, below the "
+                f"{self.MIN_EFFECTIVE_SIGMA_PX} that survives the "
+                f"model's resize to 0.8; such draws reach the encoder "
+                f"as the unblurred image, so the family would fire less "
+                f"often than its p states even though a panel rendered "
+                f"at source resolution shows a difference"
+            )
 
 
 @dataclass(frozen=True)
@@ -393,6 +454,29 @@ class MaskAwareConfig:
         the full scale because the images come from two microscopes
         whose exposures differ, and a fixed number of grey levels
         would be a strong effect on one and invisible on the other.
+    field_edge_fade_share : float
+        How much of a pore's depth the fade-out occupies, as a share
+        of the distance from its boundary to its deepest point. The
+        remainder carries the full amplitude.
+
+        This is the number that decides what the shading is worth, and
+        it used to be one by construction - the weight rose linearly
+        all the way from the boundary to the deepest pixel, so full
+        strength was reached at a single pixel of each pore and
+        nowhere else. Measured over the training set, the median pixel
+        of a shaded pore then carried 0.32 of the amplitude: a family
+        configured at 0.15 of a median tonal range put 2.7 grey levels
+        on the image where its own record claimed 8.6, which is why
+        raising the amplitude three ways over could not make it
+        visible. With the fade held to a third of the depth the median
+        pixel carries 0.92, and the number in the configuration is the
+        number on the picture.
+
+        The fade is a share rather than a count of pixels on purpose.
+        A fixed width would be a gentle slope across a large pore and
+        a steep one across a small pore, and a steep slope inside a
+        pore is an edge - the very thing this family exists to stop
+        the model from reading as a boundary.
     field_kinds : tuple of str
         Shapes the shading may take: one value across the pore, a
         linear gradient, or a smooth random surface.
@@ -407,8 +491,22 @@ class MaskAwareConfig:
         would be squeezed into the fade-out and amount to nothing,
         and the dark patch would have nowhere to sit clear of the
         boundary.
-    darkened_pores : tuple of int
-        How many pores may receive a dark patch, drawn inclusively.
+    darkened_rate : tuple of float
+        Share of the qualifying pores that may receive a dark patch,
+        drawn per sample. At least one pore always does, and
+        ``darkened_cap`` bounds the other end.
+
+        A count fixed in advance does not survive this set. The images
+        hold between 3 and 91 qualifying pores, with a median of 42, so
+        the one or two patches this family used to place were a fair
+        share of a sparse image and a rounding error on a dense one -
+        a single darkened pore among ninety teaches nothing about
+        ninety. The rate is the same arrangement the septum was given
+        for the same reason: the count follows from the image instead
+        of being asserted against it.
+    darkened_cap : int
+        Most patches one sample may receive, whatever the rate implies.
+        A guard on the tail, not a second way of setting the count.
     darkened_area : tuple of float
         Area of the patch as a share of the pore holding it.
     darkening_factor : tuple of float
@@ -452,17 +550,30 @@ class MaskAwareConfig:
     those tails. One that binds on most of the set has replaced the
     rule rather than guarded it, and the share then means nothing on
     the images it overrides.
+
+    Both were once proposed as the fix for a shading nobody could see,
+    and neither worked, for a reason worth recording: they bound the
+    amplitude, and the amplitude was not what reached the image. Under
+    the old linear fade it was the value at one pixel per pore, so a
+    floor of eleven grey levels raised a peak the eye never looks at
+    and left the pore itself at two. Three settings were rendered side
+    by side and measured within one grey level of each other and of
+    the setting they were meant to improve on. The fault was the fade,
+    the fade is now a share, and these two are back to being what they
+    were meant to be: guards on the tails of a rule that works.
     """
 
     p: float = 0.3
     pore_fraction: tuple[float, float] = (0.30, 0.50)
-    strength: tuple[float, float] = (0.08, 0.15)
+    strength: tuple[float, float] = (0.22, 0.40)
+    field_edge_fade_share: float = 0.35
     min_amplitude_grey: Optional[float] = None
     max_amplitude_grey: Optional[float] = None
     field_kinds: tuple[str, ...] = ("constant", "gradient", "random")
     field_grid_sides: tuple[int, ...] = (2, 3)
     min_core_distance_px: float = 3.0
-    darkened_pores: tuple[int, int] = (1, 2)
+    darkened_rate: tuple[float, float] = (0.04, 0.10)
+    darkened_cap: int = 8
     darkened_area: tuple[float, float] = (0.05, 0.20)
     darkening_factor: tuple[float, float] = (0.60, 0.85)
     darkening_margin_px: float = 2.0
@@ -496,11 +607,18 @@ class MaskAwareConfig:
             raise ValueError(
                 "a random field needs a grid of at least 2 per side"
             )
-        low, high = self.darkened_pores
-        if low < 1 or high < low:
+        _check_range("darkened_rate", self.darkened_rate, 0.0, 1.0)
+        if self.darkened_cap < 1:
             raise ValueError(
-                f"darkened_pores must be an increasing range of at "
-                f"least one pore, got {self.darkened_pores}"
+                f"darkened_cap must allow at least one patch; "
+                f"switching the member off is done by leaving it out "
+                f"of members, got {self.darkened_cap}"
+            )
+        if not 0.0 < self.field_edge_fade_share <= 1.0:
+            raise ValueError(
+                f"field_edge_fade_share is the share of a pore's depth "
+                f"the fade occupies and must lie in (0, 1], got "
+                f"{self.field_edge_fade_share}"
             )
         if self.darkening_margin_px >= self.min_core_distance_px:
             raise ValueError(
@@ -546,6 +664,19 @@ class SeptumConfig:
         A wall needs room on both sides of it, and dividing a pore
         already at the small end of the distribution would create two
         instances smaller than anything annotated.
+
+        This is the lever that gives a sample more walls, and it is
+        not interchangeable with the rate. Both raise the count; they
+        differ in what they charge for it. The pool holds the largest
+        pores, so dividing a greater share of it divides a great deal
+        of area: measured over the training set, taking the rate from
+        0.20-0.50 to 0.40-0.70 raised the median share of annotated
+        area divided from 0.235 to 0.340, which crowds the guard at
+        0.40 and lets that guard decide the count on an ordinary
+        image rather than on an extreme one. Widening the pool
+        downwards instead reaches the same count for 0.255 - two
+        points of area rather than ten - because the pores it adds are
+        the smaller ones.
     rate : tuple of float
         Share of the candidate pool to divide, drawn per sample. The
         count follows from the image rather than being fixed, because
@@ -569,13 +700,35 @@ class SeptumConfig:
         measured distribution of real walls: its upper half is struts
         and the junctions where walls meet, which are structural
         members rather than membranes between neighbours.
-    contrast : float
+    contrast : tuple of float
         How far the wall's centre sits above the interior of the pore
         it divides, as a share of that image's tonal range. Recorded
         as a contrast rather than a grey level because the images come
         from two microscopes exposed differently, and the same wall
         photographed by both has two different grey levels but one
         contrast.
+
+        A range rather than one value, and the range is the tenth to
+        the ninetieth percentile of the contrasts measured on real
+        walls. Holding it at the ninetieth was considered and rejected:
+        every synthetic wall would then be brighter than nine real
+        walls in ten, and this family exists to teach the membrane the
+        model misses, not the one it already separates. Training only
+        on the bright decile would teach the opposite of the case it
+        was built for.
+    min_contrast_grey : float
+        Faintest wall, in grey levels of the source image, that may be
+        drawn. A draw below it is raised to it.
+
+        The floor exists because a wall too faint to survive the
+        model's resize leaves a sample whose annotation says two pores
+        and whose image shows one - label noise, not a hard example.
+        Measured on the training set, walls drawn at 11 to 14 source
+        grey levels stay visible after the resize on 99.2 per cent of
+        samples, while those under 5 fail on 70 per cent of them. On a
+        flat image the floor binds often and that is correct rather
+        than regrettable: a wall cannot be both faint and a wall when
+        the whole picture spans forty grey levels.
     edge_softness_px : float
         Width of the wall's fade-out into the pore on either side. A
         wall with no fade-out is a drawn line: real ones blur into
@@ -599,13 +752,14 @@ class SeptumConfig:
     """
 
     p: float = 0.20
-    candidate_fraction: tuple[float, float] = (0.20, 0.30)
+    candidate_fraction: tuple[float, float] = (0.30, 0.45)
     rate: tuple[float, float] = (0.20, 0.50)
-    count_cap: int = 10
+    count_cap: int = 12
     max_divided_area_share: float = 0.40
     fragment_ratio: float = 0.25
     thickness_px: tuple[float, float] = (2.0, 4.0)
-    contrast: float = 0.2034
+    contrast: tuple[float, float] = (0.111, 0.280)
+    min_contrast_grey: float = 11.0
     edge_softness_px: float = 1.0
     sag: tuple[float, float] = (0.0, 0.12)
     min_chord_share: float = 0.7
@@ -624,6 +778,12 @@ class SeptumConfig:
         )
         _check_range("rate", self.rate, 0.0, 1.0)
         _check_range("sag", self.sag, 0.0, 1.0)
+        _check_range("contrast", self.contrast, 0.0, 1.0)
+        if self.min_contrast_grey < 0.0:
+            raise ValueError(
+                f"min_contrast_grey must be a non-negative number of "
+                f"grey levels, got {self.min_contrast_grey}"
+            )
         if self.count_cap < 1:
             raise ValueError(
                 f"count_cap must be at least 1; switching the family "

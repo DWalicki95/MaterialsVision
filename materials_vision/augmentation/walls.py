@@ -61,6 +61,17 @@ TONAL_PERCENTILES = (5.0, 95.0)
 # obvious are already told apart.
 THICKNESS_PERCENTILES = (10.0, 50.0)
 
+# Where the frozen contrast range is read off, and why it is a range at
+# all. A single value - the median - was what this module first froze,
+# and it made every synthetic wall equally bright, which no micrograph
+# is. Holding it instead at the ninetieth percentile was considered
+# after the first expert review and rejected for a stronger reason: the
+# wall this family exists to teach is the faint one the model misses,
+# so training only on the brightest decile would teach the case it
+# already handles. The tenth to the ninetieth spans what the images
+# contain without reproducing their extremes.
+CONTRAST_PERCENTILES = (10.0, 90.0)
+
 REPORTED_PERCENTILES = (10.0, 25.0, 50.0, 75.0, 90.0)
 
 
@@ -114,20 +125,27 @@ class WallSummary:
     ----------
     thickness_px : tuple of float
         The range a synthetic wall's width is drawn from.
-    contrast : float
-        How far a synthetic wall's centre sits above the pore it
-        divides, as a share of that image's tonal range.
+    contrast : tuple of float
+        The range a synthetic wall's contrast against the pore it
+        divides is drawn from, as a share of that image's tonal range.
+    contrast_median : float
+        Middle of the measured contrasts, reported beside the range so
+        the range can be read against the distribution it came from.
     thickness_percentiles : dict
         The measured distribution of real wall widths, so the frozen
         range can be seen in the context it came from.
+    contrast_percentiles : dict
+        The same for contrast.
     n_images : int
     n_ridge_px : int
         Wall-centre pixels the figures were measured on.
     """
 
     thickness_px: tuple[float, float]
-    contrast: float
+    contrast: tuple[float, float]
+    contrast_median: float
     thickness_percentiles: dict[str, float]
+    contrast_percentiles: dict[str, float]
     n_images: int
     n_ridge_px: int
 
@@ -205,10 +223,21 @@ def summarize_walls(samples: Iterable[WallSample]) -> WallSummary:
 
     pooled = np.concatenate(thicknesses)
     low, high = np.percentile(pooled, THICKNESS_PERCENTILES)
+    if contrasts:
+        faint, bright = np.percentile(contrasts, CONTRAST_PERCENTILES)
+        contrast_range = (float(faint), float(bright))
+        contrast_median = float(np.median(contrasts))
+        contrast_percentiles = _percentiles(contrasts)
+    else:
+        contrast_range = (0.0, 0.0)
+        contrast_median = 0.0
+        contrast_percentiles = {}
     return WallSummary(
         thickness_px=(float(low), float(high)),
-        contrast=float(np.median(contrasts)) if contrasts else 0.0,
+        contrast=contrast_range,
+        contrast_median=contrast_median,
         thickness_percentiles=_percentiles(pooled),
+        contrast_percentiles=contrast_percentiles,
         n_images=len(thicknesses),
         n_ridge_px=int(pooled.size),
     )

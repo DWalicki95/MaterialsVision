@@ -37,8 +37,6 @@ import logging
 import sys
 from pathlib import Path
 
-import numpy as np
-
 from materials_vision.augmentation.walls import measure_walls, summarize_walls
 from materials_vision.data import SampleSource, load_split, read_manifest
 from materials_vision.logging_config import setup_logging
@@ -121,22 +119,23 @@ def report(summary, samples: list) -> None:
         summary.thickness_px[0], summary.thickness_px[1],
         working[0], working[1],
     )
-    contrasts = np.array(
-        [sample.contrast for sample in samples if
-         np.isfinite(sample.contrast)]
-    )
     logger.info(
         "Wall contrast above the pore interior, as a share of each "
-        "image's tonal range: median %.4f, p10 %.4f, p90 %.4f",
-        summary.contrast,
-        float(np.percentile(contrasts, 10)),
-        float(np.percentile(contrasts, 90)),
+        "image's tonal range: median %.4f, distribution %s",
+        summary.contrast_median, summary.contrast_percentiles,
+    )
+    logger.info(
+        "The frozen range is the tenth to the ninetieth percentile. "
+        "One value would make every synthetic wall equally bright, "
+        "which no micrograph is; the ninetieth alone would make every "
+        "one of them brighter than nine real walls in ten, which is "
+        "the opposite of the case this family exists to teach."
     )
     logger.info(
         "Copy into SeptumConfig: thickness_px=(%.2f, %.2f), "
-        "contrast=%.4f",
+        "contrast=(%.4f, %.4f)",
         summary.thickness_px[0], summary.thickness_px[1],
-        summary.contrast,
+        summary.contrast[0], summary.contrast[1],
     )
 
 

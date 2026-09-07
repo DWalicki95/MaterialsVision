@@ -219,7 +219,7 @@ def test_the_strength_is_measured_against_the_image_own_range():
     low, high = np.percentile(image, (5.0, 95.0))
 
     assert params["tonal_span"] == pytest.approx(float(high - low))
-    assert 0.08 <= params["strength"] <= 0.15
+    assert 0.22 <= params["strength"] <= 0.40
     assert params["amplitude"] == pytest.approx(
         params["strength"] * params["tonal_span"], abs=1e-2
     )
@@ -356,9 +356,163 @@ def test_the_family_does_not_touch_the_global_random_state():
     assert random.getstate() == python_state
 
 
+class TestTheFadeReachesTheInterior:
+    """The plateau, and the property it was not allowed to cost.
+
+    Weighting the shading by the whole depth of a pore put full
+    strength on one pixel and about a third of it on the median one, so
+    the amplitude in the configuration described a peak rather than an
+    effect - three attempts to raise it measured within a grey level of
+    each other and of the setting they meant to improve on. The fade is
+    now a share of the depth. What may not change is the zero at the
+    boundary: a shading that reaches the edge draws a step where the
+    annotation says there is none.
+    """
+
+    @staticmethod
+    def _delta(config, seed=3):
+        image, labels = _sample()
+        transform = PoreBrightnessField(config)
+        _apply(transform, image, labels, seed)
+        return transform.params["delta"], labels
+
+    def test_the_boundary_still_receives_exactly_nothing(self) -> None:
+        delta, labels = self._delta(
+            MaskAwareConfig(field_edge_fade_share=0.35, p=1.0)
+        )
+
+        assert not delta[_outline(labels)].any()
+
+    def test_the_interior_carries_far_more_than_the_old_fade(
+        self,
+    ) -> None:
+        """The measurement that motivated the change, in miniature."""
+        inside = None
+        weights = {}
+        for share in (1.0, 0.35):
+            delta, labels = self._delta(MaskAwareConfig(
+                field_edge_fade_share=share,
+                field_kinds=("constant",),
+                p=1.0,
+            ))
+            inside = labels > 0
+            shaded = np.abs(delta[inside])
+            weights[share] = np.median(
+                shaded[shaded > 0]
+            ) / np.abs(delta).max()
+
+        assert weights[1.0] < 0.45
+        assert weights[0.35] > 0.80
+
+    def test_a_fade_outside_the_unit_interval_is_refused(self) -> None:
+        with pytest.raises(
+            ValueError, match="field_edge_fade_share"
+        ):
+            MaskAwareConfig(field_edge_fade_share=0.0)
+
+
+class TestTheThreeShapesCarryTheSameStrength:
+    """Comparable in what is seen, not in a peak nobody looks at.
+
+    Scaled to a common peak, a gradient put its extremes at the two
+    ends of a pore - where the fade takes them back to nothing - so its
+    typical pixel moved about half as far as a flat shading of the same
+    nominal strength, and a random surface less again. One setting then
+    produced a median change of 4 grey levels on some panels and 46 on
+    others, and what differed was the shape drawn.
+    """
+
+    @staticmethod
+    def _typical_change(kind, seed):
+        image, labels = _sample()
+        transform = PoreBrightnessField(MaskAwareConfig(
+            strength=(0.30, 0.30), field_kinds=(kind,), p=1.0
+        ))
+        _apply(transform, image, labels, seed)
+        delta = np.abs(transform.params["delta"])
+        shaded = delta[delta > 0]
+        return float(np.median(shaded))
+
+    def test_no_shape_is_half_the_strength_of_another(self) -> None:
+        typical = {
+            kind: np.median([
+                self._typical_change(kind, seed) for seed in SEEDS[:8]
+            ])
+            for kind in ("constant", "gradient", "random")
+        }
+
+        assert min(typical.values()) > 0.0
+        assert max(typical.values()) / min(typical.values()) < 1.5
+
+    def test_a_degenerate_shape_is_not_amplified_without_bound(
+        self,
+    ) -> None:
+        """A gradient across a pore's short axis has a median near zero
+        and would otherwise be scaled past the frozen range."""
+        image, labels = _sample()
+        transform = PoreBrightnessField(MaskAwareConfig(
+            strength=(0.30, 0.30), field_kinds=("gradient",), p=1.0
+        ))
+
+        for seed in SEEDS:
+            _apply(transform, image, labels, seed)
+            params = transform.params
+            peak = float(np.abs(params["delta"]).max())
+            assert peak <= 4.0 * params["amplitude"] + 1e-6
+
+
+class TestTheNumberOfPatchesFollowsTheImage:
+    """A count fixed in advance does not survive 3 to 91 pores."""
+
+    @staticmethod
+    def _darkened(cols, seed=5):
+        image, labels = _sample(width=40 * cols, cols=cols)
+        transform = PoreDarkening(MaskAwareConfig(
+            darkened_rate=(0.10, 0.10), darkened_cap=8, p=1.0
+        ))
+        _apply(transform, image, labels, seed)
+        return transform.params
+
+    def test_a_denser_image_receives_more_patches(self) -> None:
+        sparse = self._darkened(2)
+        dense = self._darkened(12)
+
+        assert dense["n_pores_eligible"] > sparse["n_pores_eligible"]
+        assert dense["n_pores_darkened"] > sparse["n_pores_darkened"]
+
+    def test_at_least_one_pore_is_always_darkened(self) -> None:
+        """A rate rounding to nothing would switch the family off on
+        exactly the images where a single patch is a fair share."""
+        params = self._darkened(2)
+
+        assert params["n_pores_darkened"] >= 1
+
+    def test_the_cap_bounds_the_count(self) -> None:
+        image, labels = _sample(width=480, cols=12)
+        transform = PoreDarkening(MaskAwareConfig(
+            darkened_rate=(1.0, 1.0), darkened_cap=3, p=1.0
+        ))
+        _apply(transform, image, labels, 5)
+
+        assert transform.params["n_pores_darkened"] <= 3
+
+    def test_the_drawn_rate_reaches_the_record(self) -> None:
+        """A run that cannot say how many it asked for cannot explain
+        how many it got."""
+        params = self._darkened(6)
+
+        assert 0.10 == pytest.approx(params["rate"])
+
+
 def test_settings_that_could_not_describe_a_draw_are_refused():
     with pytest.raises(ValueError, match="runs backwards"):
         MaskAwareConfig(strength=(0.2, 0.1))
+
+    with pytest.raises(ValueError, match="darkened_rate"):
+        MaskAwareConfig(darkened_rate=(0.5, 0.1))
+
+    with pytest.raises(ValueError, match="darkened_cap"):
+        MaskAwareConfig(darkened_cap=0)
 
     with pytest.raises(ValueError, match="unknown field kind"):
         MaskAwareConfig(field_kinds=("constant", "swirl"))

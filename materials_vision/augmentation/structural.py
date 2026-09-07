@@ -55,6 +55,7 @@ RECORD_KEYS = (
     "candidate_pool",
     "divided_area_share",
     "thickness_px",
+    "contrasts",
     "sags",
     "fragment_ratios",
     "smallest_fragment_px2",
@@ -308,6 +309,36 @@ class SyntheticSeptum(A.DualTransform):
             areas, thickness, sag, tonal_span,
         )
 
+    def _drawn_contrast(self, tonal_span: float) -> float:
+        """How far above its pore this wall's centre is painted.
+
+        Drawn per wall rather than per sample, because the walls in one
+        micrograph are not all equally bright and a sample whose walls
+        all matched would be a sample no microscope produced.
+
+        The floor is applied here rather than to the range, because it
+        is a number of grey levels and the range is a share: the same
+        share is a plain wall on a contrasty image and nothing at all
+        on a flat one. A wall too faint to survive the model's resize
+        would leave the sample claiming two pores where the picture
+        shows one, and that is not a hard example but a wrong label.
+
+        Parameters
+        ----------
+        tonal_span : float
+            Width of this image's tonal range, in grey levels.
+
+        Returns
+        -------
+        float
+            Share of the tonal range, at least the floor's worth of it.
+        """
+        config = self._config
+        contrast = self.py_random.uniform(*config.contrast)
+        if tonal_span <= 0.0:
+            return contrast
+        return max(contrast, config.min_contrast_grey / tonal_span)
+
     def _draw_ends(
         self, inside: np.ndarray
     ) -> Optional[tuple[tuple[int, int], tuple[int, int]]]:
@@ -368,7 +399,8 @@ class SyntheticSeptum(A.DualTransform):
         window[fragments == 2] = n_before + 1
 
         interior = float(np.median(image[box][inside]))
-        target = interior + self._config.contrast * tonal_span
+        contrast = self._drawn_contrast(tonal_span)
+        target = interior + contrast * tonal_span
         walled = image.copy()
         patch = walled[box].astype(np.float32)
         blend = np.where(inside, weight, 0.0).astype(np.float32)
@@ -379,6 +411,7 @@ class SyntheticSeptum(A.DualTransform):
         return {
             "divided_instance": label,
             "thickness_px": round(thickness, 3),
+            "contrast": round(contrast, 4),
             "sag": round(sag, 4),
             "fragment_ratio": round(
                 float(areas.min()) / float(areas.sum()), 4
@@ -502,6 +535,7 @@ def _undivided(
         "candidate_pool": pool,
         "divided_area_share": 0.0,
         "thickness_px": (),
+        "contrasts": (),
         "sags": (),
         "fragment_ratios": (),
         "smallest_fragment_px2": None,
@@ -555,6 +589,9 @@ def _summarize(
         ),
         "smallest_fragment_px2": min(
             entry["smallest_fragment_px2"] for entry in divisions
+        ),
+        "contrasts": tuple(
+            entry["contrast"] for entry in divisions
         ),
         "target_intensities": tuple(
             entry["target_intensity"] for entry in divisions

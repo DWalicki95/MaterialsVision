@@ -89,12 +89,13 @@ class TestTheNumbers:
             assert (weight, low) == (1.0, high)
 
     def test_the_blur_widths_bracket_the_frozen_range(self) -> None:
+        frozen = BlurConfig().sigma_px
         drawn = {
             level.level: level.config.blur.sigma_px
             for level in gate_levels(FAMILY_BLUR)
         }
-        assert drawn["low"] == (0.4, 0.4)
-        assert drawn["high"] == (0.8, 0.8)
+        assert drawn["low"] == (frozen[0], frozen[0])
+        assert drawn["high"] == (frozen[1], frozen[1])
 
     def test_no_tonal_level_reaches_past_the_frozen_range(self) -> None:
         """The criterion asks whether the numbers in use are
@@ -144,13 +145,14 @@ class TestTheNumbers:
         """Contrast is what decides whether a wall survives the resize;
         width barely moves it, and reviewing width produced three
         levels differing in something other than what was judged."""
+        faintest, brightest = SeptumConfig().contrast
         drawn = {
             level.level: level.config.septum.contrast
             for level in gate_levels(FAMILY_SEPTUM)
         }
-        assert drawn["low"] == 0.111
-        assert drawn["nominal"] == SeptumConfig().contrast
-        assert drawn["high"] == 0.280
+        assert drawn["low"] == (faintest, faintest)
+        assert drawn["high"] == (brightest, brightest)
+        assert faintest < drawn["nominal"][0] < brightest
 
     def test_the_wall_width_is_held_still_across_the_levels(self) -> None:
         """Otherwise two things vary at once and neither is measured."""
@@ -160,13 +162,20 @@ class TestTheNumbers:
         }
         assert len(widths) == 1
 
-    def test_the_faint_wall_uses_the_lowest_measured_contrast(
+    def test_the_faint_wall_shows_what_the_floor_keeps_out(
         self,
     ) -> None:
+        """The diagnostic is the case the floor removes, so the floor
+        has to be off in it. Left on, it would raise this wall to the
+        same brightness as the gate beside it and the panel would show
+        that the floor works rather than what it is for."""
+        frozen = SeptumConfig()
         faint = level_by_key("F5_septum__faint")
         assert faint is not None
         assert faint.kind == KIND_DIAGNOSTIC
-        assert faint.config.septum.contrast < 0.2034
+        assert faint.config.septum.contrast[1] <= frozen.contrast[0]
+        assert faint.config.septum.min_contrast_grey == 0.0
+        assert frozen.min_contrast_grey > 0.0
 
     def test_the_stressed_patch_lies_outside_the_frozen_range(
         self,

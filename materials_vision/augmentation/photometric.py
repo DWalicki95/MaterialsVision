@@ -46,45 +46,31 @@ def build_tonal(config: TonalConfig) -> A.OneOf:
         one member still returns a container, so what the pipeline
         reports - and therefore what a record says fired - does not
         depend on how many members were left in.
+
+    Notes
+    -----
+    Each member is offered as one alternative per direction rather than
+    as one transformation spanning both, which is what lets a magnitude
+    floor exist at all: a range running from one sign through zero to
+    the other cannot exclude its own middle. Split at the identity, the
+    two halves are ordinary ranges and the floor is their inner bound.
+
+    **Brightness and contrast keep a common sign.** They are drawn
+    independently inside their band but never in opposition, because
+    in opposition they cancel: at the ends of the frozen ranges a
+    brightness of +0.07 moves a mid grey by about eighteen levels and a
+    contrast of -0.105 moves it back by about thirteen, leaving five -
+    under what anyone can see, at the setting that is supposed to be
+    the strongest the family has. Coupling the sign is what makes the
+    floor mean what it says.
     """
-    if config.pin_magnitude:
-        return _pinned_tonal(config)
-
-    members = {
-        "brightness_contrast": lambda: A.RandomBrightnessContrast(
-            brightness_limit=config.brightness_limit,
-            contrast_limit=config.contrast_limit,
-            p=1.0,
-        ),
-        "gamma": lambda: A.RandomGamma(
-            gamma_limit=config.gamma_limit, p=1.0
-        ),
-    }
-    return A.OneOf(
-        [members[name]() for name in config.members], p=config.p
-    )
-
-
-def _pinned_tonal(config: TonalConfig) -> A.OneOf:
-    """Build the tonal container at the ends of its ranges only.
-
-    Each member becomes two alternatives of equal weight, one for each
-    end of its range, and each of those is a degenerate range - a
-    single value - so the magnitude cannot come out weaker than the
-    setting claims. The direction is what the draw decides.
-
-    This exists for the visual gate. Reviewing a symmetric range by
-    drawing from it uniformly means a panel labelled with the strong
-    setting frequently shows something close to the identity, and a
-    reviewer reporting "no difference" is then describing the draw and
-    not the range they were asked about.
-    """
+    share = 1.0 if config.pin_magnitude else config.min_magnitude_share
     alternatives: list[A.ImageOnlyTransform] = []
     if "brightness_contrast" in config.members:
         alternatives.extend(
             A.RandomBrightnessContrast(
-                brightness_limit=(brightness, brightness),
-                contrast_limit=(contrast, contrast),
+                brightness_limit=_band(brightness, share),
+                contrast_limit=_band(contrast, share),
                 p=1.0,
             )
             for brightness, contrast in zip(
@@ -93,10 +79,54 @@ def _pinned_tonal(config: TonalConfig) -> A.OneOf:
         )
     if "gamma" in config.members:
         alternatives.extend(
-            A.RandomGamma(gamma_limit=(gamma, gamma), p=1.0)
+            A.RandomGamma(
+                gamma_limit=_gamma_band(gamma, share), p=1.0
+            )
             for gamma in config.gamma_limit
         )
     return A.OneOf(alternatives, p=config.p)
+
+
+def _band(end: float, share: float) -> tuple[float, float]:
+    """The part of one half-range a draw is allowed to land in.
+
+    Runs from ``share`` of the way out to the end itself, so a share of
+    one is the end alone - the setting a review panel uses, where a
+    draw near the identity would review the draw instead of the range -
+    and a share of zero is the whole half.
+
+    Parameters
+    ----------
+    end : float
+        One end of a range symmetric about the identity; either sign.
+    share : float
+
+    Returns
+    -------
+    tuple of float
+        Increasing, whichever sign the end has.
+    """
+    inner = end * share
+    return (inner, end) if end >= 0.0 else (end, inner)
+
+
+def _gamma_band(end: int, share: float) -> tuple[int, int]:
+    """The same band for gamma, whose identity is 100 rather than 0.
+
+    Parameters
+    ----------
+    end : int
+        One end of the gamma range, in percent.
+    share : float
+
+    Returns
+    -------
+    tuple of int
+        Increasing, and never crossing back over the identity.
+    """
+    offset = end - 100
+    inner = int(round(100 + offset * share))
+    return (inner, end) if offset >= 0 else (end, inner)
 
 
 def build_blur(config: BlurConfig) -> A.GaussianBlur:

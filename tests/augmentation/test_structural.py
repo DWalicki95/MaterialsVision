@@ -495,9 +495,90 @@ def test_a_wall_is_measured_at_the_width_it_was_drawn():
     assert sample.contrast > 0.0
 
 
+class TestTheWallContrast:
+    """Drawn from the walls the images contain, floored where it would
+    stop being a wall.
+
+    Holding the contrast at one value made every synthetic wall equally
+    bright, which no micrograph is; holding it at the ninetieth
+    percentile of the measured walls was the alternative and would have
+    taught the bright membrane the model already separates instead of
+    the faint one it misses. What the range cannot be allowed to do is
+    produce a wall too faint to survive the model's resize, because
+    that sample's annotation would claim two pores over a picture
+    showing one - a wrong label rather than a hard example.
+    """
+
+    @staticmethod
+    def _flat_sample():
+        """A frame whose whole tonal range is narrow."""
+        image, labels = _sample()
+        image = (image // 8 + 100).astype(np.uint8)
+        image[labels == 0] = 112
+        return image, labels
+
+    def test_the_contrast_varies_between_walls(self) -> None:
+        image, labels = _sample()
+        policy = _policy(contrast=(0.111, 0.280))
+
+        drawn = {
+            contrast
+            for result in _divided(policy, image, labels)
+            for contrast in _entry(result).params["contrasts"]
+        }
+
+        assert len(drawn) > 1
+
+    def test_every_draw_stays_inside_the_measured_range(self) -> None:
+        image, labels = _sample()
+        policy = _policy(contrast=(0.111, 0.280), min_contrast_grey=0.0)
+
+        for result in _divided(policy, image, labels):
+            for contrast in _entry(result).params["contrasts"]:
+                assert 0.111 <= contrast <= 0.280
+
+    def test_a_flat_image_has_its_wall_raised_to_the_floor(self) -> None:
+        """On an image spanning a few dozen grey levels the faint end of
+        the range is not a wall at all, and the floor is what says so."""
+        image, labels = self._flat_sample()
+        low, high = np.percentile(image, (5.0, 95.0))
+        span = float(high) - float(low)
+        policy = _policy(
+            contrast=(0.111, 0.111), min_contrast_grey=11.0
+        )
+
+        produced = _divided(policy, image, labels)
+
+        assert produced
+        assert span * 0.111 < 11.0
+        for result in produced:
+            for contrast in _entry(result).params["contrasts"]:
+                # The record rounds the contrast to four places, so the
+                # floor is met to within that rounding rather than
+                # exactly.
+                assert contrast * span >= 11.0 - 1e-4 * span
+
+    def test_the_floor_leaves_a_contrasty_image_alone(self) -> None:
+        """A guard that binds everywhere has replaced the rule."""
+        image, labels = _sample()
+        policy = _policy(
+            contrast=(0.280, 0.280), min_contrast_grey=11.0
+        )
+
+        for result in _divided(policy, image, labels):
+            for contrast in _entry(result).params["contrasts"]:
+                assert contrast == pytest.approx(0.280)
+
+
 def test_settings_that_could_not_describe_a_draw_are_refused():
     with pytest.raises(ValueError, match="fragment_ratio"):
         SeptumConfig(fragment_ratio=0.8)
+
+    with pytest.raises(ValueError, match="contrast"):
+        SeptumConfig(contrast=(0.3, 0.1))
+
+    with pytest.raises(ValueError, match="min_contrast_grey"):
+        SeptumConfig(min_contrast_grey=-1.0)
 
     with pytest.raises(ValueError, match="thickness_px"):
         SeptumConfig(thickness_px=(4.0, 2.0))

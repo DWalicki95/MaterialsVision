@@ -50,7 +50,8 @@ from materials_vision.augmentation.config import (FAMILY_BLUR,
 from materials_vision.augmentation.policy import AugmentationPolicy
 from materials_vision.augmentation.walls import thinnest_wall_pixel
 from materials_vision.data.samples import PreparedSample
-from materials_vision.phase0.levels import KIND_DIAGNOSTIC, ReviewLevel
+from materials_vision.phase0.levels import (KIND_DIAGNOSTIC, ReviewLevel,
+                                            review_levels)
 from materials_vision.phase0.preview import (MODE_ISOTROPIC, ModelInput,
                                              place_mask_on_canvas,
                                              to_model_coordinates,
@@ -286,6 +287,17 @@ def write_index(
     and, if its parameters changed, arrives with a new fingerprint
     that sets the verdicts on it aside.
 
+    **A level that no longer exists is dropped rather than kept.**
+    Merging can add a setting and could not remove one, so a level
+    withdrawn from ``review_levels`` left its panels sitting in the
+    queue - reviewable, and about nothing. It happened the first time a
+    diagnostic did its job: three amplitude candidates and a gamma
+    candidate were retired once the evidence they were built to
+    gather had been gathered, and twenty-six of their panels stayed
+    behind. Their files are left on disk and named in the log, because
+    deleting a rendering nobody asked to delete is the more surprising
+    of the two failures.
+
     Parameters
     ----------
     records : list of PanelRecord
@@ -305,6 +317,14 @@ def write_index(
     for record in records:
         merged[record.panel_id] = record.as_dict()
 
+    current = {level.key for level in review_levels()}
+    withdrawn = {
+        panel_id: entry for panel_id, entry in merged.items()
+        if f"{entry['family']}__{entry['level']}" not in current
+    }
+    for panel_id in withdrawn:
+        del merged[panel_id]
+
     payload = {
         "n_panels": len(merged),
         "panels": list(merged.values()),
@@ -317,6 +337,16 @@ def write_index(
         "earlier runs.",
         len(merged), len(records), len(merged) - len(records),
     )
+    if withdrawn:
+        levels = sorted({
+            f"{entry['family']}__{entry['level']}"
+            for entry in withdrawn.values()
+        })
+        logger.info(
+            "Dropped %d panel(s) of %d withdrawn level(s) from the "
+            "review queue: %s. Their files are still on disk.",
+            len(withdrawn), len(levels), ", ".join(levels),
+        )
     return path
 
 

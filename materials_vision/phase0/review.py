@@ -65,6 +65,16 @@ class LevelSummary:
     fingerprint : str
         Parameters the panels were rendered with.
     n_panels, n_decided, n_problems : int
+        Counted over the panels that gate this setting. A close-up is
+        trained on but excluded from the verdict, so a problem marked
+        on one is held apart in ``n_problems_excluded`` rather than
+        held against the family - and its panel is not one the gate
+        waits for.
+    n_problems_excluded : int
+        Problems recorded on panels that do not gate. Reported so the
+        exclusion is visible rather than merely applied: a close-up
+        that breaks is still worth knowing about, it just cannot
+        reject a range nobody proposed using it on.
     criteria : Counter
         How often each acceptance criterion was marked as failed.
     problem_images : list of str
@@ -86,6 +96,7 @@ class LevelSummary:
     n_panels: int = 0
     n_decided: int = 0
     n_problems: int = 0
+    n_problems_excluded: int = 0
     criteria: Counter = field(default_factory=Counter)
     problem_images: list[str] = field(default_factory=list)
     verdict: Optional[str] = None
@@ -163,6 +174,17 @@ def summarize(
     ignored rather than counted: it describes a picture that is not on
     screen any more.
 
+    **Whether a setting gates is read from the setting, not from one of
+    its panels.** A panel of a close-up carries ``diagnostic`` however
+    its level was declared, because a close-up is trained on and
+    excluded from the verdict, and taking the level's kind from
+    whichever panel happened to come first therefore turned an entire
+    gating level into a diagnostic whenever a close-up led its subset.
+    That is a silent failure of the worst sort available here: the
+    family it happened to - the septum, all four of whose settings read
+    as diagnostic - could then be neither accepted nor rejected, and
+    the report said so only by leaving a column empty.
+
     Parameters
     ----------
     panels : Iterable of dict
@@ -173,6 +195,7 @@ def summarize(
     list of LevelSummary
         In the order the settings are rendered.
     """
+    declared = {level.key: level.kind for level in review_levels()}
     summaries: dict[str, LevelSummary] = {}
     for panel in panels:
         key = f"{panel['family']}__{panel['level']}"
@@ -180,14 +203,20 @@ def summarize(
             key=key,
             family=panel["family"],
             level=panel["level"],
-            kind=panel["kind"],
+            kind=declared.get(key, panel["kind"]),
             fingerprint=panel["fingerprint"],
         ))
-        summary.n_panels += 1
+        gates = panel["kind"] == KIND_GATE or summary.kind != KIND_GATE
+        if gates:
+            summary.n_panels += 1
         decision = review["decisions"].get(panel["panel_id"])
         if decision is None:
             continue
         if decision.get("fingerprint") != panel["fingerprint"]:
+            continue
+        if not gates:
+            if decision.get("status") == "problem":
+                summary.n_problems_excluded += 1
             continue
         summary.n_decided += 1
         if decision.get("status") == "problem":

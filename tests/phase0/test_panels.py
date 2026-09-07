@@ -177,6 +177,38 @@ class TestRendering:
             first.panel_id, second.panel_id
         }
 
+    def test_a_withdrawn_level_leaves_the_review_queue(
+        self, sample, tmp_path
+    ) -> None:
+        """Merging could add a setting and not remove one.
+
+        A diagnostic exists to gather evidence for a revision, so it
+        retires once the revision is made - and when four of them did,
+        twenty-six of their panels stayed in the queue, reviewable and
+        about nothing.
+        """
+        record = render_panel(
+            sample, level_by_key("F3b_blur__low"), run_seed=1,
+            repeat=0, output_dir=tmp_path,
+        )
+        write_index([record], tmp_path)
+        path = tmp_path / "panels.json"
+        written = json.loads(path.read_text(encoding="utf-8"))
+        written["panels"].append({
+            **written["panels"][0],
+            "panel_id": "F3a_tonal__gamma_candidate__AS1_40_1__r0",
+            "family": "F3a_tonal",
+            "level": "gamma_candidate",
+        })
+        path.write_text(json.dumps(written), encoding="utf-8")
+
+        write_index([record], tmp_path)
+
+        after = json.loads(path.read_text(encoding="utf-8"))
+        assert {p["panel_id"] for p in after["panels"]} == {
+            record.panel_id
+        }
+
     def test_a_re_rendered_panel_replaces_its_own_entry(
         self, sample, tmp_path
     ) -> None:

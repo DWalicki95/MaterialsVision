@@ -18,12 +18,13 @@ def test_the_starting_values_are_the_ones_that_were_approved():
     blur = BlurConfig()
     scale = ScaleConfig()
 
-    assert tonal.brightness_limit == (-0.10, 0.10)
-    assert tonal.contrast_limit == (-0.15, 0.15)
-    assert tonal.gamma_limit == (90, 110)
+    assert tonal.brightness_limit == (-0.07, 0.07)
+    assert tonal.contrast_limit == (-0.105, 0.105)
+    assert tonal.gamma_limit == (75, 125)
+    assert tonal.min_magnitude_share == 0.5
     assert tonal.p == 0.5
-    assert blur.sigma_px == (0.4, 0.8)
-    assert blur.kernel_px == 7
+    assert blur.sigma_px == (0.8, 1.6)
+    assert blur.kernel_px == 11
     assert blur.p == 0.2
     assert OrientationConfig().p == 1.0
     assert scale.bands == (
@@ -38,10 +39,17 @@ def test_the_starting_values_are_the_ones_that_were_approved():
 
     septum = SeptumConfig()
     assert septum.p == 0.20
-    assert septum.candidate_fraction == (0.20, 0.30)
+    assert septum.candidate_fraction == (0.30, 0.45)
     assert septum.fragment_ratio == 0.25
     assert septum.thickness_px == (2.0, 4.0)
-    assert septum.contrast == 0.2034
+    assert septum.contrast == (0.111, 0.280)
+    assert septum.min_contrast_grey == 11.0
+
+    mask_aware = MaskAwareConfig()
+    assert mask_aware.strength == (0.22, 0.40)
+    assert mask_aware.field_edge_fade_share == 0.35
+    assert mask_aware.darkened_rate == (0.04, 0.10)
+    assert mask_aware.darkened_cap == 8
 
 
 def test_an_empty_policy_enables_nothing():
@@ -103,7 +111,7 @@ def test_the_run_record_holds_every_number_of_every_family():
     assert metadata["order"] == [FAMILY_ORIENTATION, FAMILY_BLUR]
     assert metadata["changes_mask"] is False
     assert metadata["parameters"][FAMILY_BLUR] == {
-        "sigma_px": (0.4, 0.8), "p": 0.2, "kernel_px": 7,
+        "sigma_px": (0.8, 1.6), "p": 0.2, "kernel_px": 11,
     }
 
 

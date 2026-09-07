@@ -55,6 +55,18 @@ TONAL_PERCENTILES = (5.0, 95.0)
 # two it becomes a streak, which reads as a scratch.
 PATCH_ASPECT = (1.0, 2.0)
 
+# Narrowest the shading's rise may be, in pixels. A rise compressed
+# below one pixel is a step, and a step inside a pore is the edge this
+# family exists to stop the model from inventing. It binds only on a
+# pore barely deep enough to qualify at all.
+_MIN_FADE_SPAN_PX = 1.0
+
+# Largest factor a shape may be scaled up by when its typical
+# magnitude is normalized. A gradient running along a pore's short axis
+# and a random surface that came out flat both have medians near zero,
+# and without a cap either would be amplified past the frozen range.
+_MAX_FIELD_RESCALE = 4.0
+
 FIELD_RECORD_KEYS = (
     "kind",
     "strength",
@@ -69,6 +81,7 @@ FIELD_RECORD_KEYS = (
 DARKENING_RECORD_KEYS = (
     "n_pores_eligible",
     "n_pores_darkened",
+    "rate",
     "factors",
     "area_fractions",
     "attempts",
@@ -153,10 +166,14 @@ class PoreBrightnessField(A.ImageOnlyTransform):
             deepest = float(distance.max())
             if deepest < config.min_core_distance_px:
                 continue
-            ramp = _fade(distance, deepest)
-            field = self._draw_field(kind, ramp.shape, amplitude)
+            ramp = _fade(
+                distance, deepest, config.field_edge_fade_share
+            )
             inside = labels[box] == label
-            delta[box] += np.where(inside, ramp * field, 0.0)
+            field = self._draw_field(kind, ramp.shape)
+            delta[box] += _scaled_to_typical(
+                ramp * field, inside, amplitude
+            )
             shaded += 1
 
         if shaded == 0:
@@ -204,43 +221,56 @@ class PoreBrightnessField(A.ImageOnlyTransform):
         return self.py_random.sample(eligible.tolist(), count)
 
     def _draw_field(
-        self, kind: str, shape: tuple[int, ...], amplitude: float
+        self, kind: str, shape: tuple[int, ...]
     ) -> np.ndarray:
-        """Build one pore's shading, before the fade-out is applied.
+        """Build one pore's shading, in arbitrary units.
 
-        Every shape spans at most ``amplitude`` either side of zero,
-        so the three are comparable at the same strength and a run
-        that changes only the shape changes only the shape.
+        The scale is not set here. The three shapes used to be built at
+        a common peak, which made them comparable in a statistic nobody
+        looks at: a gradient reaches its extremes at the two ends of a
+        pore, exactly where the fade-out takes them back to nothing, so
+        its typical pixel carried about half of what a flat shading of
+        the same nominal strength carried. The scale is applied to the
+        finished shading instead, by ``_scaled_to_typical``.
+
+        Parameters
+        ----------
+        kind : str
+        shape : tuple of int
+            Shape of the pore's bounding box.
+
+        Returns
+        -------
+        np.ndarray
+            Spanning roughly ``[-1, 1]``.
         """
         if kind == "constant":
             sign = self.py_random.choice((-1.0, 1.0))
-            return np.full(shape, amplitude * sign, dtype=np.float32)
+            return np.full(shape, sign, dtype=np.float32)
         if kind == "gradient":
             angle = self.py_random.uniform(0.0, 2.0 * np.pi)
             rows = np.linspace(-1.0, 1.0, shape[0], dtype=np.float32)
             columns = np.linspace(
                 -1.0, 1.0, shape[1], dtype=np.float32
             )
-            projection = (
+            field = (
                 columns[None, :] * float(np.cos(angle))
                 + rows[:, None] * float(np.sin(angle))
             )
-            peak = float(np.abs(projection).max())
-            if peak == 0.0:
-                return np.zeros(shape, dtype=np.float32)
-            return (amplitude * projection / peak).astype(np.float32)
-
-        side = self.py_random.choice(self._config.field_grid_sides)
-        coarse = self.random_generator.uniform(-1.0, 1.0, (side, side))
-        smooth = resize(
-            coarse, shape, order=1, preserve_range=True,
-            anti_aliasing=False,
-        )
-        return (amplitude * smooth).astype(np.float32)
+        else:
+            side = self.py_random.choice(self._config.field_grid_sides)
+            coarse = self.random_generator.uniform(
+                -1.0, 1.0, (side, side)
+            )
+            field = resize(
+                coarse, shape, order=1, preserve_range=True,
+                anti_aliasing=False,
+            )
+        return field.astype(np.float32)
 
 
 class PoreDarkening(A.ImageOnlyTransform):
-    """Darken a soft-edged patch well inside one or two pores.
+    """Darken soft-edged patches well inside a share of the pores.
 
     Parameters
     ----------
@@ -254,6 +284,11 @@ class PoreDarkening(A.ImageOnlyTransform):
     the boundary, which makes it look like part of the boundary, and
     that is precisely the appearance this transformation exists to
     teach the model to disregard.
+
+    How many pores are darkened follows from how many the image holds,
+    never from a count decided in advance. One patch is a reasonable
+    share of an image carrying five qualifying pores and no share at
+    all of one carrying ninety, and both occur here.
     """
 
     def __init__(self, config: MaskAwareConfig) -> None:
@@ -296,8 +331,10 @@ class PoreDarkening(A.ImageOnlyTransform):
         if eligible.size == 0:
             return _no_darkening(0, "no_pore_is_deep_enough_to_hold")
 
+        rate = self.py_random.uniform(*config.darkened_rate)
         count = min(
-            self.py_random.randint(*config.darkened_pores),
+            max(1, int(round(eligible.size * rate))),
+            config.darkened_cap,
             int(eligible.size),
         )
         chosen = self.py_random.sample(eligible.tolist(), count)
@@ -330,6 +367,7 @@ class PoreDarkening(A.ImageOnlyTransform):
         return {
             "n_pores_eligible": int(eligible.size),
             "n_pores_darkened": len(factors),
+            "rate": round(rate, 5),
             "factors": tuple(factors),
             "area_fractions": tuple(fractions),
             "attempts": max(attempts, 1),
@@ -572,7 +610,62 @@ def _interior_distance(
     return np.asarray(distance_transform_edt(padded))[1:-1, 1:-1]
 
 
-def _fade(distance: np.ndarray, deepest: float) -> np.ndarray:
+def _scaled_to_typical(
+    shading: np.ndarray, inside: np.ndarray, amplitude: float
+) -> np.ndarray:
+    """Scale a finished shading so its typical pixel moves by
+    ``amplitude``, and zero it outside the pore.
+
+    This is what makes ``strength`` mean one thing. Scaled before the
+    fade is applied, the three shapes agree on a peak and disagree on
+    everything that is looked at: the fade is smallest exactly where a
+    gradient is largest, so the two multiply to a typical change about
+    half that of a flat shading built to the same nominal figure. What
+    the strength should name is the change a typical pixel of a shaded
+    pore undergoes, so that is the quantity normalized, after the fade
+    rather than before it.
+
+    The median is the statistic, not the mean: a shading is judged on
+    the pore it covers, not on the few pixels where it happens to peak.
+
+    The scale is capped. A shape whose median magnitude falls near
+    zero - a gradient running almost along the pore's short axis, a
+    random surface that came out flat across it - would otherwise be
+    multiplied into a shading far stronger than the one configured, and
+    a rare draw landing outside the frozen range is precisely the
+    failure this revision exists to remove.
+
+    Parameters
+    ----------
+    shading : np.ndarray
+        Fade times shape, on the pore's bounding box.
+    inside : np.ndarray
+        Boolean, the pore's own pixels within that box. The statistic
+        is taken over these alone: the box holds its neighbours' pixels
+        too, and their share of it varies with the pore's shape.
+    amplitude : float
+        Grey levels the typical pixel should move by.
+
+    Returns
+    -------
+    np.ndarray
+        Zero outside the pore, so a caller may add it to the frame.
+    """
+    magnitudes = np.abs(shading[inside]) if inside.any() else None
+    typical = (
+        float(np.median(magnitudes)) if magnitudes is not None
+        and magnitudes.size else 0.0
+    )
+    scale = (
+        min(amplitude / typical, amplitude * _MAX_FIELD_RESCALE)
+        if typical > 0.0 else 0.0
+    )
+    return np.where(inside, shading * scale, 0.0)
+
+
+def _fade(
+    distance: np.ndarray, deepest: float, share: float
+) -> np.ndarray:
     """Turn distances into a weight of zero at the edge, one at the core.
 
     The subtraction is what makes the edge exact. A distance transform
@@ -583,11 +676,34 @@ def _fade(distance: np.ndarray, deepest: float) -> np.ndarray:
     boundary, which is the one thing this shading must not produce.
     Measuring from the outermost ring instead puts the zero where the
     annotation says the edge is.
+
+    ``share`` decides how much of the pore's depth that rise occupies.
+    At one the weight climbs the whole way and reaches full strength at
+    a single pixel, which is a fade rather than a shading: the median
+    pixel of a pore then carries about a third of the amplitude, and
+    the number in the configuration describes a peak nobody looks at
+    instead of the effect. Below one the rise finishes early and the
+    interior beyond it carries the amplitude in full, while the
+    boundary still carries exactly zero.
+
+    Parameters
+    ----------
+    distance : np.ndarray
+        Distance from each pixel of one instance to the nearest pixel
+        outside it.
+    deepest : float
+        Largest such distance in this instance.
+    share : float
+        Share of the depth the rise occupies, in (0, 1].
+
+    Returns
+    -------
+    np.ndarray
     """
     span = deepest - 1.0
     if span <= 0.0:
         return np.zeros(distance.shape, dtype=np.float32)
-    faded = (distance - 1.0) / span
+    faded = (distance - 1.0) / max(span * share, _MIN_FADE_SPAN_PX)
     return np.clip(faded, 0.0, 1.0).astype(np.float32)
 
 
@@ -613,6 +729,7 @@ def _no_darkening(
     return {
         "n_pores_eligible": int(n_eligible),
         "n_pores_darkened": 0,
+        "rate": None,
         "factors": (),
         "area_fractions": (),
         "attempts": attempts,
