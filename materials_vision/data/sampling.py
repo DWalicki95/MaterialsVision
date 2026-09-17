@@ -36,10 +36,28 @@ whatever the augmentation draws.
 The dependency only has to hold in one direction: augmentation must
 not perturb the image order. The reverse is fine, since augmentation
 is supposed to differ between policies.
+
+**The epoch travels inside the index.** What this sampler yields is not
+a position in the dataset but ``epoch * n_images + position``, and the
+dataset divides it back apart. The obvious alternative - telling the
+dataset which epoch it is, once per epoch - cannot work here: the
+loader prepares samples in worker processes, each holding its own copy
+of the dataset, so an epoch set on the copy in this process reaches
+none of them. Carrying the epoch in the index instead makes it part of
+the data the workers are handed, which is correct for any number of
+workers and for workers that outlive an epoch. It is also the property
+that a silent regression would have to break loudly: an index that
+ignored the epoch would repeat an epoch's augmentation exactly, and the
+test that compares two epochs of the same image would fail.
+
+The cost is that indices exceed the dataset's length, which is unusual
+enough to be worth stating wherever it surfaces. It is safe because a
+map-style dataset is only ever indexed through its sampler, and this is
+that sampler.
 """
 import hashlib
 import logging
-from typing import Iterator, Mapping
+from typing import Iterator, Mapping, Optional, Sequence
 
 import torch
 from torch.utils.data import Sampler
@@ -51,6 +69,60 @@ logger = logging.getLogger(__name__)
 STRATEGY = "proportional_no_oversampling"
 
 ORDERING = "epoch_permutation"
+
+# Namespaces keeping two uses of the same run seed apart. Without them
+# the permutation of epoch 0 and the augmentation of sample 0 would be
+# drawn from one value, which is harmless today only because the two
+# feed different generators - the kind of coincidence that stops being
+# harmless the moment either side changes.
+ORDER_DOMAIN = "order"
+
+AUGMENT_DOMAIN = "augment"
+
+
+def encode_index(epoch: int, position: int, n_images: int) -> int:
+    """Combine an epoch and a dataset position into one index.
+
+    Parameters
+    ----------
+    epoch : int
+    position : int
+        Position within the dataset, in ``[0, n_images)``.
+    n_images : int
+        Length of the dataset being indexed, which is the base the two
+        parts are packed against.
+
+    Returns
+    -------
+    int
+    """
+    return epoch * n_images + position
+
+
+def decode_index(index: int, n_images: int) -> tuple[int, int]:
+    """Split a combined index back into its epoch and its position.
+
+    Parameters
+    ----------
+    index : int
+    n_images : int
+        Length of the dataset being indexed. Must match the value the
+        index was built against, or both parts come out wrong.
+
+    Returns
+    -------
+    tuple of int
+        ``(epoch, position)``.
+
+    Raises
+    ------
+    ValueError
+        If ``n_images`` is not positive, which would make the split
+        meaningless rather than merely wrong.
+    """
+    if n_images < 1:
+        raise ValueError(f"n_images must be positive, got {n_images}")
+    return divmod(int(index), int(n_images))
 
 
 class ProportionalImageSampler(Sampler[int]):
@@ -64,39 +136,71 @@ class ProportionalImageSampler(Sampler[int]):
     for reporting - runs are compared by optimizer steps, but epochs
     remain a readable secondary axis.
 
+    What is yielded is ``epoch * n_images + position``, not a bare
+    position; see the module docstring for why the epoch has to travel
+    with the index rather than be set on the dataset.
+
     Parameters
     ----------
     n_images : int
-        Number of images in the subset being sampled.
+        Length of the dataset being sampled. This is the base the
+        epoch is packed against, so it stays the whole dataset even
+        when ``positions`` restricts which of it is drawn.
     run_seed : int
         Seed of this run. Two runs sharing it see identical image
         orders regardless of their augmentation policies.
+    positions : sequence of int, optional
+        Restrict sampling to these positions, for short rehearsals
+        that do not need the whole subset. ``None`` draws all of them.
+    shuffle : bool, optional
+        Permute each epoch. Off yields the positions in their given
+        order, which is what validation and any reproducible pass over
+        the data need.
 
     Raises
     ------
     ValueError
-        If ``n_images`` is not positive.
+        If ``n_images`` is not positive, if ``positions`` is empty, or
+        if it names a position outside the dataset.
     """
 
-    def __init__(self, n_images: int, run_seed: int) -> None:
+    def __init__(
+        self,
+        n_images: int,
+        run_seed: int,
+        *,
+        positions: Optional[Sequence[int]] = None,
+        shuffle: bool = True,
+    ) -> None:
         if n_images < 1:
             raise ValueError(
                 f"n_images must be positive, got {n_images}"
             )
         self._n_images = int(n_images)
         self._run_seed = int(run_seed)
+        self._shuffle = bool(shuffle)
+        self._positions = _check_positions(positions, self._n_images)
         self._epoch = 0
 
     def __len__(self) -> int:
-        return self._n_images
+        return len(self._positions)
 
     def __iter__(self) -> Iterator[int]:
-        generator = torch.Generator()
-        generator.manual_seed(
-            derive_seed(self._run_seed, self._epoch)
+        if self._shuffle:
+            generator = torch.Generator()
+            generator.manual_seed(
+                derive_seed(self._run_seed, self._epoch, ORDER_DOMAIN)
+            )
+            order = torch.randperm(
+                len(self._positions), generator=generator
+            )
+            positions = [self._positions[int(i)] for i in order]
+        else:
+            positions = list(self._positions)
+        yield from (
+            encode_index(self._epoch, position, self._n_images)
+            for position in positions
         )
-        order = torch.randperm(self._n_images, generator=generator)
-        yield from (int(i) for i in order)
 
     @property
     def epoch(self) -> int:
@@ -137,26 +241,56 @@ class ProportionalImageSampler(Sampler[int]):
         """
         return {
             "strategy": STRATEGY,
-            "ordering": ORDERING,
+            "ordering": ORDERING if self._shuffle else "fixed",
             "n_images": self._n_images,
+            "n_sampled": len(self._positions),
+            "shuffle": self._shuffle,
             "run_seed": self._run_seed,
-            "seed_derivation": "blake2b(f'{run_seed}:{epoch}')",
+            "seed_derivation": "blake2b(f'{domain}:{run_seed}:{counter}')",
             "oversampling": None,
         }
 
 
-def derive_seed(run_seed: int, epoch: int) -> int:
-    """Derive the permutation seed for one epoch.
+def _check_positions(
+    positions: Optional[Sequence[int]], n_images: int
+) -> tuple[int, ...]:
+    """Validate the restricted position list, or build the full one."""
+    if positions is None:
+        return tuple(range(n_images))
+    checked = tuple(int(position) for position in positions)
+    if not checked:
+        raise ValueError(
+            "positions must name at least one image; pass None to "
+            "sample the whole dataset"
+        )
+    out_of_range = [p for p in checked if not 0 <= p < n_images]
+    if out_of_range:
+        raise ValueError(
+            f"positions must lie in [0, {n_images}), got "
+            f"{out_of_range[:5]}"
+        )
+    return checked
 
-    Hashing rather than arithmetic mixing keeps neighbouring epochs
-    from producing correlated permutations, and keeps the value
-    reproducible across platforms and Python versions - unlike
-    ``hash()``, which is randomized per process.
+
+def derive_seed(run_seed: int, counter: int, domain: str) -> int:
+    """Derive one reproducible seed from a run seed and a counter.
+
+    Hashing rather than arithmetic mixing keeps neighbouring counters
+    from producing correlated draws, and keeps the value reproducible
+    across platforms and Python versions - unlike ``hash()``, which is
+    randomized per process.
 
     Parameters
     ----------
     run_seed : int
-    epoch : int
+    counter : int
+        What varies within the run: the epoch for image order, the
+        combined index for augmentation.
+    domain : str
+        Which use this seed is for, normally ``ORDER_DOMAIN`` or
+        ``AUGMENT_DOMAIN``. Stated rather than defaulted because two
+        uses that collide would do so silently, and the caller is the
+        only one who knows which it means.
 
     Returns
     -------
@@ -165,7 +299,7 @@ def derive_seed(run_seed: int, epoch: int) -> int:
         ``torch.Generator.manual_seed``.
     """
     digest = hashlib.blake2b(
-        f"{run_seed}:{epoch}".encode("utf-8"), digest_size=8
+        f"{domain}:{run_seed}:{counter}".encode("utf-8"), digest_size=8
     ).digest()
     return int.from_bytes(digest, "big")
 

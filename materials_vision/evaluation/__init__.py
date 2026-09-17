@@ -34,13 +34,16 @@ from materials_vision.evaluation.shape import (ANGLE_ELONGATION_THRESHOLD,
                                                InstanceShapes, PairShapeError,
                                                ShapeErrors, instance_shapes,
                                                shape_errors)
-from materials_vision.evaluation.size_bins import (SIZE_BIN_LABELS, SizeBins,
-                                                   SizeBinRecall,
+from materials_vision.evaluation.size_bins import (SIZE_BIN_LABELS,
+                                                   SizeBinRecall, SizeBins,
                                                    SizeBinsLoadError,
                                                    calibrate_size_bins,
                                                    instance_areas_um2,
                                                    load_size_bins,
                                                    recall_per_size_bin)
+from materials_vision.evaluation.watershed import (
+    FROZEN_WATERSHED, LIBRARY_DEFAULT_WATERSHED, ROBUSTNESS_CENTER_THRESHOLDS,
+    WatershedParams, robustness_series)
 
 __all__ = [
     "ANGLE_ELONGATION_THRESHOLD",
@@ -48,6 +51,9 @@ __all__ = [
     "CROSS_SECTION_KEYS",
     "DECISION_SCALE",
     "DIAGNOSTIC_SCALES",
+    "FROZEN_WATERSHED",
+    "LIBRARY_DEFAULT_WATERSHED",
+    "ROBUSTNESS_CENTER_THRESHOLDS",
     "SIZE_BIN_LABELS",
     "AggregateResult",
     "AreaNumberDensity",
@@ -64,6 +70,7 @@ __all__ = [
     "SizeBinRecall",
     "SizeBins",
     "SizeBinsLoadError",
+    "WatershedParams",
     "aggregate",
     "area_number_density",
     "boundary_scores",
@@ -79,6 +86,7 @@ __all__ = [
     "pore_count_error",
     "porosity_error",
     "recall_per_size_bin",
+    "robustness_series",
     "scale_outlier_report",
     "shape_errors",
 ]

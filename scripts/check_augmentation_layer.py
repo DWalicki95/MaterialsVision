@@ -58,7 +58,7 @@ from materials_vision.augmentation import (AugmentationPolicy, BlurConfig,
                                            ScaleConfig, SeptumConfig,
                                            TonalConfig)
 from materials_vision.data import SampleSource, load_split, read_manifest
-from materials_vision.data.sampling import derive_seed
+from materials_vision.data.sampling import AUGMENT_DOMAIN, derive_seed
 from materials_vision.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -350,7 +350,7 @@ def run_probe(
             result = probe.policy.apply(
                 prepared.image, prepared.labels,
                 record=prepared.record,
-                seed=derive_seed(seed, int(index)),
+                seed=derive_seed(seed, int(index), AUGMENT_DOMAIN),
             )
         except IntegrityError as error:
             tally.violate(

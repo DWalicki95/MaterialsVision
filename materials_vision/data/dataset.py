@@ -26,12 +26,23 @@ tensors of different shapes would require grouping samples by shape,
 which is precisely the complication a batch size of one removes.
 
 **Augmentation randomness is keyed to position, not to arrival
-order.** The seed for sample ``i`` of epoch ``e`` is derived from
-``(run_seed, e, i)``, so a run reproduces exactly regardless of how
+order.** The seed for a sample is derived from the run's seed and the
+index it arrived under, so a run reproduces exactly regardless of how
 many worker processes load it or in what order they finish. The
 alternative - seeding each worker once and drawing from a shared
 stream - makes the augmentation of a given image depend on scheduling,
 which is reproducible only by accident.
+
+**Indices carry the epoch and exceed this dataset's length.** An index
+is ``epoch * len(self) + position``: the position says which image to
+read, the epoch changes what the augmentation draws for it. Both are
+needed, and the epoch cannot be held as state here, because samples
+are prepared in worker processes holding their own copies of this
+object - state set on the copy in the training process would never
+reach them, and the augmentation would repeat one epoch's draws for
+the length of the run. Packing the epoch into the index hands it to
+the workers as data instead. The dataset is therefore stateless, and
+it is indexed only through the sampler that builds those indices.
 """
 import logging
 from typing import Callable, Optional
@@ -41,7 +52,8 @@ import torch
 from torch.utils.data import Dataset
 
 from materials_vision.data.samples import PreparedSample, SampleSource
-from materials_vision.data.sampling import derive_seed
+from materials_vision.data.sampling import (AUGMENT_DOMAIN, decode_index,
+                                            derive_seed)
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +126,8 @@ class InstanceSegmentationDataset(Dataset):
         one, so a policy that could not see ``scale_bin`` would have to
         guess.
     run_seed : int, optional
-        Seed of this run, mixed with the epoch and the sample index to
-        seed augmentation.
+        Seed of this run, mixed with the index a sample arrives under
+        to seed its augmentation.
 
     Raises
     ------
@@ -137,7 +149,6 @@ class InstanceSegmentationDataset(Dataset):
         self._label_transform = label_transform
         self._transform = transform
         self._run_seed = int(run_seed)
-        self._epoch = 0
 
     def __len__(self) -> int:
         return len(self._source)
@@ -156,52 +167,26 @@ class InstanceSegmentationDataset(Dataset):
         """
         return self._source
 
-    @property
-    def epoch(self) -> int:
-        """Epoch used to seed augmentation.
-
-        Returns
-        -------
-        int
-        """
-        return self._epoch
-
-    def set_epoch(self, epoch: int) -> None:
-        """Set the epoch, changing the augmentation draws.
-
-        Must be called for every epoch, alongside the sampler's own
-        ``set_epoch``: the two are seeded independently on purpose, so
-        that changing the augmentation policy cannot disturb the order
-        in which images arrive.
-
-        Parameters
-        ----------
-        epoch : int
-
-        Raises
-        ------
-        ValueError
-            If ``epoch`` is negative.
-        """
-        if epoch < 0:
-            raise ValueError(f"epoch must be >= 0, got {epoch}")
-        self._epoch = int(epoch)
-
     def sample_seed(self, index: int) -> int:
-        """Seed used to augment one sample in the current epoch.
+        """Seed used to augment the sample arriving under this index.
 
         Parameters
         ----------
         index : int
+            The combined index, epoch included. Two epochs of the same
+            image differ here, which is the whole point: the same seed
+            twice would show the model one fixed augmented copy of the
+            dataset rather than a fresh draw each pass.
 
         Returns
         -------
         int
         """
-        return derive_seed(self._run_seed, self._epoch * len(self) + index)
+        return derive_seed(self._run_seed, index, AUGMENT_DOMAIN)
 
     def __getitem__(self, index: int):
-        prepared = self._source.load(index)
+        _, position = decode_index(index, len(self))
+        prepared = self._source.load(position)
         image, labels = self._augment(prepared, index)
         return (
             _to_rgb_tensor(image),

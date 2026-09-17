@@ -126,29 +126,36 @@ def test_augmentation_receives_the_sample_record(dataset):
     assert seen["image_id"] == "img_1"
 
 
-def test_augmentation_seed_depends_on_index_and_epoch(dataset):
-    first = dataset.sample_seed(0)
-    second = dataset.sample_seed(1)
-    dataset.set_epoch(1)
-    later = dataset.sample_seed(0)
+def test_augmentation_seed_depends_on_the_whole_index(dataset):
+    """Two passes over one image must not draw the same augmentation.
 
-    assert first != second
-    assert first != later
+    The index carries the epoch, so one position reaches this object as
+    a different number each pass. Were those to seed the same draw,
+    every epoch after the first would show the model an identical
+    augmented copy of the dataset instead of a fresh one.
+    """
+    first = dataset.sample_seed(0)
+    neighbour = dataset.sample_seed(1)
+    same_image_next_epoch = dataset.sample_seed(len(dataset))
+
+    assert first != neighbour
+    assert first != same_image_next_epoch
     assert 0 <= first < 2 ** 64
 
 
 def test_augmentation_seed_is_reproducible(dataset):
-    dataset.set_epoch(4)
-    first = dataset.sample_seed(2)
-    dataset.set_epoch(0)
-    dataset.set_epoch(4)
-
-    assert dataset.sample_seed(2) == first
+    assert dataset.sample_seed(7) == dataset.sample_seed(7)
 
 
-def test_negative_epoch_is_refused(dataset):
-    with pytest.raises(ValueError, match="epoch must be >= 0"):
-        dataset.set_epoch(-1)
+def test_an_index_past_the_end_reads_the_position_it_encodes(dataset):
+    """Indices exceed the length because they carry the epoch too.
+
+    The fake source paints each image with its own position, so the
+    value that comes back says which one was actually read.
+    """
+    x, _ = dataset[len(dataset) + 1]
+
+    assert float(x.max()) == 101.0
 
 
 def test_source_is_reachable_for_evaluation(dataset):
