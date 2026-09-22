@@ -14,6 +14,8 @@ import numpy as np
 import pytest
 import torch
 
+from materials_vision.augmentation import (AugmentationPolicy,
+                                           OrientationConfig, PolicyConfig)
 from materials_vision.training import (BATCH_SIZE, DECODER_LEARNING_RATE,
                                        FREEZE_PARTS, LORA_LEARNING_RATE,
                                        LORA_RANK, N_OBJECTS_PER_BATCH,
@@ -26,6 +28,11 @@ class _FakeRecord:
     def __init__(self, index):
         self.index = index
         self.image_id = f"img_{index}"
+        # The two fields a real policy reads off the record: how far
+        # this image may be magnified is a property of the image, not
+        # of the policy.
+        self.scale_bin = "coarse"
+        self.q_max_i = 1.30
 
 
 class _FakeSample:
@@ -203,12 +210,21 @@ def test_augmentation_differs_between_epochs_across_worker_processes():
     assert first != second
 
 
-def test_image_order_survives_a_policy_that_draws_heavily():
+def test_image_order_survives_a_policy_that_draws_heavily(
+    single_process_loading,
+):
     """Paired comparisons rest on this, and it is checked end to end.
 
     The sampler's own stream is tested in isolation elsewhere; what
     matters for the study is that the loader actually uses it, which
     only a test built through the loader can show.
+
+    Loading happens in this process because the record of which images
+    were read lives on the source, and worker processes each hold their
+    own copy of it: with workers, both sides of the comparison come back
+    empty and the assertion passes without having looked at anything.
+    Nothing is lost by it, since the order is drawn in this process
+    either way.
     """
     def order_with(policy):
         torch.manual_seed(0)
@@ -221,7 +237,41 @@ def test_image_order_survives_a_policy_that_draws_heavily():
         list(loader)
         return list(source.loaded)
 
-    assert order_with(None) == order_with(_SeedIntoPixels())
+    unaugmented = order_with(None)
+    # Both sides come back empty if nothing was read, and two empty
+    # lists compare equal, so the comparison is only worth making once
+    # the order is known to cover the source.
+    assert sorted(unaugmented) == list(range(8))
+    assert unaugmented == order_with(_SeedIntoPixels())
+
+
+def test_image_order_survives_the_orientation_policy(
+    single_process_loading,
+):
+    """The same check, closed with the policy that will actually run.
+
+    The test above makes the point with a stand-in, which draws no
+    random numbers of its own; this one uses the real family, which
+    draws one element of the group per sample from its own generator.
+    The first comparison of the study is between a run under this policy
+    and a baseline run at the same seed, and it attributes their
+    difference to the policy - which is only true if the two saw the
+    same images in the same order.
+    """
+    def order_with(policy):
+        source = _FakeSource(n_images=8)
+        loader = build_loader(
+            source, policy=policy, run_seed=20260907, shuffle=True,
+        )
+        list(loader)
+        return list(source.loaded)
+
+    policy = AugmentationPolicy(
+        PolicyConfig(orientation=OrientationConfig())
+    )
+    unaugmented = order_with(None)
+    assert sorted(unaugmented) == list(range(8))
+    assert unaugmented == order_with(policy)
 
 
 def test_the_shared_encoder_reaches_only_one_parameter_group():
