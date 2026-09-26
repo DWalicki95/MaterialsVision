@@ -56,8 +56,8 @@ from skimage.measure import regionprops
 
 from materials_vision.data.instances import border_instance_labels
 from materials_vision.evaluation.matching import InstanceMatch
-from materials_vision.quantitative_analysis.quantitative_analysis import (
-    PoreMorphologyMetrics)
+from materials_vision.quantitative_analysis.quantitative_analysis import \
+    PoreMorphologyMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +139,12 @@ class PairShapeError:
     pred_id : int
     diameter_error : float
         ``|d_pred - d_gt| / d_gt``, dimensionless.
+    diameter_log_ratio : float
+        ``log(d_pred / d_gt)``: the same drift with its direction kept.
+        Positive when the prediction is larger. The logarithm makes a
+        pore drawn twice as large and one drawn half as large equally
+        far from zero, which a plain ratio does not, so a median of it
+        is not pulled towards over-sizing.
     elongation_error : float
         ``|R_pred - R_gt| / R_gt``, dimensionless; ``nan`` when either
         side is too degenerate for an ellipse.
@@ -151,6 +157,7 @@ class PairShapeError:
     gt_id: int
     pred_id: int
     diameter_error: float
+    diameter_log_ratio: float
     elongation_error: float
     angle_error_deg: float
 
@@ -193,6 +200,20 @@ class ShapeErrors:
             ``nan`` when no pair was usable.
         """
         return self._median("diameter_error")
+
+    @property
+    def median_diameter_log_ratio(self) -> float:
+        """Typical signed drift in pore diameter, as a log ratio.
+
+        Zero when matched pores are drawn neither larger nor smaller
+        than annotated; the foreground threshold is calibrated to it.
+
+        Returns
+        -------
+        float
+            ``nan`` when no pair was usable.
+        """
+        return self._median("diameter_log_ratio")
 
     @property
     def median_elongation_error(self) -> float:
@@ -354,6 +375,10 @@ def shape_errors(
                 gt_shapes.equivalent_diameter_um[gt_index],
                 pred_shapes.equivalent_diameter_um[pred_index],
             ),
+            diameter_log_ratio=_log_ratio(
+                gt_shapes.equivalent_diameter_um[gt_index],
+                pred_shapes.equivalent_diameter_um[pred_index],
+            ),
             elongation_error=elongation_error,
             angle_error_deg=angle_error,
         ))
@@ -374,6 +399,15 @@ def _relative_error(reference: float, measured: float) -> float:
     if reference == 0:
         return float("nan")
     return float(abs(measured - reference) / reference)
+
+
+def _log_ratio(reference: float, measured: float) -> float:
+    """Signed drift from a reference, as a natural-log ratio."""
+    if not np.isfinite(reference) or not np.isfinite(measured):
+        return float("nan")
+    if reference <= 0 or measured <= 0:
+        return float("nan")
+    return float(np.log(measured / reference))
 
 
 def _axial_angle_error(

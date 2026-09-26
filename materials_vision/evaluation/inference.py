@@ -95,6 +95,7 @@ def build_segmenter(
     model_type: str,
     peft_kwargs: dict[str, Any],
     default_rank: int,
+    device: Optional[str] = None,
 ) -> Any:
     """Load a trained checkpoint as an automatic instance segmenter.
 
@@ -109,6 +110,10 @@ def build_segmenter(
         Its rank is replaced by the one read from the weights.
     default_rank : int
         Used only when the checkpoint carries no correction.
+    device : str, optional
+        ``None`` lets the library pick, which means the GPU when one is
+        visible. Forcing the CPU keeps a check off a GPU that a training
+        run is using to the last gigabyte.
 
     Returns
     -------
@@ -126,13 +131,16 @@ def build_segmenter(
     predictor, decoder = get_predictor_and_decoder(
         model_type=model_type,
         checkpoint_path=str(checkpoint),
+        device=device,
         peft_kwargs=rebuilt,
     )
     return InstanceSegmentationWithDecoder(predictor, decoder)
 
 
 def segment(
-    segmenter: Any, settings: WatershedParams = FROZEN_WATERSHED
+    segmenter: Any,
+    settings: WatershedParams = FROZEN_WATERSHED,
+    pixel_size_um: Optional[float] = None,
 ) -> np.ndarray:
     """Grow instances from decoder output that is already computed.
 
@@ -146,19 +154,75 @@ def segment(
     segmenter : InstanceSegmentationWithDecoder
         Already initialized on the image.
     settings : WatershedParams, optional
+    pixel_size_um : float, optional
+        The image's pixel size. Required when the setting filters by
+        physical area, and unused otherwise.
 
     Returns
     -------
     np.ndarray
-        Instance labels on the same frame, background zero.
+        Instance labels on the same frame, background zero, numbered
+        consecutively from one.
+
+    Raises
+    ------
+    ValueError
+        If the setting filters by physical area and no pixel size is
+        given, which would otherwise have to be guessed.
     """
     segmentation = segmenter.generate(
-        output_mode="instance_segmentation", **settings.to_kwargs()
+        output_mode="instance_segmentation", **settings.library_kwargs()
     )
     # The watershed hands back floating-point labels. They are whole
     # numbers, but an identifier that can be compared for equality
     # should not be a float, and the metrics count on integers.
-    return np.asarray(segmentation).astype(np.int32)
+    labels = np.asarray(segmentation).astype(np.int32)
+    if settings.min_instance_area_um2 <= 0:
+        return labels
+    if pixel_size_um is None:
+        raise ValueError(
+            "This setting drops instances below "
+            f"{settings.min_instance_area_um2:g} um2, which needs the "
+            "image's pixel size."
+        )
+    return drop_small_instances(
+        labels, settings.min_instance_area_um2, pixel_size_um
+    )
+
+
+def drop_small_instances(
+    labels: np.ndarray, min_area_um2: float, pixel_size_um: float
+) -> np.ndarray:
+    """Remove instances smaller than a physical area.
+
+    Parameters
+    ----------
+    labels : np.ndarray
+        ``(H, W)`` instance labels, background zero. Not modified.
+    min_area_um2 : float
+    pixel_size_um : float
+        Micrometres per pixel of this image.
+
+    Returns
+    -------
+    np.ndarray
+        A new label image, the surviving instances renumbered
+        consecutively from one in their original order.
+
+    Raises
+    ------
+    ValueError
+        For a pixel size that is not positive.
+    """
+    if pixel_size_um <= 0:
+        raise ValueError(f"Pixel size must be positive, got {pixel_size_um}.")
+    min_area_px = min_area_um2 / pixel_size_um ** 2
+    areas_px = np.bincount(labels.ravel())
+    keep = areas_px >= min_area_px
+    keep[0] = False
+    renumbered = np.zeros(areas_px.size, dtype=np.int32)
+    renumbered[keep] = np.arange(1, int(keep.sum()) + 1, dtype=np.int32)
+    return renumbered[labels]
 
 
 def score_settings(
@@ -206,7 +270,10 @@ def score_settings(
         for setting in settings:
             measured[setting].append(evaluate_image(
                 prepared.record, prepared.labels,
-                segment(segmenter, setting),
+                segment(
+                    segmenter, setting,
+                    pixel_size_um=prepared.record.pixel_size_um,
+                ),
                 size_bins=size_bins,
                 boundary_scales=boundary_scales,
             ))

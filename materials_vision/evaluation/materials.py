@@ -75,10 +75,11 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.stats import wasserstein_distance
 
+from materials_vision.evaluation.ground_truth import areal_porosity
 from materials_vision.evaluation.shape import (ANGLE_ELONGATION_THRESHOLD,
                                                InstanceShapes)
-from materials_vision.quantitative_analysis.quantitative_analysis import (
-    GlobalMicrostructureDescriptors)
+from materials_vision.quantitative_analysis.quantitative_analysis import \
+    GlobalMicrostructureDescriptors
 
 logger = logging.getLogger(__name__)
 
@@ -302,8 +303,8 @@ def porosity_error(
     """
     _validate_pair(gt_labels, pred_labels)
 
-    gt = float(np.count_nonzero(gt_labels)) / gt_labels.size
-    pred = float(np.count_nonzero(pred_labels)) / pred_labels.size
+    gt = areal_porosity(gt_labels)
+    pred = areal_porosity(pred_labels)
     error_pp = (pred - gt) * PERCENTAGE_POINTS
     return PorosityError(
         gt=gt, pred=pred,

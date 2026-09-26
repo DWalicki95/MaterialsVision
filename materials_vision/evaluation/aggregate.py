@@ -59,8 +59,8 @@ from materials_vision.evaluation.materials import (AreaNumberDensity,
                                                    porosity_error)
 from materials_vision.evaluation.shape import (InstanceShapes, ShapeErrors,
                                                instance_shapes, shape_errors)
-from materials_vision.evaluation.size_bins import (SIZE_BIN_LABELS, SizeBins,
-                                                   SizeBinRecall,
+from materials_vision.evaluation.size_bins import (SIZE_BIN_LABELS,
+                                                   SizeBinRecall, SizeBins,
                                                    recall_per_size_bin)
 
 logger = logging.getLogger(__name__)
@@ -166,6 +166,11 @@ class AggregateResult:
     median_angle_error_deg : float
         Per-pair shape errors, pooled as medians over every usable
         pair in the subset.
+    median_diameter_log_ratio : float
+        Signed per-pair diameter drift, ``log(d_pred / d_gt)``, pooled
+        as a median. Unlike the pooled diameter distributions below it
+        is blind to merges, splits and fragments, which form no pairs,
+        so it isolates how large the model draws the pores it finds.
     n_shape_pairs : int
         Pairs those medians rest on, after border pairs were dropped.
     wasserstein_um : float
@@ -208,6 +213,7 @@ class AggregateResult:
     median_diameter_error: float
     median_elongation_error: float
     median_angle_error_deg: float
+    median_diameter_log_ratio: float
     n_shape_pairs: int
     wasserstein_um: float
     median_diameter_drift_um: float
@@ -435,6 +441,9 @@ def _assemble(
         ),
         median_angle_error_deg=_median_of(
             [pair.angle_error_deg for pair in pairs]
+        ),
+        median_diameter_log_ratio=_median_of(
+            [pair.diameter_log_ratio for pair in pairs]
         ),
         n_shape_pairs=len(pairs),
         wasserstein_um=distribution.wasserstein_um,

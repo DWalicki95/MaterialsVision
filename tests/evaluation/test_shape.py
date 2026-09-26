@@ -12,8 +12,8 @@ import pytest
 from materials_vision.evaluation.matching import (InstanceMatch, MatchedPair,
                                                   match_instances)
 from materials_vision.evaluation.shape import (ANGLE_ELONGATION_THRESHOLD,
-                                               InstanceShapes,
-                                               instance_shapes, shape_errors)
+                                               InstanceShapes, instance_shapes,
+                                               shape_errors)
 
 FRAME = (80, 80)
 
@@ -96,6 +96,26 @@ def test_a_shrunken_prediction_reports_a_diameter_error():
     errors = _errors(gt, pred)
 
     assert errors.pairs[0].diameter_error == pytest.approx(0.1, abs=0.01)
+
+
+def test_the_signed_diameter_drift_keeps_its_direction():
+    gt = _centred_square(half=10)
+
+    shrunk = _errors(gt, _centred_square(half=9)).pairs[0]
+    grown = _errors(gt, _centred_square(half=11)).pairs[0]
+
+    # Equivalent diameter scales with the side, so the ratios are exact.
+    assert shrunk.diameter_log_ratio == pytest.approx(np.log(0.9))
+    assert grown.diameter_log_ratio == pytest.approx(np.log(1.1))
+
+
+def test_identical_masks_have_no_signed_drift():
+    gt = _centred_square(half=10)
+
+    errors = _errors(gt, gt.copy())
+
+    assert errors.pairs[0].diameter_log_ratio == pytest.approx(0.0)
+    assert errors.median_diameter_log_ratio == pytest.approx(0.0)
 
 
 def test_a_rounded_prediction_reports_an_elongation_error():

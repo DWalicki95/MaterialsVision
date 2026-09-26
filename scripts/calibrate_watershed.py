@@ -54,16 +54,17 @@ import argparse
 import itertools
 import json
 import logging
-import math
 import sys
 import time
 from pathlib import Path
 from typing import Optional
 
-from materials_vision.evaluation import (DECISION_SCALE, AggregateResult,
-                                         WatershedParams, aggregate)
+from materials_vision.evaluation import (AggregateResult, WatershedParams,
+                                         aggregate)
 from materials_vision.evaluation.inference import (build_segmenter,
                                                    score_settings)
+from materials_vision.evaluation.postprocessing_calibration import (
+    boundary_at_decision_scale, f1_noise, rank_key)
 from materials_vision.evaluation.size_bins import load_size_bins
 from materials_vision.logging_config import setup_logging
 from materials_vision.provenance import run_provenance
@@ -128,100 +129,6 @@ def grid(
             center_thresholds, boundary_thresholds
         )
     ]
-
-
-def boundary_at_decision_scale(result: AggregateResult) -> float:
-    """Boundary agreement at the one tolerance decisions are made on.
-
-    The metric reports agreement per tolerance, as a mapping, because
-    how sensitive a result is to the tolerance is itself worth seeing.
-    Only one of them takes part in choosing anything, and reading the
-    mapping as though it were a number is a mistake that stays hidden
-    until two settings tie on the primary metric.
-
-    Parameters
-    ----------
-    result : AggregateResult
-
-    Returns
-    -------
-    float
-        Zero if the result was scored without that tolerance, which
-        makes the tie-break inert rather than fatal.
-    """
-    return float(result.boundary_f1.get(DECISION_SCALE, 0.0))
-
-
-def f1_noise(result: AggregateResult) -> float:
-    """Roughly how much this F1 would move on another sample this size.
-
-    Treating F1 as a proportion over the annotated instances is an
-    approximation - it is a ratio of two counts that move together -
-    but it gives the right order of magnitude, which is all that is
-    needed to tell a real difference from a coin flip. On the default
-    subsample it comes to about eight thousandths.
-
-    Parameters
-    ----------
-    result : AggregateResult
-
-    Returns
-    -------
-    float
-    """
-    if result.n_gt < 1:
-        return 0.0
-    share = min(max(result.f1, 0.0), 1.0)
-    return math.sqrt(share * (1.0 - share) / result.n_gt)
-
-
-def rank_key(
-    result: AggregateResult, tolerance: float
-) -> tuple[float, float, float, float]:
-    """Sort key implementing the study's choice rule.
-
-    Instance F1 decides, but only where it decides anything. The grid
-    is flat near its top - several settings land within a thousandth of
-    each other, which is an order of magnitude below what a different
-    sample of images would produce - so comparing those raw would pick
-    a winner out of noise, and would do it at whichever end of the grid
-    the noise happened to favour. F1 is therefore read in bands the
-    width of its own uncertainty.
-
-    **Ties are settled on the pore count, not on wall agreement.** The
-    study breaks ties between checkpoints by wall agreement first, but
-    that rule is for choosing a model at a fixed threshold and it does
-    not transfer to choosing a threshold at a fixed model. Wall
-    agreement rises monotonically as the threshold seeds more freely -
-    measured across this grid it climbs from 0.814 to 0.820 as both
-    thresholds rise - because every extra instance draws extra wall.
-    Using it here would push the choice to whichever end of the grid
-    splits most, regardless of whether those instances are real. What
-    a threshold actually controls is how many instances appear, so how
-    far the count is off decides, and then how lopsided the remaining
-    errors are between merging and splitting. Wall agreement stays as
-    a last resort.
-
-    Parameters
-    ----------
-    result : AggregateResult
-    tolerance : float
-        Width of a band. Differences smaller than this are not
-        differences.
-
-    Returns
-    -------
-    tuple of float
-        Negated where smaller is better, so that sorting descending
-        puts the best first.
-    """
-    band = result.f1 if tolerance <= 0 else round(result.f1 / tolerance)
-    return (
-        band,
-        -abs(result.pore_count_error),
-        -abs(result.merges_per_100_gt - result.splits_per_100_gt),
-        boundary_at_decision_scale(result),
-    )
 
 
 def spaced_positions(n_available: int, n_wanted: int) -> list[int]:

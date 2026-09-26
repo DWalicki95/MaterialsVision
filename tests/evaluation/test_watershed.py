@@ -73,7 +73,7 @@ def test_nothing_is_filtered_out_of_a_prediction_by_size():
 
 
 def test_the_setting_renders_as_the_segmenter_expects_it():
-    kwargs = FROZEN_WATERSHED.to_kwargs()
+    kwargs = FROZEN_WATERSHED.library_kwargs()
 
     assert kwargs["center_distance_threshold"] == 0.30
     assert set(kwargs) == {
@@ -81,6 +81,19 @@ def test_the_setting_renders_as_the_segmenter_expects_it():
         "foreground_threshold", "foreground_smoothing",
         "distance_smoothing", "min_size",
     }
+
+
+def test_the_physical_area_filter_is_not_handed_to_the_library():
+    setting = WatershedParams(min_instance_area_um2=200.0)
+
+    assert "min_instance_area_um2" in setting.to_kwargs()
+    assert "min_instance_area_um2" not in setting.library_kwargs()
+
+
+def test_the_frozen_setting_filters_no_physical_area_yet():
+    # The derived value enters the frozen setting only when part I of
+    # the optimization freezes the post-processing as a whole.
+    assert FROZEN_WATERSHED.min_instance_area_um2 == 0.0
 
 
 def test_the_frozen_setting_is_labelled_as_such():
@@ -163,3 +176,17 @@ def test_a_setting_can_be_used_as_a_dictionary_key():
 
     with pytest.raises(Exception):
         FROZEN_WATERSHED.center_distance_threshold = 0.5
+
+
+def test_the_deployed_setting_is_the_frozen_seeding_with_its_filter():
+    from materials_vision.evaluation.watershed import (
+        DEPLOYED_POSTPROCESSING, MIN_INSTANCE_AREA_FROZEN_SEEDING_UM2,
+        POSTPROCESSING_CONFIGS)
+
+    assert DEPLOYED_POSTPROCESSING.library_kwargs() == (
+        FROZEN_WATERSHED.library_kwargs()
+    )
+    assert DEPLOYED_POSTPROCESSING.min_instance_area_um2 == (
+        MIN_INSTANCE_AREA_FROZEN_SEEDING_UM2
+    )
+    assert POSTPROCESSING_CONFIGS["deployed"] is DEPLOYED_POSTPROCESSING
