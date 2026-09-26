@@ -16,7 +16,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Sequence
 
 import pandas as pd
 
@@ -234,6 +234,68 @@ def load_split(
         subset=subset,
         table=used,
         n_excluded_unused=n_excluded,
+    )
+
+
+def merge_subsets(parts: Sequence[SplitSubset]) -> SplitSubset:
+    """Join several subsets of one split into a single one.
+
+    Exists for the model trained once every decision has been made on
+    VALIDATION. With nothing left to choose, VALIDATION is no longer
+    needed as a judge and becomes more training material, so that model
+    learns from TRAIN and VALIDATION together.
+
+    TEST is refused outright rather than merely logged. Merged into a
+    training set it would leave nothing unseen to measure the result
+    on, and it would do so silently, because a merged subset looks like
+    any other.
+
+    Parameters
+    ----------
+    parts : sequence of SplitSubset
+        Subsets of the same split, each given once.
+
+    Returns
+    -------
+    SplitSubset
+        Named after its parts joined by ``+``, e.g. ``"train+val"``,
+        with the rows re-sorted by ``image_id`` so that the order does
+        not depend on the order the parts were given in.
+
+    Raises
+    ------
+    LockedTestSetError
+        If any part is TEST.
+    SplitLoadError
+        If no part is given, if the parts come from different splits,
+        or if an image appears in more than one part.
+    """
+    if not parts:
+        raise SplitLoadError("Nothing to merge: no subset was given")
+    if any(part.subset == "test" for part in parts):
+        raise LockedTestSetError(
+            "TEST cannot be merged into another subset. It is the only "
+            "set no model has seen, and training on it would leave "
+            "nothing to measure the result on."
+        )
+    split_ids = {part.split_id for part in parts}
+    if len(split_ids) > 1:
+        raise SplitLoadError(
+            f"Cannot merge subsets of different splits: {sorted(split_ids)}"
+        )
+
+    table = pd.concat([part.table for part in parts], ignore_index=True)
+    repeated = table.loc[table["image_id"].duplicated(), "image_id"]
+    if not repeated.empty:
+        raise SplitLoadError(
+            f"Image(s) present in more than one subset: "
+            f"{sorted(set(repeated))}"
+        )
+    return SplitSubset(
+        split_id=split_ids.pop(),
+        subset="+".join(part.subset for part in parts),
+        table=table.sort_values("image_id").reset_index(drop=True),
+        n_excluded_unused=sum(part.n_excluded_unused for part in parts),
     )
 
 

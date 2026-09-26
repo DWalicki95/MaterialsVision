@@ -16,7 +16,8 @@ from materials_vision.data.samples import (PreparedSample, SampleRecord,
 from materials_vision.data.sampling import (ProportionalImageSampler,
                                             sampler_run_metadata)
 from materials_vision.data.split_io import (LockedTestSetError, SplitLoadError,
-                                            SplitSubset, load_split)
+                                            SplitSubset, load_split,
+                                            merge_subsets)
 
 __all__ = [
     "CroppedSample",
@@ -34,6 +35,7 @@ __all__ = [
     "build_label_transform",
     "load_instance_mask",
     "load_split",
+    "merge_subsets",
     "read_manifest",
     "sampler_run_metadata",
 ]

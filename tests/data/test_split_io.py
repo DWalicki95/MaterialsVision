@@ -1,8 +1,10 @@
 """Tests for reading the frozen split and for the TEST lock."""
+import dataclasses
+
 import pytest
 
 from materials_vision.data.split_io import (LockedTestSetError, SplitLoadError,
-                                            load_split)
+                                            load_split, merge_subsets)
 
 
 def test_train_subset_is_loaded_and_sorted(split_csv):
@@ -107,3 +109,58 @@ def test_exposure_on_an_unknown_column_is_refused(split_csv):
 
     with pytest.raises(SplitLoadError, match="not in the split table"):
         subset.exposure("nonexistent")
+
+
+def test_merged_subsets_hold_every_image_of_both(split_csv):
+    train = load_split(split_csv, "train")
+    val = load_split(split_csv, "val")
+
+    merged = merge_subsets([train, val])
+
+    assert merged.subset == "train+val"
+    assert merged.split_id == train.split_id
+    assert len(merged) == len(train) + len(val)
+    assert set(merged.image_ids) == (
+        set(train.image_ids) | set(val.image_ids)
+    )
+    assert merged.image_ids == tuple(sorted(merged.image_ids))
+
+
+def test_order_of_the_parts_does_not_change_the_rows(split_csv):
+    train = load_split(split_csv, "train")
+    val = load_split(split_csv, "val")
+
+    forward = merge_subsets([train, val])
+    backward = merge_subsets([val, train])
+
+    assert forward.image_ids == backward.image_ids
+
+
+def test_merging_test_is_refused(split_csv):
+    train = load_split(split_csv, "train")
+    test = load_split(split_csv, "test", allow_test=True)
+
+    with pytest.raises(LockedTestSetError, match="cannot be merged"):
+        merge_subsets([train, test])
+
+
+def test_merging_one_subset_twice_is_refused(split_csv):
+    train = load_split(split_csv, "train")
+
+    with pytest.raises(SplitLoadError, match="more than one subset"):
+        merge_subsets([train, train])
+
+
+def test_merging_subsets_of_different_splits_is_refused(split_csv):
+    train = load_split(split_csv, "train")
+    val = dataclasses.replace(
+        load_split(split_csv, "val"), split_id="another_split"
+    )
+
+    with pytest.raises(SplitLoadError, match="different splits"):
+        merge_subsets([train, val])
+
+
+def test_merging_nothing_is_refused():
+    with pytest.raises(SplitLoadError, match="Nothing to merge"):
+        merge_subsets([])
