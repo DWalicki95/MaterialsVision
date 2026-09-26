@@ -92,8 +92,9 @@ resolution that every visibility criterion in this study was calibrated
 against.
 """
 import logging
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 import torch
 from micro_sam.models.peft_sam import LoRASurgery
@@ -101,11 +102,15 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
 from materials_vision.data import (ProportionalImageSampler, SampleSource,
-                                   load_split, read_manifest)
+                                   load_split, merge_subsets, read_manifest)
 from materials_vision.data.dataset import (InstanceSegmentationDataset,
                                            build_label_transform)
 from materials_vision.sam_geometry import (patch_resize_longest_side,
                                            verify_preprocess_geometry)
+from materials_vision.tracking import (CHECKPOINT_DIR_TAG, RunTracking,
+                                       checkpoint_dir_tag, configure_tracking,
+                                       ensure_experiment)
+from materials_vision.training_logger import MlflowJointSamLogger
 
 logger = logging.getLogger(__name__)
 
@@ -217,22 +222,36 @@ def prepare_geometry() -> None:
 
 
 def build_source(
-    split_csv: Path, manifest_csv: Path, subset: str
+    split_csv: Path,
+    manifest_csv: Path,
+    subset: str,
+    *,
+    allow_test: bool = False,
 ) -> SampleSource:
-    """Open one subset of the frozen split for reading.
+    """Open one subset of the frozen split, or several joined, for reading.
 
     Parameters
     ----------
     split_csv, manifest_csv : Path
     subset : str
-        ``"train"`` or ``"val"``. The test set is deliberately not
-        reachable through here.
+        ``"train"`` or ``"val"``, or several joined by ``"+"``:
+        ``"train+val"`` is what the model trained after every choice
+        has been made on VALIDATION learns from. ``"test"`` is reachable
+        only with ``allow_test`` and is never joined to anything.
+    allow_test : bool, optional
+        Handed to the lock on TEST, which lives with the split reader
+        rather than here so that no loader can route around it. Only
+        the single, final evaluation sets it.
 
     Returns
     -------
     SampleSource
     """
-    split = load_split(split_csv, subset=subset)
+    parts = [
+        load_split(split_csv, subset=name, allow_test=allow_test)
+        for name in subset.split("+")
+    ]
+    split = parts[0] if len(parts) == 1 else merge_subsets(parts)
     manifest = read_manifest(manifest_csv)
     return SampleSource(
         split, manifest, min_fragment_area_px2=A_MIN_FRAGMENT_PX2
@@ -405,11 +424,13 @@ def train_run(
     lora_learning_rate: float = LORA_LEARNING_RATE,
     decoder_learning_rate: float = DECODER_LEARNING_RATE,
     lora_rank: int = LORA_RANK,
+    update_matrices: Optional[Sequence[str]] = None,
     scheduler_horizon_epochs: Optional[int] = None,
     decoder_batchnorm_momentum: Optional[float] = None,
     early_stopping: Optional[int] = None,
     save_every_kth_epoch: Optional[int] = None,
     device: Optional[str] = None,
+    tracking: Optional[RunTracking] = None,
 ) -> None:
     """Run one fine-tuning to completion.
 
@@ -431,6 +452,12 @@ def train_run(
        the duration of training by default. This project has already
        lost weeks to a defect that produced no error, so the warnings
        are left where they can be read.
+
+    With ``tracking`` given, the trainer's logger is additionally
+    replaced by one that writes to MLflow as well as to TensorBoard.
+    It only reads what the trainer hands it, plus one extra forward
+    pass per epoch on a validation image under ``no_grad``, so it does
+    not change what a run learns.
 
     The geometry correction is installed here rather than left to the
     caller, because it has to be in place before the model exists and
@@ -460,6 +487,9 @@ def train_run(
         probed the way the learning rates were, on a short run, without
         editing the frozen configuration. Every comparison that
         attributes anything must leave it at the default.
+    update_matrices : sequence of str, optional
+        Attention projections that receive the correction. ``None``
+        keeps the frozen choice, the query and value projections.
     scheduler_horizon_epochs : int, optional
         Epochs the rate is annealed over. Defaults to the run's own
         length; a run meant to be stopped early and resumed later has
@@ -483,6 +513,9 @@ def train_run(
         computed afterwards, on every snapshot, and the best one
         picked by it.
     device : str, optional
+    tracking : RunTracking, optional
+        Record the run in MLflow as it trains. ``None`` records it in
+        TensorBoard only, as every run before this option existed was.
     """
     import torch_em
     from micro_sam.instance_segmentation import get_unetr
@@ -499,6 +532,8 @@ def train_run(
 
     peft_kwargs = dict(PEFT_KWARGS)
     peft_kwargs["rank"] = lora_rank
+    if update_matrices is not None:
+        peft_kwargs["update_matrices"] = list(update_matrices)
     resolved_device = get_device(device)
     model, state = get_trainable_sam_model(
         model_type=model_type,
@@ -553,7 +588,7 @@ def train_run(
         lr_scheduler=CosineAnnealingIgnoringMetric(
             optimizer, T_max=horizon
         ),
-        logger=JointSamLogger,
+        logger=JointSamLogger if tracking is None else MlflowJointSamLogger,
         log_image_interval=LOG_IMAGE_INTERVAL,
         mixed_precision=True,
         convert_inputs=ConvertToSamInputs(
@@ -574,4 +609,130 @@ def train_run(
     }
     if save_every_kth_epoch is not None:
         fit_kwargs["save_every_kth_epoch"] = save_every_kth_epoch
-    trainer.fit(**fit_kwargs)
+    if tracking is None:
+        trainer.fit(**fit_kwargs)
+        return
+    params = training_params(
+        model_type=model_type,
+        n_epochs=n_epochs,
+        steps_per_epoch=len(train_loader),
+        n_val_images=len(val_loader),
+        peft_kwargs=peft_kwargs,
+        lora_learning_rate=lora_learning_rate,
+        decoder_learning_rate=decoder_learning_rate,
+        scheduler_horizon_epochs=horizon,
+        decoder_batchnorm_momentum=decoder_batchnorm_momentum,
+        early_stopping=early_stopping,
+        n_lora_parameters=sum(p.numel() for p in correction),
+        n_decoder_parameters=sum(p.numel() for p in decoder),
+    )
+    checkpoint_dir = Path(save_root) / "checkpoints" / name
+    with tracked_run(name, checkpoint_dir, tracking, params):
+        trainer.fit(**fit_kwargs)
+
+
+def training_params(
+    *,
+    model_type: str,
+    n_epochs: int,
+    steps_per_epoch: int,
+    n_val_images: int,
+    peft_kwargs: dict[str, Any],
+    lora_learning_rate: float,
+    decoder_learning_rate: float,
+    scheduler_horizon_epochs: int,
+    decoder_batchnorm_momentum: Optional[float],
+    early_stopping: Optional[int],
+    n_lora_parameters: int,
+    n_decoder_parameters: int,
+) -> dict[str, Any]:
+    """Everything that defines a run, as the flat record MLflow keeps.
+
+    The fixed values of this module are included alongside the ones a
+    caller passed, so a run's page states its full configuration rather
+    than only what differed from a default a reader would have to look
+    up - and so that a change to a default shows up as a difference
+    between two runs' parameters.
+
+    Returns
+    -------
+    dict of str to Any
+    """
+    return {
+        "model_type": model_type,
+        "n_epochs": n_epochs,
+        "steps_per_epoch": steps_per_epoch,
+        "n_val_images": n_val_images,
+        "lora_rank": peft_kwargs["rank"],
+        "lora_update_matrices": ",".join(peft_kwargs["update_matrices"]),
+        "lora_attention_layers": (
+            ",".join(map(str, peft_kwargs["attention_layers_to_update"]))
+            or "all"
+        ),
+        "lora_learning_rate": lora_learning_rate,
+        "decoder_learning_rate": decoder_learning_rate,
+        "scheduler": "cosine",
+        "scheduler_horizon_epochs": scheduler_horizon_epochs,
+        "decoder_batchnorm_momentum": decoder_batchnorm_momentum,
+        "early_stopping": early_stopping,
+        "freeze_parts": ",".join(FREEZE_PARTS),
+        "batch_size": BATCH_SIZE,
+        "n_objects_per_batch": N_OBJECTS_PER_BATCH,
+        "n_sub_iteration": N_SUB_ITERATION,
+        "mask_prob": MASK_PROB,
+        "box_distortion_factor": BOX_DISTORTION_FACTOR,
+        "min_fragment_area_px2": A_MIN_FRAGMENT_PX2,
+        "n_lora_parameters": n_lora_parameters,
+        "n_decoder_parameters": n_decoder_parameters,
+    }
+
+
+@contextmanager
+def tracked_run(
+    name: str,
+    checkpoint_dir: Path,
+    tracking: RunTracking,
+    params: dict[str, Any],
+) -> Iterator[str]:
+    """Open the MLflow run a training writes into.
+
+    The checkpoint directory is stored as a tag: it is what scoring the
+    snapshots later has in hand, and it is how that scoring finds this
+    run to add the instance metrics to.
+
+    Parameters
+    ----------
+    name : str
+    checkpoint_dir : Path
+    tracking : RunTracking
+    params : dict
+        From :func:`training_params`.
+
+    Yields
+    ------
+    str
+        The run's identifier.
+    """
+    import mlflow
+
+    configure_tracking()
+    experiment_id = ensure_experiment(tracking.experiment)
+    tags = {
+        **dict(tracking.tags),
+        CHECKPOINT_DIR_TAG: checkpoint_dir_tag(checkpoint_dir),
+    }
+    with mlflow.start_run(
+        experiment_id=experiment_id, run_name=name, tags=tags,
+        log_system_metrics=True,
+    ) as run:
+        mlflow.log_params({**params, **dict(tracking.params)})
+        for artifact in tracking.artifacts:
+            mlflow.log_artifact(str(artifact), artifact_path="provenance")
+        logger.info(
+            "Recording %r in MLflow experiment %r as run %s.",
+            name, tracking.experiment, run.info.run_id,
+        )
+        yield run.info.run_id
+        # Asynchronous step metrics are flushed before the run is closed,
+        # or the last steps of the run would be missing from its curves.
+        mlflow.flush_async_logging()

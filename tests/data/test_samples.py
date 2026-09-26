@@ -86,6 +86,65 @@ def source(tmp_path, dataset_on_disk, split_csv):
     )
 
 
+@pytest.fixture
+def files_on_disk(tmp_path, dataset_on_disk, split_csv):
+    """The split and the manifest as the training entry point reads
+    them: two files, rather than objects already in memory."""
+    manifest, updated_split = dataset_on_disk
+    updated_split.to_csv(split_csv, index=False)
+    manifest_csv = tmp_path / "manifest.csv"
+    manifest.to_csv(manifest_csv, index=False)
+    return split_csv, manifest_csv
+
+
+def test_training_source_can_join_train_and_val(files_on_disk):
+    from materials_vision.training import build_source
+
+    split_csv, manifest_csv = files_on_disk
+
+    train = build_source(split_csv, manifest_csv, "train")
+    val = build_source(split_csv, manifest_csv, "val")
+    joined = build_source(split_csv, manifest_csv, "train+val")
+
+    assert len(joined) == len(train) + len(val)
+    assert {record.image_id for record in joined.records} == (
+        {record.image_id for record in train.records}
+        | {record.image_id for record in val.records}
+    )
+
+
+def test_training_source_keeps_test_locked(files_on_disk):
+    from materials_vision.data.split_io import LockedTestSetError
+    from materials_vision.training import build_source
+
+    split_csv, manifest_csv = files_on_disk
+
+    with pytest.raises(LockedTestSetError, match="TEST is locked"):
+        build_source(split_csv, manifest_csv, "test")
+
+
+def test_training_source_never_joins_test_even_when_unlocked(files_on_disk):
+    from materials_vision.data.split_io import LockedTestSetError
+    from materials_vision.training import build_source
+
+    split_csv, manifest_csv = files_on_disk
+
+    with pytest.raises(LockedTestSetError, match="cannot be merged"):
+        build_source(
+            split_csv, manifest_csv, "train+test", allow_test=True
+        )
+
+
+def test_unlocked_test_source_holds_only_test(files_on_disk):
+    from materials_vision.training import build_source
+
+    split_csv, manifest_csv = files_on_disk
+
+    test = build_source(split_csv, manifest_csv, "test", allow_test=True)
+
+    assert len(test) == 2
+
+
 def test_records_carry_split_and_manifest_facts(source):
     record = source.record(0)
 
