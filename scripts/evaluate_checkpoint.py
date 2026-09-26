@@ -51,6 +51,16 @@ Close-up images are excluded from the figures automatically, and the
 number excluded is reported: they are three to thirteen times finer
 than everything else and are trained on but not scored.
 
+**TEST is scored once, and only snapshots chosen beforehand.** It is
+the one set no decision has touched, which is what makes its figures
+unbiased, so it stays locked until the policy is frozen and has to be
+unlocked by an explicit flag. Even then it accepts a single snapshot
+per run: the snapshot is picked on VALIDATION, before TEST is opened.
+Scoring several epochs of one run on TEST would let TEST pick among
+them, and the figure reported would then be the best of several draws
+on the set meant to measure generalization - optimistic in exactly the
+way the lock exists to prevent.
+
 Examples
 --------
 Score both checkpoints of the base-model pilot (the trainer nests its
@@ -61,6 +71,10 @@ output one directory deeper than the root it is given):
 
 Score one checkpoint quickly, on a fraction of the images:
     $ python scripts/evaluate_checkpoint.py --checkpoint <path> --n-images 12
+
+Score the snapshots chosen on VALIDATION on TEST, once, at the end:
+    $ python scripts/evaluate_checkpoint.py --subset test --unlock-test \\
+        --checkpoint checkpoints/e1/checkpoints/d4_seed20260907/epoch-10.pt
 """
 import argparse
 import json
@@ -68,16 +82,23 @@ import logging
 import re
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
-from materials_vision.evaluation import (DECISION_SCALE, FROZEN_WATERSHED,
-                                         AggregateResult, WatershedParams,
-                                         aggregate, cross_sections,
-                                         load_size_bins, robustness_series)
+from materials_vision.evaluation import (DECISION_SCALE, AggregateResult,
+                                         WatershedParams, aggregate,
+                                         cross_sections, load_size_bins,
+                                         robustness_series)
 from materials_vision.evaluation.inference import (build_segmenter,
                                                    score_settings)
+from materials_vision.evaluation.watershed import POSTPROCESSING_CONFIGS
 from materials_vision.logging_config import setup_logging
+from materials_vision.tracking import (configure_tracking,
+                                       find_run_for_checkpoint_dir,
+                                       log_evaluation_to_run,
+                                       postprocessing_id, snapshot_epoch,
+                                       summarize_curve)
 from materials_vision.training import (LORA_RANK, PEFT_KWARGS, build_source,
                                        prepare_geometry)
 
@@ -132,8 +153,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--split", type=Path, default=DEFAULT_SPLIT)
     parser.add_argument("--size-bins", type=Path, default=DEFAULT_SIZE_BINS)
     parser.add_argument(
-        "--subset", default="val", choices=["train", "val"],
-        help="Which split subset to score on.",
+        "--subset", default="val", choices=["train", "val", "test"],
+        help="Which split subset to score on. TEST needs --unlock-test.",
+    )
+    parser.add_argument(
+        "--unlock-test", action="store_true",
+        help="Open TEST. For the single, final evaluation only, after "
+             "the policy and each run's snapshot have been fixed on "
+             "VALIDATION.",
     )
     parser.add_argument(
         "--n-images", type=int, default=0,
@@ -144,35 +171,69 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Where to write the full figures as JSON.",
     )
     parser.add_argument(
+        "--postprocessing", default="frozen",
+        choices=sorted(POSTPROCESSING_CONFIGS),
+        help=(
+            "Named post-processing to score under. 'frozen' is what the "
+            "augmentation study was scored under; "
+            "'calibrated_2026_09_24' is part I of the optimization "
+            "study. The flags below override single values of it."
+        ),
+    )
+    parser.add_argument(
+        "--also-postprocessing", action="append", default=[],
+        choices=sorted(POSTPROCESSING_CONFIGS),
+        help=(
+            "Score under this named configuration as well, in the same "
+            "pass over the images. Repeatable. Meant for measuring what "
+            "a recalibration changed, on the same predictions."
+        ),
+    )
+    parser.add_argument(
         "--center-distance-threshold", type=float,
-        default=FROZEN_WATERSHED.center_distance_threshold,
+        default=None,
         help="Seed where the predicted distance to a centre is below "
              "this. Lower seeds more selectively and splits fewer pores.",
     )
     parser.add_argument(
         "--boundary-distance-threshold", type=float,
-        default=FROZEN_WATERSHED.boundary_distance_threshold,
+        default=None,
         help="The same for the predicted distance to a boundary.",
     )
     parser.add_argument(
         "--foreground-threshold", type=float,
-        default=FROZEN_WATERSHED.foreground_threshold,
+        default=None,
         help="Predicted foreground probability above which a pixel can "
              "belong to an instance.",
     )
     parser.add_argument(
         "--foreground-smoothing", type=float,
-        default=FROZEN_WATERSHED.foreground_smoothing,
+        default=None,
         help="Blur applied to the foreground map before thresholding.",
     )
     parser.add_argument(
         "--distance-smoothing", type=float,
-        default=FROZEN_WATERSHED.distance_smoothing,
+        default=None,
         help="Blur applied to both distance maps before seeding.",
     )
     parser.add_argument(
-        "--min-size", type=int, default=FROZEN_WATERSHED.min_size,
+        "--min-size", type=int, default=None,
         help="Drop instances smaller than this from the prediction.",
+    )
+    parser.add_argument(
+        "--min-instance-area-um2", type=float,
+        default=None,
+        help="Drop predicted instances below this physical area, "
+             "converted per image from its pixel size. 0 keeps all.",
+    )
+    parser.add_argument(
+        "--no-mlflow", action="store_true",
+        help=(
+            "Do not add the figures to the MLflow runs the checkpoints "
+            "were trained in. They are added by default, one point per "
+            "epoch snapshot, under a name that spells out the watershed "
+            "setting they were read under."
+        ),
     )
     parser.add_argument(
         "--center-threshold-sweep", type=float, nargs="+", default=None,
@@ -227,6 +288,42 @@ def _training_order(path: Path) -> tuple[str, int, str]:
     return (path.parent.name, int(match.group(1)) if match else 0, path.name)
 
 
+def locked_test_reason(args: argparse.Namespace) -> Optional[str]:
+    """Say why TEST may not be scored as asked, or nothing if it may.
+
+    Checked before any model is loaded, so a refused request costs
+    nothing and leaves no partial result behind that could tempt
+    anyone to read it.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        With ``checkpoint`` already resolved to paths.
+
+    Returns
+    -------
+    str or None
+        The reason for refusing, or ``None`` when scoring may go ahead.
+        Always ``None`` for a subset other than TEST.
+    """
+    if args.subset != "test":
+        return None
+    if not args.unlock_test:
+        return (
+            "TEST is locked. Pass --unlock-test, and only for the single "
+            "final evaluation of snapshots already chosen on VALIDATION."
+        )
+    per_run = Counter(path.parent.name for path in args.checkpoint)
+    repeated = sorted(run for run, count in per_run.items() if count > 1)
+    if repeated:
+        return (
+            f"TEST scores one snapshot per run, chosen on VALIDATION "
+            f"beforehand. Several were given for {', '.join(repeated)}, "
+            f"which would let TEST choose among them."
+        )
+    return None
+
+
 def resolve_settings(
     args: argparse.Namespace
 ) -> tuple[WatershedParams, ...]:
@@ -240,19 +337,21 @@ def resolve_settings(
     -------
     tuple of WatershedParams
     """
-    base = WatershedParams(
-        center_distance_threshold=args.center_distance_threshold,
-        boundary_distance_threshold=args.boundary_distance_threshold,
-        foreground_threshold=args.foreground_threshold,
-        foreground_smoothing=args.foreground_smoothing,
-        distance_smoothing=args.distance_smoothing,
-        min_size=args.min_size,
+    fields = POSTPROCESSING_CONFIGS[args.postprocessing].to_kwargs()
+    for name in fields:
+        given = getattr(args, name, None)
+        if given is not None:
+            fields[name] = given
+    base = WatershedParams(**fields)
+    settings = (
+        list(robustness_series(base, tuple(args.center_threshold_sweep)))
+        if args.center_threshold_sweep else [base]
     )
-    if args.center_threshold_sweep:
-        return robustness_series(
-            base, tuple(args.center_threshold_sweep)
-        )
-    return (base,)
+    for name in args.also_postprocessing:
+        extra = POSTPROCESSING_CONFIGS[name]
+        if extra not in settings:
+            settings.append(extra)
+    return tuple(settings)
 
 
 def score_checkpoint(
@@ -275,7 +374,10 @@ def score_checkpoint(
         Per setting: the setting, the pooled figures, and the per-image
         evaluations behind them.
     """
-    source = build_source(args.split, args.manifest, args.subset)
+    source = build_source(
+        args.split, args.manifest, args.subset,
+        allow_test=args.unlock_test,
+    )
     size_bins = load_size_bins(args.size_bins)
     segmenter = build_segmenter(
         checkpoint, MODEL_TYPE, PEFT_KWARGS, LORA_RANK
@@ -363,6 +465,82 @@ def report(results: dict[str, AggregateResult]) -> None:
     )
 
 
+def mlflow_refusal(args: argparse.Namespace) -> Optional[str]:
+    """Say why figures must stay out of MLflow, or nothing if they may go.
+
+    A partial evaluation covers a different population of images from a
+    full one, and a point from it on the same curve would read as the
+    model changing when only the sample did.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+
+    Returns
+    -------
+    str or None
+    """
+    if args.no_mlflow:
+        return "disabled on the command line"
+    if args.n_images > 0:
+        return (
+            f"only {args.n_images} image(s) scored, which would put a "
+            f"different population on the same curve"
+        )
+    return None
+
+
+def record_in_mlflow(
+    checkpoint: Path,
+    subset: str,
+    scored: list[tuple[WatershedParams, AggregateResult, list]],
+) -> Optional[str]:
+    """Add one snapshot's figures to the run it was trained in.
+
+    Parameters
+    ----------
+    checkpoint : Path
+    subset : str
+    scored : list of tuple
+        From :func:`score_checkpoint`.
+
+    Returns
+    -------
+    str or None
+        The run written to, or ``None`` when the snapshot has no place
+        on a curve or its run is not in the store.
+    """
+    epoch = snapshot_epoch(checkpoint)
+    if epoch is None:
+        logger.info(
+            "%s carries no epoch in its name; not added to MLflow.",
+            checkpoint,
+        )
+        return None
+    run_id = find_run_for_checkpoint_dir(checkpoint.parent)
+    if run_id is None:
+        logger.warning(
+            "No MLflow run is tagged with %s; its figures stay in the "
+            "JSON report only.", checkpoint.parent,
+        )
+        return None
+    for setting, result, per_image in scored:
+        sections = (
+            cross_sections(per_image, "material")
+            + cross_sections(per_image, "scale_bin")
+        )
+        written = log_evaluation_to_run(
+            run_id, epoch, subset, postprocessing_id(setting), result,
+            sections,
+        )
+        logger.info(
+            "%s: %d figure(s) added to MLflow run %s at epoch %d under "
+            "%s.", checkpoint, written, run_id, epoch,
+            postprocessing_id(setting),
+        )
+    return run_id
+
+
 def write_json(
     destination: Path, results: dict[str, AggregateResult], evaluations: dict
 ) -> None:
@@ -421,7 +599,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             ", ".join(str(path) for path in missing),
         )
         return EXIT_FAILED
-    logger.info("Scoring %d checkpoint(s).", len(args.checkpoint))
+    refusal = locked_test_reason(args)
+    if refusal is not None:
+        logger.error(refusal)
+        return EXIT_FAILED
+    logger.info(
+        "Scoring %d checkpoint(s) on %s.",
+        len(args.checkpoint), args.subset.upper(),
+    )
 
     prepare_geometry()
     settings = resolve_settings(args)
@@ -429,8 +614,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         "Watershed setting(s): %s.",
         ", ".join(setting.label() for setting in settings),
     )
+    refusal = mlflow_refusal(args)
+    if refusal is None:
+        configure_tracking()
+    else:
+        logger.info("Figures are not added to MLflow: %s.", refusal)
     results: dict[str, AggregateResult] = {}
     evaluations: dict[str, list] = {}
+    tracked_runs: set[str] = set()
     for checkpoint in args.checkpoint:
         # Run and snapshot both, because every epoch of one run lives
         # in a single directory: the directory alone would name them
@@ -442,7 +633,32 @@ def main(argv: Optional[list[str]] = None) -> int:
             # one, so an ordinary run's report reads as it always did.
             name = stem if len(scored) == 1 else f"{stem}@{setting.label()}"
             results[name], evaluations[name] = result, per_image
+        if refusal is None:
+            # The figures that matter go to the JSON report; the MLflow
+            # copy is for viewing. Several evaluations may write to the
+            # store at once, and a busy store must not cost the report.
+            try:
+                run_id = record_in_mlflow(checkpoint, args.subset, scored)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "%s: writing to MLflow failed; the JSON report is "
+                    "unaffected.", checkpoint, exc_info=True,
+                )
+                run_id = None
+            if run_id is not None:
+                tracked_runs.add(run_id)
 
+    for run_id in sorted(tracked_runs):
+        for setting in settings:
+            try:
+                summarize_curve(
+                    run_id, args.subset, postprocessing_id(setting)
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Summarizing run %s in MLflow failed.", run_id,
+                    exc_info=True,
+                )
     report(results)
     if args.out is not None:
         write_json(args.out, results, evaluations)
