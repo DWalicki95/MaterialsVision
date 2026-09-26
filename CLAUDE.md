@@ -15,8 +15,7 @@ locally-configured paths rather than through a packaged CLI.
 ## Environment Setup
 
 ```bash
-# The project venv lives at .env/ (not the conventional .venv/)
-source .env/bin/activate
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -37,10 +36,24 @@ mlflow ui --backend-store-uri sqlite:///mlflow.db
 # -> http://127.0.0.1:5000
 ```
 
-**There is no automated test suite in this repository** (no `pytest`,
-no `tests/` directory). Do not assume one exists or invent test commands;
-verification for this codebase is manual (run the script/notebook against
-sample data, inspect the plots/Excel report/MLflow run).
+```bash
+# Test suite (pytest, ~760 tests, no GPU required)
+python -m pytest tests/
+
+# Scripts import the package from the working directory rather than
+# from an installed distribution, so they need it on the import path
+PYTHONPATH=. python scripts/<name>.py --help
+```
+
+The `tests/` suite covers the data, augmentation, evaluation and
+training-configuration layers, and runs in about twenty seconds without
+a GPU. It does **not** cover anything that needs model weights: the
+training loop, inference and the metrics computed from real
+predictions are verified by running the relevant script against sample
+data and reading the result. When adding behaviour to those layers,
+prefer a test over a manual check, and make it exercise the real seam -
+several defects in this repository survived because a test checked a
+component in isolation while nothing checked that the pipeline used it.
 
 ## Architecture
 
