@@ -250,8 +250,8 @@ def diameter_distribution_error(
     -------
     DiameterDistributionError
     """
-    gt = _measurable_diameters(gt_shapes)
-    pred = _measurable_diameters(pred_shapes)
+    gt = measurable_diameters_um(gt_shapes)
+    pred = measurable_diameters_um(pred_shapes)
 
     if gt.size == 0 or pred.size == 0:
         logger.warning(
@@ -269,7 +269,7 @@ def diameter_distribution_error(
     return DiameterDistributionError(
         wasserstein_um=float(wasserstein_distance(gt, pred)),
         median_error_um=float(np.median(pred) - np.median(gt)),
-        iqr_error_um=float(_iqr(pred) - _iqr(gt)),
+        iqr_error_um=interquartile_range(pred) - interquartile_range(gt),
         n_gt=int(gt.size), n_pred=int(pred.size),
     )
 
@@ -395,8 +395,23 @@ def orientation_distribution(
     )
 
 
-def _measurable_diameters(shapes: InstanceShapes) -> np.ndarray:
-    """Diameters of the instances whose size the frame did not cut."""
+def measurable_diameters_um(shapes: InstanceShapes) -> np.ndarray:
+    """Diameters of the instances whose size the frame did not cut.
+
+    Public because a figure expressing the distribution drift relative
+    to the annotated distribution needs the same instances in its
+    denominator as the drift has in its numerator.
+
+    Parameters
+    ----------
+    shapes : InstanceShapes
+
+    Returns
+    -------
+    np.ndarray
+        Equivalent diameters in micrometres, border instances and
+        undefined values left out.
+    """
     keep = ~shapes.border & np.isfinite(shapes.equivalent_diameter_um)
     return shapes.equivalent_diameter_um[keep]
 
@@ -501,8 +516,18 @@ def _axial_difference(first_deg: float, second_deg: float) -> float:
     return float(min(difference, 180.0 - difference))
 
 
-def _iqr(values: np.ndarray) -> float:
-    """Interquartile range, the spread the median does not show."""
+def interquartile_range(values: np.ndarray) -> float:
+    """Interquartile range, the spread the median does not show.
+
+    Parameters
+    ----------
+    values : np.ndarray
+        Non-empty.
+
+    Returns
+    -------
+    float
+    """
     return float(np.percentile(values, 75) - np.percentile(values, 25))
 
 
