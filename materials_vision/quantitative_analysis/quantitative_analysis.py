@@ -18,6 +18,40 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# The stored ellipse angle is measured from the vertical image axis; a
+# quarter turn moves its zero to the horizontal.
+VERTICAL_TO_HORIZONTAL_DEG = 90.0
+
+# An ellipse axis has no head or tail, so directions repeat every half
+# turn.
+HALF_TURN_DEG = 180.0
+
+
+def ellipse_angle_to_image_direction(angles_deg: np.ndarray) -> np.ndarray:
+    """
+    Convert stored ellipse angles to directions as seen on the image.
+
+    ``ellipse_angle`` is measured from the vertical image axis (see
+    ``PoreMorphologyMetrics._calculate_ellipse_angle``), which is not
+    how a direction is read off a picture or a rose plot. This returns
+    the same orientation measured counter-clockwise from the
+    horizontal, as the image is displayed with row 0 at the top: 0 is a
+    horizontal pore, 45 a pore rising to the right, 90 a vertical one.
+
+    Parameters
+    ----------
+    angles_deg : np.ndarray
+        Stored ``ellipse_angle`` values in degrees, in ``[-90, 90]``.
+        Not modified.
+
+    Returns
+    -------
+    np.ndarray
+        Directions in degrees, folded into ``[0, 180)``. NaN stays NaN.
+    """
+    angles = np.asarray(angles_deg, dtype=float)
+    return np.mod(angles + VERTICAL_TO_HORIZONTAL_DEG, HALF_TURN_DEG)
+
 
 class PoreMorphologyMetrics:
     """
@@ -256,8 +290,18 @@ class PoreMorphologyMetrics:
         """
         Calculate ellipse orientation angle.
 
-        The angle is measured counter-clockwise from the X-axis.
-        0 degrees means the object is oriented horizontally.
+        The angle is scikit-image's ``regionprops`` ``orientation`` in
+        degrees: measured from the vertical image axis (rows), positive
+        counter-clockwise as the image is displayed with row 0 at the
+        top, in ``[-90, 90]``. 0 is a vertically elongated pore, +/-90
+        a horizontal one, -45 a pore rising to the right.
+
+        The value is stored in this convention rather than converted,
+        so it agrees with every report already written from it. Use
+        ``ellipse_angle_to_image_direction`` for the usual direction
+        measured from the horizontal, e.g. for plotting. Statistics
+        that only measure alignment (anisotropy, orientation entropy)
+        do not depend on the reference axis.
 
         Returns
         -------

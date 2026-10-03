@@ -430,7 +430,7 @@ MaterialsVision/
 | **Ellipse Major Axis** | - | Length of fitted ellipse major axis |
 | **Ellipse Minor Axis** | - | Length of fitted ellipse minor axis |
 | **Aspect Ratio** | Major Axis / Minor Axis | Elongation measure |
-| **Orientation** | - | Ellipse orientation angle (degrees) |
+| **Orientation** | - | Ellipse major-axis angle from the vertical image axis (degrees; 0 = vertical, ±90 = horizontal; rose plots convert it to the from-horizontal direction) |
 | **Roundness** | 4 × Area / (π × Major Axis²) | Alternative shape descriptor |
 
 #### Global Microstructure Descriptors

@@ -15,6 +15,9 @@ import pandas as pd
 import seaborn as sns
 from scipy.stats import entropy, skew
 
+from materials_vision.quantitative_analysis.quantitative_analysis import \
+    ellipse_angle_to_image_direction
+
 logger = logging.getLogger(__name__)
 
 
@@ -144,7 +147,9 @@ def calculate_centered_entropy(
     Parameters
     ----------
     angles : np.ndarray
-        Array of orientation angles in degrees (0-180)
+        Array of orientation angles in degrees. Any half-turn range
+        works (stored ``ellipse_angle`` is -90 to 90), because the
+        angles are folded modulo 180 after centering.
     num_bins : int, optional
         Number of histogram bins for entropy calculation (default: 18)
 
@@ -520,15 +525,22 @@ def plot_orientation_rose(
     ax : plt.Axes
         Matplotlib polar axes to plot on
     angles : np.ndarray
-        Array of orientation angles in degrees (-90 to 90)
+        Stored ``ellipse_angle`` values in degrees (-90 to 90, measured
+        from the vertical image axis)
     num_bins : int, optional
-        Number of bins for the histogram (default: 36, i.e. 5 deg per bin)
+        Number of bins over half a turn (default: 36, i.e. 5 deg per bin)
 
     Notes
     -----
-    CRITICAL: 0 degrees is positioned at 3 o'clock (East).
+    The rose reads like the image: 0 degrees at 3 o'clock (East) is a
+    horizontal pore and angles grow counter-clockwise, so a pore rising
+    to the right appears at 45 degrees. The stored angles are measured
+    from the vertical axis and are converted with
+    ``ellipse_angle_to_image_direction`` first; plotting them
+    unconverted turns the whole rose by 90 degrees.
     Bins are centered using (edge_left + edge_right) / 2.
-    The plot mirrors the -90 to 90 range to create a full 360 degree view.
+    Each bin is mirrored half a turn away to create a full 360 degree
+    view, because an ellipse axis has no head or tail.
     """
     angles = np.array(angles)
     angles = angles[~np.isnan(angles)]
@@ -536,8 +548,10 @@ def plot_orientation_rose(
     if len(angles) == 0:
         return
 
-    # Compute histogram with range -90 to 90
-    counts, bin_edges = np.histogram(angles, bins=num_bins, range=(-90, 90))
+    directions = ellipse_angle_to_image_direction(angles)
+    counts, bin_edges = np.histogram(
+        directions, bins=num_bins, range=(0, 180)
+    )
 
     # Calculate bin CENTERS: (left_edge + right_edge) / 2
     bin_centers_deg = (bin_edges[:-1] + bin_edges[1:]) / 2
