@@ -50,3 +50,8 @@ isort==5.12.0
 mypy==2.3.0
 pre-commit==4.6.1
 pytest==9.1.1
+
+# Jupyter kernel for running the exploratory notebooks in notebooks/.
+ipykernel==6.31.0
+# Controls of the prediction browser in materials_vision/inspection/.
+ipywidgets==8.1.8
