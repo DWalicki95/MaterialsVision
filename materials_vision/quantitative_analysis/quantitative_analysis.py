@@ -515,56 +515,39 @@ class GlobalMicrostructureDescriptors:
         mask_area = mask_.shape[0] * mask_.shape[1] * (self.pixel_size**2)
         return mask_area
 
-    def _count_all_pores_area(self) -> float:
-        """Sum of all pore areas from morphology results."""
-        return sum(pore["area"] for pore in self.morphology_results)
-
-    def _count_pores_area_in_mask(self, sub_mask: np.ndarray) -> float:
-        """
-        Count the total area of pores within a specific mask region.
-
-        Parameters
-        ----------
-        sub_mask : np.ndarray
-            A labeled mask array where each pore has a unique integer label
-
-        Returns
-        -------
-        float
-            Total area of all pores in the sub-mask (in µm²)
-        """
-        # Count pixels for each label (excluding background label 0)
-        pore_pixel_count = sum(sub_mask > 0)
-
-        # Convert to area
-        pore_area = pore_pixel_count * (self.pixel_size**2)
-
-        return pore_area
-
     def calculate_porosity(self, mask_: Optional[np.ndarray] = None) -> float:
         """
-        Calculate porosity (volume fraction of pores).
+        Calculate areal porosity (fraction of the frame covered by pores).
+
+        Every labelled pixel counts, including pores that touch the image
+        border. Border pores are left out of the per-pore morphology
+        because their shape is truncated, but the part of a pore that lies
+        inside the frame is still pore space, so dropping it from the
+        numerator while keeping the full frame in the denominator would
+        bias porosity low - most strongly for coarse-pored materials,
+        where a large share of pore area touches the border.
 
         Parameters
         ----------
         mask_ : np.ndarray, optional
-            Optional sub-mask for local porosity calculation
+            Instance mask or a crop of it (0 = solid); defaults to the
+            whole mask.
 
         Returns
         -------
         float
             Porosity value (0 to 1)
+
+        Raises
+        ------
+        ValueError
+            For an empty mask, whose porosity is undefined.
         """
         if mask_ is None:
-            # Global porosity using pre-computed morphology results
-            pores_area = self._count_all_pores_area()
-            mask_area = self._count_mask_area()
-        else:
-            # Local porosity for a specific sub-mask
-            pores_area = self._count_pores_area_in_mask(mask_)
-            mask_area = self._count_mask_area(mask_)
-
-        return pores_area / mask_area
+            mask_ = self.mask
+        if mask_.size == 0:
+            raise ValueError("An empty mask has no porosity.")
+        return float(np.count_nonzero(mask_)) / mask_.size
 
     def _cut_mask_into_pieces(
         self, n_rows: int = 2, n_cols: int = 2
