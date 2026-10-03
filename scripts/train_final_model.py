@@ -83,6 +83,7 @@ import torch
 
 from materials_vision.logging_config import setup_logging
 from materials_vision.provenance import run_provenance
+from materials_vision.tracking import RunTracking
 from materials_vision.training import (DECODER_LEARNING_RATE,
                                        LORA_LEARNING_RATE, build_loader,
                                        build_source, train_run)
@@ -125,23 +126,44 @@ def run_name() -> str:
     return f"{POLICY}_trainval_seed{RUN_SEED}"
 
 
-def scored_snapshot(save_root: Path, n_epochs: int) -> Path:
+def scored_snapshot(
+    save_root: Path, n_epochs: int, name: Optional[str] = None
+) -> Path:
     """The one snapshot that will be scored, named before it exists.
 
     Parameters
     ----------
     save_root : Path
     n_epochs : int
+    name : str, optional
+        The run; the final model's when not given.
 
     Returns
     -------
     Path
     """
-    return save_root / "checkpoints" / run_name() / f"epoch-{n_epochs}.pt"
+    run = run_name() if name is None else name
+    return save_root / "checkpoints" / run / f"epoch-{n_epochs}.pt"
 
 
-def execute(args: argparse.Namespace) -> None:
-    """Train the final model.
+def train_recipe(
+    name: str,
+    *,
+    split: Path,
+    manifest: Path,
+    train_subset: str,
+    monitor_subset: str,
+    save_root: Path,
+    epochs: int,
+    n_train: int = 0,
+    tracking: Optional[RunTracking] = None,
+) -> None:
+    """Train the adopted recipe on the given images.
+
+    The one definition of how the final model is trained, shared by
+    every run meant to reproduce it on other data, so that such a run
+    can differ from the final model in its images and in nothing that
+    was chosen.
 
     Only the scored snapshot is kept as a numbered file. The trainer
     numbers a snapshot whenever the epoch count divides by the interval
@@ -150,45 +172,84 @@ def execute(args: argparse.Namespace) -> None:
     held-out set to look at them on, and each costs well over a
     gigabyte.
 
+    The seed is set before anything else is built, in the order the
+    final model was trained in, because the initial state of the
+    low-rank correction is drawn from the global stream.
+
     Parameters
     ----------
-    args : argparse.Namespace
+    name : str
+        Names the checkpoint directory.
+    split, manifest : Path
+    train_subset : str
+        Subset of ``split`` trained on, e.g. ``"train+val"``.
+    monitor_subset : str
+        Subset the trainer's validation loss is computed on. Its images
+        must also be trained on, or they would be withheld for a loss
+        nothing reads.
+    save_root : Path
+    epochs : int
+        The last epoch is the snapshot scored.
+    n_train : int, optional
+        Use this many training images; 0 means all of them.
+    tracking : RunTracking, optional
+        Record the run in MLflow as it trains.
     """
     torch.manual_seed(RUN_SEED)
-    train_source = build_source(args.split, args.manifest, TRAIN_SUBSET)
-    monitor_source = build_source(args.split, args.manifest, "val")
+    train_source = build_source(split, manifest, train_subset)
+    monitor_source = build_source(split, manifest, monitor_subset)
     policy = build_full_policy(POLICY)
 
     train_loader = build_loader(
         train_source, policy=policy, run_seed=RUN_SEED, shuffle=True,
-        indices=spaced_indices(len(train_source), args.n_train),
+        indices=spaced_indices(len(train_source), n_train),
     )
     monitor_loader = build_loader(
         monitor_source, policy=None, run_seed=RUN_SEED, shuffle=False,
         indices=spaced_indices(len(monitor_source), MONITOR_IMAGES),
     )
     logger.info(
-        "%s: seed %d, families %s, %d training image(s) from %s.",
-        run_name(), RUN_SEED, ", ".join(policy.families),
-        len(train_loader), TRAIN_SUBSET.upper(),
+        "%s: seed %d, families %s, %d training image(s) from %s of %s.",
+        name, RUN_SEED, ", ".join(policy.families),
+        len(train_loader), train_subset.upper(), split.name,
     )
     logger.info(
         "The %d monitoring image(s) are also trained on. The validation "
         "loss reported on them measures memorization and decides "
         "nothing; the snapshot scored is %s, fixed before training.",
-        len(monitor_loader), scored_snapshot(args.save_root, args.epochs),
+        len(monitor_loader), scored_snapshot(save_root, epochs, name),
     )
     train_run(
-        run_name(),
+        name,
         model_type=BASE_MODEL,
         train_loader=train_loader,
         val_loader=monitor_loader,
-        n_epochs=args.epochs,
-        save_root=args.save_root,
+        n_epochs=epochs,
+        save_root=save_root,
         lora_learning_rate=LORA_LEARNING_RATE,
         decoder_learning_rate=DECODER_LEARNING_RATE,
         early_stopping=None,
-        save_every_kth_epoch=args.epochs,
+        save_every_kth_epoch=epochs,
+        tracking=tracking,
+    )
+
+
+def execute(args: argparse.Namespace) -> None:
+    """Train the final model.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+    """
+    train_recipe(
+        run_name(),
+        split=args.split,
+        manifest=args.manifest,
+        train_subset=TRAIN_SUBSET,
+        monitor_subset="val",
+        save_root=args.save_root,
+        epochs=args.epochs,
+        n_train=args.n_train,
     )
 
 
@@ -210,35 +271,48 @@ def write_provenance(args: argparse.Namespace) -> Path:
     """
     args.save_root.mkdir(parents=True, exist_ok=True)
     destination = args.save_root / f"{run_name()}_provenance.json"
-    policy = build_full_policy(POLICY)
-    config = policy.config
     record: dict[str, Any] = {
         "provenance": run_provenance(),
-        "base_model": BASE_MODEL,
         "run": run_name(),
-        "policy": POLICY,
-        "families": list(policy.families),
-        "seed": RUN_SEED,
         "train_subset": TRAIN_SUBSET,
         "epochs": args.epochs,
         "scored_snapshot": str(scored_snapshot(args.save_root, args.epochs)),
-        "monitor_images": MONITOR_IMAGES,
         "monitor_note": (
             "Validation images handed to the trainer are also trained "
             "on; its validation loss and best.pt are not used."
         ),
+        "split": str(args.split),
+        "manifest": str(args.manifest),
+        **recipe_record(),
+    }
+    destination.write_text(json.dumps(record, indent=2, default=str))
+    logger.info("Wrote %s.", destination)
+    return destination
+
+
+def recipe_record() -> dict[str, Any]:
+    """What the recipe is, independently of the data it is trained on.
+
+    Returns
+    -------
+    dict
+    """
+    policy = build_full_policy(POLICY)
+    config = policy.config
+    record: dict[str, Any] = {
+        "base_model": BASE_MODEL,
+        "policy": POLICY,
+        "families": list(policy.families),
+        "seed": RUN_SEED,
+        "monitor_images": MONITOR_IMAGES,
         "lora_learning_rate": LORA_LEARNING_RATE,
         "decoder_learning_rate": DECODER_LEARNING_RATE,
         "early_stopping": None,
-        "split": str(args.split),
-        "manifest": str(args.manifest),
     }
     for family in ("orientation", "tonal", "blur"):
         record[family] = vars(getattr(config, family))
     record["blur_kernel_px"] = config.blur.kernel_px
-    destination.write_text(json.dumps(record, indent=2, default=str))
-    logger.info("Wrote %s.", destination)
-    return destination
+    return record
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
