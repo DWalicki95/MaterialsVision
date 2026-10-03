@@ -15,10 +15,55 @@ import pandas as pd
 import seaborn as sns
 from scipy.stats import entropy, skew
 
-from materials_vision.quantitative_analysis.quantitative_analysis import \
-    ellipse_angle_to_image_direction
+from materials_vision.quantitative_analysis.quantitative_analysis import (
+    EDGE_WEIGHT_KEY, ellipse_angle_to_image_direction)
+from materials_vision.quantitative_analysis.stats_utils import \
+    weighted_quantile
 
 logger = logging.getLogger(__name__)
+
+
+def _valid_values_and_weights(
+    df: pd.DataFrame, column: str
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """
+    Non-missing values of a column with their edge-correction weights.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Individual pore data.
+    column : str
+        Column to read.
+
+    Returns
+    -------
+    values : np.ndarray
+        Values with missing entries dropped.
+    weights : np.ndarray or None
+        Matching ``edge_correction_weight`` values, or None when the
+        report predates the column or any kept row lacks a weight, in
+        which case the corrected metrics are reported as NaN.
+    """
+    valid = df[column].notna()
+    values = df.loc[valid, column].to_numpy(dtype=float)
+    if EDGE_WEIGHT_KEY not in df.columns:
+        return values, None
+    weights = df.loc[valid, EDGE_WEIGHT_KEY].to_numpy(dtype=float)
+    if len(weights) == 0 or not np.all(np.isfinite(weights)):
+        return values, None
+    return values, weights
+
+
+def _weighted_skewness(values: np.ndarray, weights: np.ndarray) -> float:
+    """Population skewness of a weighted sample (``nan`` if constant)."""
+    mean = np.average(values, weights=weights)
+    deviations = values - mean
+    variance = np.average(deviations ** 2, weights=weights)
+    if variance == 0:
+        return float("nan")
+    third_moment = np.average(deviations ** 3, weights=weights)
+    return float(third_moment / variance ** 1.5)
 
 
 def find_analysis_reports(input_dir: Path) -> List[Tuple[str, Path]]:
@@ -135,7 +180,8 @@ def read_individual_pores_sheet(
 
 def calculate_centered_entropy(
     angles: np.ndarray,
-    num_bins: int = 18
+    num_bins: int = 18,
+    weights: Optional[np.ndarray] = None,
 ) -> float:
     """
     Calculate normalized entropy of orientation angles.
@@ -152,6 +198,9 @@ def calculate_centered_entropy(
         angles are folded modulo 180 after centering.
     num_bins : int, optional
         Number of histogram bins for entropy calculation (default: 18)
+    weights : np.ndarray, optional
+        One weight per angle; weights both the mean direction and the
+        histogram (default: equal weights).
 
     Returns
     -------
@@ -169,10 +218,16 @@ def calculate_centered_entropy(
     Formula for normalization: H_norm = H / H_max
     where H_max = ln(num_bins) for uniform distribution
     """
-    angles = np.array(angles)
+    angles = np.array(angles, dtype=float)
+    weights = (
+        np.ones_like(angles) if weights is None
+        else np.asarray(weights, dtype=float)
+    )
 
     # Handle NaN values
-    angles = angles[~np.isnan(angles)]
+    valid = ~np.isnan(angles)
+    angles = angles[valid]
+    weights = weights[valid]
     if len(angles) == 0:
         return np.nan
 
@@ -180,8 +235,8 @@ def calculate_centered_entropy(
     angles_rad = np.deg2rad(angles) * 2
 
     # Calculate mean direction using circular statistics
-    sin_sum = np.sum(np.sin(angles_rad))
-    cos_sum = np.sum(np.cos(angles_rad))
+    sin_sum = np.sum(weights * np.sin(angles_rad))
+    cos_sum = np.sum(weights * np.cos(angles_rad))
     mean_angle = np.rad2deg(np.arctan2(sin_sum, cos_sum)) / 2
 
     # Center distribution around mean (shift so mean is at 90 degrees)
@@ -189,7 +244,9 @@ def calculate_centered_entropy(
     angles_shifted = (angles + shift) % 180
 
     # Calculate histogram and entropy
-    counts, _ = np.histogram(angles_shifted, bins=num_bins, range=(0, 180))
+    counts, _ = np.histogram(
+        angles_shifted, bins=num_bins, range=(0, 180), weights=weights
+    )
     if counts.sum() == 0:
         return 0.0
 
@@ -200,6 +257,23 @@ def calculate_centered_entropy(
     return shannon_entropy / max_entropy
 
 
+def _size_statistics(
+    diameters: np.ndarray, weights: np.ndarray
+) -> Dict[str, float]:
+    """Mean, D10/D50/D90, span and skewness of weighted diameters."""
+    d10 = weighted_quantile(diameters, weights, 0.10)
+    median = weighted_quantile(diameters, weights, 0.50)
+    d90 = weighted_quantile(diameters, weights, 0.90)
+    return {
+        'mean': float(np.average(diameters, weights=weights)),
+        'median': median,
+        'd10': d10,
+        'd90': d90,
+        'span': (d90 - d10) / median if median != 0 else np.nan,
+        'skewness': _weighted_skewness(diameters, weights),
+    }
+
+
 def calculate_size_metrics(df: pd.DataFrame) -> Dict[str, float]:
     """
     Calculate size-related metrics from equivalent diameter.
@@ -207,7 +281,8 @@ def calculate_size_metrics(df: pd.DataFrame) -> Dict[str, float]:
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame containing 'equivalent_diameter' column
+        DataFrame containing 'equivalent_diameter' column and, optionally,
+        'edge_correction_weight'
 
     Returns
     -------
@@ -219,40 +294,60 @@ def calculate_size_metrics(df: pd.DataFrame) -> Dict[str, float]:
         - size_d90: 90th percentile
         - size_span: (D90 - D10) / Median
         - size_skewness: Skewness of size distribution
+        and the same six with a ``_corrected`` suffix, weighted by
+        'edge_correction_weight' (NaN when the column is missing).
 
     Notes
     -----
     Span formula: (D90 - D10) / D50
     This is a common metric in particle size analysis describing
     the width of the size distribution relative to the median.
+
+    The uncorrected values describe the measured pores only. Pores cut by
+    the image border are not measured, and large pores are cut more
+    often, so these values understate pore size; the corrected values
+    compensate with Miles-Lantuejoul weights.
     """
-    diameters = df['equivalent_diameter'].dropna()
+    diameters, weights = _valid_values_and_weights(
+        df, 'equivalent_diameter'
+    )
+    names = ['mean', 'median', 'd10', 'd90', 'span', 'skewness']
 
     if len(diameters) == 0:
         logger.warning("No valid diameter values")
         return {
-            'size_mean': np.nan,
-            'size_median': np.nan,
-            'size_d10': np.nan,
-            'size_d90': np.nan,
-            'size_span': np.nan,
-            'size_skewness': np.nan,
+            f'size_{name}{suffix}': np.nan
+            for suffix in ('', '_corrected') for name in names
         }
 
-    d10 = np.percentile(diameters, 10)
-    d90 = np.percentile(diameters, 90)
-    median = np.median(diameters)
+    raw = _size_statistics(diameters, np.ones_like(diameters))
+    raw['skewness'] = float(skew(diameters))
+    corrected = (
+        _size_statistics(diameters, weights) if weights is not None
+        else {name: np.nan for name in names}
+    )
+    metrics = {f'size_{name}': raw[name] for name in names}
+    metrics.update(
+        {f'size_{name}_corrected': corrected[name] for name in names}
+    )
+    return metrics
 
-    # Avoid division by zero
-    span = (d90 - d10) / median if median != 0 else np.nan
 
+def _elongation_statistics(
+    aspect_ratios: np.ndarray, weights: np.ndarray
+) -> Dict[str, float]:
+    """Mean, median, std and share above 2 of weighted aspect ratios."""
+    mean = float(np.average(aspect_ratios, weights=weights))
+    variance = float(
+        np.average((aspect_ratios - mean) ** 2, weights=weights)
+    )
     return {
-        'size_mean': np.mean(diameters),
-        'size_median': median,
-        'size_d10': d10,
-        'size_d90': d90,
-        'size_span': span,
-        'size_skewness': float(skew(diameters)),
+        'mean': mean,
+        'median': weighted_quantile(aspect_ratios, weights, 0.5),
+        'std': float(np.sqrt(variance)),
+        'fraction_gt_2': float(
+            weights[aspect_ratios > 2.0].sum() / weights.sum()
+        ),
     }
 
 
@@ -263,7 +358,8 @@ def calculate_elongation_metrics(df: pd.DataFrame) -> Dict[str, float]:
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame containing 'aspect_ratio' column
+        DataFrame containing 'aspect_ratio' column and, optionally,
+        'edge_correction_weight'
 
     Returns
     -------
@@ -273,32 +369,36 @@ def calculate_elongation_metrics(df: pd.DataFrame) -> Dict[str, float]:
         - elongation_median: Median aspect ratio
         - elongation_std: Standard deviation of aspect ratio
         - elongation_fraction_gt_2: Fraction of pores with AR > 2.0
+        and the same four with a ``_corrected`` suffix, weighted by
+        'edge_correction_weight' (NaN when the column is missing).
 
     Notes
     -----
     Fraction > 2.0 identifies strongly deformed/elongated pores.
     An aspect ratio of 2.0 means the pore is twice as long as wide.
     """
-    aspect_ratios = df['aspect_ratio'].dropna()
+    aspect_ratios, weights = _valid_values_and_weights(df, 'aspect_ratio')
+    names = ['mean', 'median', 'std', 'fraction_gt_2']
 
     if len(aspect_ratios) == 0:
         logger.warning("No valid aspect ratio values")
         return {
-            'elongation_mean': np.nan,
-            'elongation_median': np.nan,
-            'elongation_std': np.nan,
-            'elongation_fraction_gt_2': np.nan,
+            f'elongation_{name}{suffix}': np.nan
+            for suffix in ('', '_corrected') for name in names
         }
 
-    n_elongated = np.sum(aspect_ratios > 2.0)
-    fraction_gt_2 = n_elongated / len(aspect_ratios)
-
-    return {
-        'elongation_mean': np.mean(aspect_ratios),
-        'elongation_median': np.median(aspect_ratios),
-        'elongation_std': np.std(aspect_ratios),
-        'elongation_fraction_gt_2': fraction_gt_2,
-    }
+    raw = _elongation_statistics(
+        aspect_ratios, np.ones_like(aspect_ratios)
+    )
+    corrected = (
+        _elongation_statistics(aspect_ratios, weights)
+        if weights is not None else {name: np.nan for name in names}
+    )
+    metrics = {f'elongation_{name}': raw[name] for name in names}
+    metrics.update(
+        {f'elongation_{name}_corrected': corrected[name] for name in names}
+    )
+    return metrics
 
 
 def calculate_regularity_metrics(df: pd.DataFrame) -> Dict[str, float]:
@@ -308,7 +408,8 @@ def calculate_regularity_metrics(df: pd.DataFrame) -> Dict[str, float]:
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame containing 'circularity' column
+        DataFrame containing 'circularity' column and, optionally,
+        'edge_correction_weight'
 
     Returns
     -------
@@ -316,6 +417,8 @@ def calculate_regularity_metrics(df: pd.DataFrame) -> Dict[str, float]:
         Dictionary containing:
         - regularity_mean: Mean circularity
         - regularity_d10: 10th percentile (identifies most irregular pores)
+        and both with a ``_corrected`` suffix, weighted by
+        'edge_correction_weight' (NaN when the column is missing).
 
     Notes
     -----
@@ -324,18 +427,29 @@ def calculate_regularity_metrics(df: pd.DataFrame) -> Dict[str, float]:
     - Lower values indicate more irregular shapes
     D10 identifies the 10% most irregular pores in the distribution.
     """
-    circularity = df['circularity'].dropna()
+    circularity, weights = _valid_values_and_weights(df, 'circularity')
 
     if len(circularity) == 0:
         logger.warning("No valid circularity values")
         return {
             'regularity_mean': np.nan,
             'regularity_d10': np.nan,
+            'regularity_mean_corrected': np.nan,
+            'regularity_d10_corrected': np.nan,
         }
 
+    corrected_available = weights is not None
     return {
-        'regularity_mean': np.mean(circularity),
-        'regularity_d10': np.percentile(circularity, 10),
+        'regularity_mean': float(np.mean(circularity)),
+        'regularity_d10': float(np.percentile(circularity, 10)),
+        'regularity_mean_corrected': (
+            float(np.average(circularity, weights=weights))
+            if corrected_available else np.nan
+        ),
+        'regularity_d10_corrected': (
+            weighted_quantile(circularity, weights, 0.10)
+            if corrected_available else np.nan
+        ),
     }
 
 
@@ -346,13 +460,16 @@ def calculate_orientation_metrics(df: pd.DataFrame) -> Dict[str, float]:
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame containing 'ellipse_angle' column
+        DataFrame containing 'ellipse_angle' column and, optionally,
+        'edge_correction_weight'
 
     Returns
     -------
     Dict[str, float]
         Dictionary containing:
         - orientation_entropy: Normalized entropy (0-1 scale)
+        - orientation_entropy_corrected: the same, weighted by
+          'edge_correction_weight' (NaN when the column is missing)
 
     Notes
     -----
@@ -361,16 +478,21 @@ def calculate_orientation_metrics(df: pd.DataFrame) -> Dict[str, float]:
     - 1: Uniform/isotropic distribution (random orientations)
     Higher values indicate more random/isotropic orientation patterns.
     """
-    angles = df['ellipse_angle'].dropna().values
+    angles, weights = _valid_values_and_weights(df, 'ellipse_angle')
 
     if len(angles) == 0:
         logger.warning("No valid ellipse angle values")
         return {
             'orientation_entropy': np.nan,
+            'orientation_entropy_corrected': np.nan,
         }
 
     return {
         'orientation_entropy': calculate_centered_entropy(angles),
+        'orientation_entropy_corrected': (
+            calculate_centered_entropy(angles, weights=weights)
+            if weights is not None else np.nan
+        ),
     }
 
 
@@ -381,7 +503,8 @@ def calculate_topology_metrics(df: pd.DataFrame) -> Dict[str, float]:
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame containing 'coordination_number' column
+        DataFrame containing 'coordination_number' column and,
+        optionally, 'edge_correction_weight'
 
     Returns
     -------
@@ -389,6 +512,10 @@ def calculate_topology_metrics(df: pd.DataFrame) -> Dict[str, float]:
         Dictionary containing:
         - topology_cn_mean: Mean coordination number
         - topology_cn_std: Standard deviation of coordination number
+        and both with a ``_corrected`` suffix, weighted by
+        'edge_correction_weight' (NaN when the column is missing). Larger
+        cells tend to have more neighbours, so the size bias of the
+        border filter reaches the coordination number as well.
 
     Notes
     -----
@@ -396,19 +523,32 @@ def calculate_topology_metrics(df: pd.DataFrame) -> Dict[str, float]:
     each pore is connected to (based on Voronoi tessellation).
     Higher values indicate more densely packed pore networks.
     """
-    coord_numbers = df['coordination_number'].dropna()
+    coord_numbers, weights = _valid_values_and_weights(
+        df, 'coordination_number'
+    )
 
     if len(coord_numbers) == 0:
         logger.warning("No valid coordination number values")
         return {
             'topology_cn_mean': np.nan,
             'topology_cn_std': np.nan,
+            'topology_cn_mean_corrected': np.nan,
+            'topology_cn_std_corrected': np.nan,
         }
 
-    return {
-        'topology_cn_mean': np.mean(coord_numbers),
-        'topology_cn_std': np.std(coord_numbers),
+    metrics = {
+        'topology_cn_mean': float(np.mean(coord_numbers)),
+        'topology_cn_std': float(np.std(coord_numbers)),
+        'topology_cn_mean_corrected': np.nan,
+        'topology_cn_std_corrected': np.nan,
     }
+    if weights is not None:
+        mean = float(np.average(coord_numbers, weights=weights))
+        metrics['topology_cn_mean_corrected'] = mean
+        metrics['topology_cn_std_corrected'] = float(np.sqrt(
+            np.average((coord_numbers - mean) ** 2, weights=weights)
+        ))
+    return metrics
 
 
 def merge_individual_pores(
@@ -736,9 +876,7 @@ def export_results_to_excel(
         Path to the created Excel file
     """
     # Define column order for output
-    column_order = [
-        'material_name',
-        'n_pores',
+    metric_columns = [
         'size_mean',
         'size_median',
         'size_d10',
@@ -754,6 +892,11 @@ def export_results_to_excel(
         'orientation_entropy',
         'topology_cn_mean',
         'topology_cn_std',
+    ]
+    column_order = ['material_name', 'n_pores'] + [
+        column
+        for metric in metric_columns
+        for column in (metric, f'{metric}_corrected')
     ]
 
     df = pd.DataFrame(results)
