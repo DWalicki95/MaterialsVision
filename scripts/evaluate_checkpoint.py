@@ -122,6 +122,17 @@ HEADLINE_FIELDS = (
     "merges_per_100_gt", "splits_per_100_gt", "pore_count_error",
 )
 
+# Cross-sections written to the JSON report, field to grouping key.
+# Formulations are there because a held-out set of several formulations
+# is otherwise one number, and whether an error belongs to the model or
+# to one synthesis cannot be read from it. They stay out of MLflow,
+# where one curve per formulation would bury the ones that are read.
+JSON_CROSS_SECTIONS = {
+    "per_material": "material",
+    "per_scale_bin": "scale_bin",
+    "per_formulation": "formulation",
+}
+
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     """Read the command line.
@@ -558,17 +569,12 @@ def write_json(
 
     payload = {}
     for name, result in results.items():
-        payload[name] = {
-            "overall": asdict(result),
-            "per_material": [
+        payload[name] = {"overall": asdict(result)}
+        for field, key in JSON_CROSS_SECTIONS.items():
+            payload[name][field] = [
                 asdict(section)
-                for section in cross_sections(evaluations[name], "material")
-            ],
-            "per_scale_bin": [
-                asdict(section)
-                for section in cross_sections(evaluations[name], "scale_bin")
-            ],
-        }
+                for section in cross_sections(evaluations[name], key)
+            ]
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2, default=str))
     logger.info("Wrote %s.", destination)

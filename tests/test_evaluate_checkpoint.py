@@ -137,3 +137,47 @@ def test_another_named_postprocessing_is_scored_in_the_same_pass():
     assert settings[1] == CALIBRATED_2026_09_24
     assert settings[3] == FROZEN_WATERSHED
     assert len(settings) == 4
+
+
+def test_the_report_breaks_the_figures_down_by_formulation(tmp_path):
+    import json
+    from pathlib import Path
+
+    import numpy as np
+
+    from materials_vision.data.samples import SampleRecord
+    from materials_vision.evaluation.aggregate import aggregate, evaluate_image
+    from materials_vision.evaluation.size_bins import SizeBins
+
+    bins = SizeBins(edges_um2=(38505.0, 98891.0, 243941.0),
+                    n_calibration_instances=25247)
+    gt = np.zeros((64, 64), dtype=np.int32)
+    gt[4:24, 4:24], gt[36:56, 36:56] = 1, 2
+    evaluations = [
+        evaluate_image(
+            SampleRecord(
+                index=0, image_id=f"{name}_0", formulation=name,
+                material=name[:-1], microscope="M1", scale_bin="coarse",
+                pixel_size_um=3.24, q_max_i=1.3,
+                source_path=Path("i.tif"), mask_path=Path("m.tif"),
+                crop_bbox=(0, 0, 64, 64), n_instances_expected=2,
+            ),
+            gt, gt.copy(), size_bins=bins,
+        )
+        for name in ("AS1", "AS2", "K1")
+    ]
+    destination = tmp_path / "scores.json"
+
+    cli.write_json(
+        destination, {"run/epoch-12": aggregate(evaluations)},
+        {"run/epoch-12": evaluations},
+    )
+
+    entry = json.loads(destination.read_text())["run/epoch-12"]
+    assert [s["label"] for s in entry["per_formulation"]] == [
+        "formulation=AS1", "formulation=AS2", "formulation=K1",
+    ]
+    assert [s["label"] for s in entry["per_material"]] == [
+        "material=AS", "material=K",
+    ]
+    assert "per_scale_bin" in entry
