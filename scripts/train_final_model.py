@@ -83,7 +83,8 @@ import torch
 
 from materials_vision.logging_config import setup_logging
 from materials_vision.provenance import run_provenance
-from materials_vision.tracking import RunTracking
+from materials_vision.tracking import (REHEARSAL_EXPERIMENT,
+                                       TRAINING_EXPERIMENT, RunTracking)
 from materials_vision.training import (DECODER_LEARNING_RATE,
                                        LORA_LEARNING_RATE, build_loader,
                                        build_source, train_run)
@@ -234,13 +235,53 @@ def train_recipe(
     )
 
 
+def build_tracking(
+    args: argparse.Namespace, provenance_path: Path
+) -> RunTracking:
+    """Describe how the run is recorded in MLflow.
+
+    A run on a subset of the images is a rehearsal of the path, not the
+    final model, and goes to the rehearsal experiment so that it can
+    never be mistaken for the final model when runs are compared.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+    provenance_path : Path
+
+    Returns
+    -------
+    RunTracking
+    """
+    families = ",".join(recipe_record()["families"])
+    return RunTracking(
+        experiment=REHEARSAL_EXPERIMENT if args.n_train > 0
+        else TRAINING_EXPERIMENT,
+        tags={
+            "study": "final_model",
+            "part": "final",
+            "policy": POLICY.upper(),
+            "seed": str(RUN_SEED),
+            "train_subset": TRAIN_SUBSET,
+            "source": "live",
+        },
+        params={
+            "seed": RUN_SEED,
+            "policy": POLICY.upper(),
+            "augmentation_families": families,
+        },
+        artifacts=(provenance_path,),
+    )
+
+
 def execute(args: argparse.Namespace) -> None:
-    """Train the final model.
+    """Record the run and train the final model.
 
     Parameters
     ----------
     args : argparse.Namespace
     """
+    provenance_path = write_provenance(args)
     train_recipe(
         run_name(),
         split=args.split,
@@ -250,6 +291,7 @@ def execute(args: argparse.Namespace) -> None:
         save_root=args.save_root,
         epochs=args.epochs,
         n_train=args.n_train,
+        tracking=build_tracking(args, provenance_path),
     )
 
 
@@ -365,7 +407,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         return EXIT_FAILED
     logger.info("Training on %s.", torch.cuda.get_device_name(0))
 
-    write_provenance(args)
     snapshot = scored_snapshot(args.save_root, args.epochs)
     if not args.force and snapshot.exists():
         logger.info("%s already exists; nothing to do.", snapshot)
