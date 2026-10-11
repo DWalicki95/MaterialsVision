@@ -2,6 +2,7 @@ import numpy as np
 import tifffile
 from skimage.measure import regionprops
 from skimage.measure._regionprops import RegionProperties
+from skimage.segmentation import find_boundaries
 from typing import Dict, List, Optional, Tuple
 import inspect
 import math
@@ -13,6 +14,7 @@ from datetime import datetime
 
 from materials_vision.quantitative_analysis.stats_utils import (
     calculate_statistics,
+    calculate_weighted_statistics,
 )
 import logging
 
@@ -51,6 +53,55 @@ def ellipse_angle_to_image_direction(angles_deg: np.ndarray) -> np.ndarray:
     """
     angles = np.asarray(angles_deg, dtype=float)
     return np.mod(angles + VERTICAL_TO_HORIZONTAL_DEG, HALF_TURN_DEG)
+
+
+EDGE_WEIGHT_KEY = "edge_correction_weight"
+
+CORRECTED_STAT_LABELS = {
+    "mean_corrected": "Edge-corrected mean",
+    "std_corrected": "Edge-corrected standard deviation of",
+    "median_corrected": "Edge-corrected median",
+}
+
+
+def corrected_morphology_rows(
+    metric_name: str,
+    stats: Dict[str, float],
+    unit: str,
+    description: str,
+) -> List[Dict[str, object]]:
+    """
+    Report rows for the edge-corrected statistics of one metric.
+
+    Parameters
+    ----------
+    metric_name : str
+        Morphology metric, e.g. ``"equivalent_diameter"``.
+    stats : Dict[str, float]
+        Its aggregated statistics; corrected keys may be absent.
+    unit : str
+        Unit shown in the report.
+    description : str
+        Human-readable description of the metric.
+
+    Returns
+    -------
+    List[Dict[str, object]]
+        One row per corrected statistic present in ``stats``.
+    """
+    return [
+        {
+            "Category": "Morphology",
+            "Metric": f"{metric_name} ({key.replace('_', ', ')})",
+            "Value": stats[key],
+            "Unit": unit,
+            "Description": (
+                f"{label} {description} (Miles-Lantuejoul weights)"
+            ),
+        }
+        for key, label in CORRECTED_STAT_LABELS.items()
+        if key in stats
+    ]
 
 
 class PoreMorphologyMetrics:
@@ -483,6 +534,10 @@ class PoreMorphologyMetrics:
               - 'std': Standard deviation
               - 'min': Minimum value
               - 'max': Maximum value
+              - 'mean_corrected', 'median_corrected', 'std_corrected':
+                the same statistics weighted by each pore's
+                'edge_correction_weight', present only when every pore
+                carries one
 
         Examples
         --------
@@ -503,27 +558,29 @@ class PoreMorphologyMetrics:
         # Metadata fields added by batch analysis should not be aggregated
         excluded_fields = {
             'pore_id', 'original_pore_id', 'filename', 'magnification',
-            'pixel_size', 'coordination_number'
+            'pixel_size', 'coordination_number', EDGE_WEIGHT_KEY
         }
         metric_names = [
             key for key in morphology_results[0].keys()
             if key not in excluded_fields
         ]
+        weighted = all(EDGE_WEIGHT_KEY in pore for pore in morphology_results)
 
         aggregated_results = {}
 
         for metric_name in metric_names:
-            # Extract values for this metric across all pores
-            values = [
-                pore[metric_name]
-                for pore in morphology_results
-                if metric_name in pore
+            pores = [
+                pore for pore in morphology_results if metric_name in pore
             ]
-
-            if values:
-                # Calculate statistics
-                stats = calculate_statistics(values)
-                aggregated_results[metric_name] = stats
+            if pores:
+                values = [pore[metric_name] for pore in pores]
+                weights = (
+                    [pore[EDGE_WEIGHT_KEY] for pore in pores]
+                    if weighted else None
+                )
+                aggregated_results[metric_name] = calculate_statistics(
+                    values, weights=weights
+                )
 
         return aggregated_results
 
@@ -559,56 +616,39 @@ class GlobalMicrostructureDescriptors:
         mask_area = mask_.shape[0] * mask_.shape[1] * (self.pixel_size**2)
         return mask_area
 
-    def _count_all_pores_area(self) -> float:
-        """Sum of all pore areas from morphology results."""
-        return sum(pore["area"] for pore in self.morphology_results)
-
-    def _count_pores_area_in_mask(self, sub_mask: np.ndarray) -> float:
-        """
-        Count the total area of pores within a specific mask region.
-
-        Parameters
-        ----------
-        sub_mask : np.ndarray
-            A labeled mask array where each pore has a unique integer label
-
-        Returns
-        -------
-        float
-            Total area of all pores in the sub-mask (in µm²)
-        """
-        # Count pixels for each label (excluding background label 0)
-        pore_pixel_count = sum(sub_mask > 0)
-
-        # Convert to area
-        pore_area = pore_pixel_count * (self.pixel_size**2)
-
-        return pore_area
-
     def calculate_porosity(self, mask_: Optional[np.ndarray] = None) -> float:
         """
-        Calculate porosity (volume fraction of pores).
+        Calculate areal porosity (fraction of the frame covered by pores).
+
+        Every labelled pixel counts, including pores that touch the image
+        border. Border pores are left out of the per-pore morphology
+        because their shape is truncated, but the part of a pore that lies
+        inside the frame is still pore space, so dropping it from the
+        numerator while keeping the full frame in the denominator would
+        bias porosity low - most strongly for coarse-pored materials,
+        where a large share of pore area touches the border.
 
         Parameters
         ----------
         mask_ : np.ndarray, optional
-            Optional sub-mask for local porosity calculation
+            Instance mask or a crop of it (0 = solid); defaults to the
+            whole mask.
 
         Returns
         -------
         float
             Porosity value (0 to 1)
+
+        Raises
+        ------
+        ValueError
+            For an empty mask, whose porosity is undefined.
         """
         if mask_ is None:
-            # Global porosity using pre-computed morphology results
-            pores_area = self._count_all_pores_area()
-            mask_area = self._count_mask_area()
-        else:
-            # Local porosity for a specific sub-mask
-            pores_area = self._count_pores_area_in_mask(mask_)
-            mask_area = self._count_mask_area(mask_)
-
-        return pores_area / mask_area
+            mask_ = self.mask
+        if mask_.size == 0:
+            raise ValueError("An empty mask has no porosity.")
+        return float(np.count_nonzero(mask_)) / mask_.size
 
     def _cut_mask_into_pieces(
         self, n_rows: int = 2, n_cols: int = 2
@@ -674,7 +714,7 @@ class GlobalMicrostructureDescriptors:
         porosity_variance = np.var(local_porosities)
         return porosity_variance
 
-    def calculate_anisotropy(self) -> float:
+    def calculate_anisotropy(self, corrected: bool = False) -> float:
         """
         Calculate anisotropy of foam microstructure from ellipse orientation
         angles.
@@ -683,28 +723,42 @@ class GlobalMicrostructureDescriptors:
         - 0: random orientation (isotropic)
         - 1: perfect alignment (highly anisotropic)
 
-        Returns:
+        Parameters
+        ----------
+        corrected : bool, optional
+            Weight each pore by its edge-correction weight, compensating
+            for large pores being excluded at the border more often than
+            small ones (default: False). Returns ``nan`` when any pore
+            lacks a weight.
+
+        Returns
+        -------
+        float
             Anisotropy index (0 to 1)
         """
-        # Extract ellipse angles from all pores
-        angles = []
-        for pore in self.morphology_results:
-            if "ellipse_angle" in pore:
-                angles.append(pore["ellipse_angle"])
-
-        if not angles:
+        pores = [
+            pore for pore in self.morphology_results
+            if "ellipse_angle" in pore
+        ]
+        if not pores:
             logger.warning("No ellipse angles found in morphology results")
             return 0.0
 
-        angles = np.array(angles)
+        angles = np.array([pore["ellipse_angle"] for pore in pores])
+        if corrected:
+            if not all(EDGE_WEIGHT_KEY in pore for pore in pores):
+                return float("nan")
+            weights = np.array([pore[EDGE_WEIGHT_KEY] for pore in pores])
+        else:
+            weights = np.ones_like(angles)
 
         # Convert to radians and double the angle
         # (orientation is π-periodic, not 2π-periodic)
         angles_rad = np.deg2rad(angles * 2)
 
         # Calculate resultant vector using circular statistics
-        mean_cos = np.mean(np.cos(angles_rad))
-        mean_sin = np.mean(np.sin(angles_rad))
+        mean_cos = np.average(np.cos(angles_rad), weights=weights)
+        mean_sin = np.average(np.sin(angles_rad), weights=weights)
 
         # Resultant vector length R (0 to 1)
         # R = 1 means perfect alignment, R = 0 means random
@@ -718,13 +772,14 @@ class GlobalMicrostructureDescriptors:
 
         Returns:
             Dictionary containing porosity, local_porosity_variance,
-            and anisotropy
+            anisotropy and its edge-corrected counterpart
         """
         results = {
             "porosity": self.calculate_porosity(),
             "local_porosity_variance": (
                 self.calculate_local_porosity_variance()),
             "anisotropy": self.calculate_anisotropy(),
+            "anisotropy_corrected": self.calculate_anisotropy(corrected=True),
         }
         return results
 
@@ -734,6 +789,20 @@ class SpatialRelationMetrics:
     Analyzes spatial relationships between pores.
 
     Includes nearest neighbor distance analysis.
+
+    Parameters
+    ----------
+    props : List[RegionProperties]
+        Pores whose nearest-neighbour distance is reported.
+    pixel_size : float
+        Physical size of one pixel in micrometers.
+    generate_plots : bool, optional
+        Whether to save the distance histogram (default: True).
+    neighbour_props : List[RegionProperties], optional
+        Pores that may serve as a neighbour; defaults to ``props``. Pass
+        every pore in the frame, border pores included: a pore near the
+        border whose true neighbour touches the border would otherwise be
+        matched to a farther one.
     """
 
     def __init__(
@@ -741,8 +810,12 @@ class SpatialRelationMetrics:
         props: List[RegionProperties],
         pixel_size: float,
         generate_plots: bool = True,
+        neighbour_props: Optional[List[RegionProperties]] = None,
     ):
         self.props = props
+        self.neighbour_props = (
+            props if neighbour_props is None else neighbour_props
+        )
         self.generate_plots = generate_plots
         self.pixel_size = pixel_size
 
@@ -768,17 +841,29 @@ class SpatialRelationMetrics:
         Calculate nearest neighbor distances between pore centroids.
 
         Returns:
-            List of nearest neighbor distances (in µm)
+            List of nearest neighbor distances (in µm), one per pore in
+            ``props``; empty when there are no pores or fewer than two
+            candidate neighbours
         """
-        pore_centroids = np.array([prop.centroid for prop in self.props])
-        tree = spatial.KDTree(pore_centroids)
-        nearest_neighbors_distances = []
-        for pore_centroid in pore_centroids:
-            distances, indices = tree.query(pore_centroid, k=2)
-            # index 0 is point itself, index 1 is nearest neighbor
-            nn_distance = distances[1] * self.pixel_size
-            nearest_neighbors_distances.append(nn_distance)
-        return nearest_neighbors_distances
+        if not self.props or len(self.neighbour_props) < 2:
+            return []
+        neighbour_labels = np.array([p.label for p in self.neighbour_props])
+        neighbour_centroids_px = np.array(
+            [p.centroid for p in self.neighbour_props]
+        )
+        query_labels = np.array([p.label for p in self.props])
+        query_centroids_px = np.array([p.centroid for p in self.props])
+
+        tree = spatial.KDTree(neighbour_centroids_px)
+        distances_px, indices = tree.query(query_centroids_px, k=2)
+        # A pore that is itself a candidate comes back as its own nearest
+        # point; matching by label rather than by distance keeps a distinct
+        # pore with a coincident centroid as a valid neighbour.
+        is_self = neighbour_labels[indices[:, 0]] == query_labels
+        nn_distances_px = np.where(
+            is_self, distances_px[:, 1], distances_px[:, 0]
+        )
+        return list(nn_distances_px * self.pixel_size)
 
     def calculate_spatial_metrics(
         self, output_dir: Optional[Path] = None
@@ -801,6 +886,15 @@ class SpatialRelationMetrics:
         nearest_neighbors_distances = (
             self.calculate_nearest_neighbor_centroid_distance()
         )
+        if not nearest_neighbors_distances:
+            logger.warning(
+                "Not enough pores for nearest neighbour distances"
+            )
+            nan = float("nan")
+            return {
+                "mean": nan, "median": nan, "min": nan, "max": nan,
+                "std": nan,
+            }
         stats = calculate_statistics(nearest_neighbors_distances)
 
         if self.generate_plots and output_dir:
@@ -834,8 +928,22 @@ class TopologyConnectivityAnalysis:
     Analyzes topological and connectivity properties of porous structure.
 
     Includes:
-    - Fractal dimension (box-counting method)
+    - Fractal dimension of the pore boundaries (box-counting method)
     - Coordination number (Voronoi analysis)
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Instance mask, 0 = solid, each pore a unique positive label.
+    props : List[RegionProperties]
+        Pores whose coordination number is reported.
+    pixel_size : float
+        Physical size of one pixel in micrometers.
+    neighbour_props : List[RegionProperties], optional
+        Pores that take part in the Voronoi tessellation; must include
+        every pore in ``props`` and defaults to it. Pass every pore in the
+        frame, border pores included, so that a pore near the border is
+        not short of neighbours just because they touch the border.
     """
 
     def __init__(
@@ -843,10 +951,57 @@ class TopologyConnectivityAnalysis:
         mask: np.ndarray,
         props: List[RegionProperties],
         pixel_size: float,
+        neighbour_props: Optional[List[RegionProperties]] = None,
     ):
         self.mask = mask
         self.props = props
+        self.neighbour_props = (
+            props if neighbour_props is None else neighbour_props
+        )
         self.pixel_size = pixel_size
+
+    @staticmethod
+    def _box_counts(
+        structure: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Count occupied boxes at dyadic box sizes over the whole frame.
+
+        The frame is padded with empty pixels up to a multiple of the
+        largest box, so every pixel is covered at every scale; padding
+        holds no structure and therefore adds no occupied boxes.
+
+        Parameters
+        ----------
+        structure : np.ndarray
+            ``(H, W)`` boolean image of the structure to cover.
+
+        Returns
+        -------
+        box_sizes_px : np.ndarray
+            Box edge lengths 1, 2, 4, ... up to half the shorter side.
+        counts : np.ndarray
+            Number of boxes containing at least one structure pixel.
+        """
+        shorter_side_px = min(structure.shape)
+        if shorter_side_px < 2:
+            return np.array([], dtype=int), np.array([], dtype=int)
+        largest_box_px = 2 ** int(np.floor(np.log2(shorter_side_px / 2)))
+        padded_shape = [
+            -(-side // largest_box_px) * largest_box_px
+            for side in structure.shape
+        ]
+        occupied = np.zeros(padded_shape, dtype=bool)
+        occupied[:structure.shape[0], :structure.shape[1]] = structure
+
+        box_sizes_px = [1]
+        counts = [int(np.count_nonzero(occupied))]
+        while box_sizes_px[-1] < largest_box_px:
+            h, w = occupied.shape
+            occupied = occupied.reshape(h // 2, 2, w // 2, 2).any(axis=(1, 3))
+            box_sizes_px.append(box_sizes_px[-1] * 2)
+            counts.append(int(np.count_nonzero(occupied)))
+        return np.array(box_sizes_px), np.array(counts)
 
     def calculate_fractal_dimension(
         self,
@@ -855,29 +1010,31 @@ class TopologyConnectivityAnalysis:
         filename: str = "fractal_dimension_plot",
     ) -> Tuple[float, float]:
         """
-        Calculate fractal dimension using box-counting method.
+        Calculate the fractal dimension of the pore boundaries.
 
-        Implements the Minkowski-Bouligand box-counting method to estimate
-        the fractal dimension of the porous structure. The method recursively
-        divides the binary mask into smaller boxes and counts how many boxes
-        contain part of the structure at each scale.
+        Box-counts the pore outlines - the pixels where a pore meets the
+        solid phase or a neighbouring pore - rather than the filled pore
+        phase. A filled phase covering most of the frame scores close to 2
+        whatever its structure, while the outline network separates fine,
+        convoluted walls from coarse, smooth ones.
 
         The fractal dimension D is estimated from the relationship:
         log(N(ε)) = -D * log(ε) + C
 
         where N(ε) is the number of boxes of size ε needed to cover the
-        structure.
+        boundaries.
 
         Parameters
         ----------
         reject_huge_boxes : bool, optional
-            Whether to reject large box sizes from linear fitting to improve
-            accuracy (default: True). When True, only intermediate scales are
-            used for fitting.
+            Fit only the intermediate scales, from 2 px to an eighth of the
+            shorter image side (default: True). Single pixels show the
+            digital grid rather than the structure, and boxes larger than
+            an eighth of the frame are too few to count reliably. When
+            False, every scale up to half the shorter side is fitted.
         save_plot_path : Path, optional
             Directory path to save diagnostic plot showing the log-log
-            relationship
-            and linear fit (default: None — plot not saved)
+            relationship and linear fit (default: None — plot not saved)
         filename : str, optional
             Filename for the diagnostic plot (
             default: 'fractal_dimension_plot')
@@ -885,27 +1042,22 @@ class TopologyConnectivityAnalysis:
         Returns
         -------
         fractal_dim : float
-            Estimated fractal dimension (typically between 1 and 2 for 2D
-            structures)
+            Estimated fractal dimension, between 1 and 2 for a 2D
+            boundary network; ``nan`` when the mask has no pores or the
+            image is too small for two scales.
         r_squared : float
             R² coefficient of determination for the linear fit, indicating
-            fit quality (closer to 1 is better)
+            fit quality (closer to 1 is better); ``nan`` alongside an
+            undefined dimension.
 
         Notes
         -----
         The box-counting method works by:
-        1. Converting the instance mask to binary
-        2. Cropping to largest square with size as power of 2
+        1. Extracting the pore boundaries from the instance mask
+        2. Padding the frame to a multiple of the largest box size
         3. Iteratively doubling box size and counting occupied boxes
         4. Fitting a line to log(box_size) vs log(count)
         5. Fractal dimension is the negative slope of this line
-
-        Higher fractal dimensions indicate more complex, space-filling
-        structures.
-        For porous materials:
-        - D ≈ 1: Linear, simple structures
-        - D ≈ 1.5-1.7: Typical porous foams
-        - D ≈ 2: Highly complex, space-filling structures
 
         Examples
         --------
@@ -916,55 +1068,42 @@ class TopologyConnectivityAnalysis:
         >>> analyzer = TopologyConnectivityAnalysis(mask, props,
         pixel_size=1.5)
         >>> fractal_dim, r_squared = analyzer.calculate_fractal_dimension()
-        >>> print(f"Fractal dimension: {fractal_dim:.3f}, R²: {r_squared:.3f}")
-        Fractal dimension: 1.652, R²: 0.987
-
         """
         logger.info(
             "Calculating fractal dimension using box-counting method..."
         )
+        nan = float("nan")
+        boundaries = find_boundaries(self.mask, mode="inner")
+        if not boundaries.any():
+            logger.warning("No pore boundaries - fractal dimension undefined")
+            return nan, nan
 
-        # Instance mask -> binary mask
-        Z = self.mask > 0
-        # Image cut for further split to equal squares
-        p = np.min(Z.shape)
-        n = 2 ** int(np.floor(np.log2(p)))
-        Z = Z[:n, :n]
-        box_sizes = []
-        counts = []
-
-        k = 1
-        curr_Z = Z.copy()
-
-        while k <= n / 2:  # while k is smaller than half of an image
-            box_sizes.append(k)
-            counts.append(np.sum(curr_Z > 0))
-
-            h, w = curr_Z.shape
-            curr_Z = curr_Z.reshape(h // 2, 2, w // 2, 2).sum(axis=(1, 3)) > 0
-            # Box size increased 2-times
-            k *= 2
-
-        # Reject points where box sizes are huge
+        box_sizes_px, counts = self._box_counts(boundaries)
         if reject_huge_boxes:
-            valid_idxs = slice(-4, -2) if len(box_sizes) > 4 else slice(None)
+            keep = (box_sizes_px >= 2) & (
+                box_sizes_px <= min(self.mask.shape) / 8
+            )
         else:
-            valid_idxs = slice(None)
+            keep = np.ones_like(box_sizes_px, dtype=bool)
+        if np.count_nonzero(keep) < 2:
+            logger.warning(
+                "Image too small for a box-counting fit - fractal "
+                "dimension undefined"
+            )
+            return nan, nan
 
         # Calculate fractal dimension according to formula:
         # log(N(k)) = -D * log(k) + C
-        x_data = np.log(box_sizes)[valid_idxs]
-        y_data = np.log(counts)[valid_idxs]
+        x_data = np.log(box_sizes_px[keep])
+        y_data = np.log(counts[keep])
         coeffs = np.polyfit(x_data, y_data, 1)
         fractal_dim = -coeffs[0]
 
-        # Calculate R^2 (determination coeff.) - how well straight line fits
-        # R^2 helps us interpret if we can trust calculated D or if there
-        # is something wrong
+        # R^2 shows whether a power law describes the counts at all
         y_pred = coeffs[0] * x_data + coeffs[1]
         ss_res = np.sum((y_data - y_pred) ** 2)
         ss_tot = np.sum((y_data - np.mean(y_data)) ** 2)
-        r_squared = 1 - (ss_res / ss_tot)
+        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else nan
 
         logger.info(
             f"Fractal dimension: {fractal_dim:.4f}, R²: {r_squared:.4f}"
@@ -1017,8 +1156,10 @@ class TopologyConnectivityAnalysis:
         for each pore, determined through Voronoi tessellation. This metric
         describes the topological connectivity of the porous structure.
 
-        Note: If boundary pores were filtered during PorousMaterialAnalyzer
-        initialization, they are automatically excluded from this analysis.
+        The tessellation is built over ``neighbour_props`` and the count is
+        reported for ``props`` only. Border pores therefore still separate
+        their neighbours' cells, but get no coordination number of their
+        own, because their cells are cut by the frame.
 
         Parameters
         ----------
@@ -1036,7 +1177,8 @@ class TopologyConnectivityAnalysis:
               (e.g., {1: 5, 2: 6, 3: 4}). None if insufficient pores.
             - Second element: Dictionary containing statistical measures
               (mean, median, std, min, max). None if insufficient pores.
-            Returns (None, None) if insufficient pores (<4).
+            Returns (None, None) if fewer than 4 pores take part in the
+            tessellation or none is to be reported.
 
         Notes
         -----
@@ -1048,24 +1190,24 @@ class TopologyConnectivityAnalysis:
         --------
         scipy.spatial.Voronoi : Voronoi diagram computation
         """
-        centroids = np.array([p.centroid for p in self.props])
-        centroids = centroids[:, ::-1]  # [y, x] -> x, y
-        if len(centroids) < 4:
+        if len(self.neighbour_props) < 4 or not self.props:
             logger.warning("Not enough points to generate Voronoi Diagram")
             return None, None
+        centroids = np.array([p.centroid for p in self.neighbour_props])
+        centroids = centroids[:, ::-1]  # [y, x] -> x, y
 
         voronoi = spatial.Voronoi(points=centroids)
-        neighbor_counts = {i: 0 for i in range(len(centroids))}
-
-        # Count neighbors from Voronoi ridge points
-        for p1, p2 in voronoi.ridge_points:
-            neighbor_counts[p1] += 1
-            neighbor_counts[p2] += 1
-
-        # Convert to array for statistics calculation
-        coordination_numbers = np.array(
-            [neighbor_counts[i] for i in range(len(centroids))]
+        neighbor_counts = np.bincount(
+            voronoi.ridge_points.ravel(), minlength=len(centroids)
         )
+
+        neighbour_index_by_label = {
+            p.label: i for i, p in enumerate(self.neighbour_props)
+        }
+        reported = np.array(
+            [neighbour_index_by_label[p.label] for p in self.props]
+        )
+        coordination_numbers = neighbor_counts[reported]
 
         stats = calculate_statistics(values=coordination_numbers)
         logger.info(
@@ -1073,10 +1215,9 @@ class TopologyConnectivityAnalysis:
             f"Std={stats['std']:.2f}"
         )
 
-        # Create mapping from pore_id to coordination number
         cn_by_pore_id = {
-            self.props[i].label: neighbor_counts[i]
-            for i in range(len(centroids))
+            p.label: int(cn)
+            for p, cn in zip(self.props, coordination_numbers)
         }
 
         if save_plot_path:
@@ -1096,20 +1237,21 @@ class TopologyConnectivityAnalysis:
                     line_width=1,
                     line_alpha=0.4,
                 )
-                all_y = centroids[:, 1]
-                all_x = centroids[:, 0]
-
-                # Plot all pores (boundary pores already filtered if enabled)
+                is_reported = np.zeros(len(centroids), dtype=bool)
+                is_reported[reported] = True
                 ax.scatter(
-                    all_x, all_y, c="green", s=20, label="Analyzed pores"
+                    centroids[~is_reported, 0], centroids[~is_reported, 1],
+                    c="grey", s=20, label="Border pores (neighbours only)"
                 )
-
-                # Annotate with coordination numbers
-                for idx in range(len(centroids)):
+                ax.scatter(
+                    centroids[is_reported, 0], centroids[is_reported, 1],
+                    c="green", s=20, label="Analyzed pores"
+                )
+                for idx, cn in zip(reported, coordination_numbers):
                     ax.text(
-                        all_x[idx],
-                        all_y[idx],
-                        str(neighbor_counts[idx]),
+                        centroids[idx, 0],
+                        centroids[idx, 1],
+                        str(cn),
                         color="darkgreen",
                         fontsize=8,
                     )
@@ -1439,6 +1581,59 @@ class PorousMaterialAnalyzer:
 
         return filtered_props
 
+    @staticmethod
+    def _edge_correction_weight(
+        bbox: Tuple[int, int, int, int],
+        mask_shape: Tuple[int, int],
+        tolerance: int,
+    ) -> float:
+        """
+        Miles-Lantuejoul weight of a pore kept by the border filter.
+
+        A pore survives the filter only if its bounding box fits inside the
+        frame shrunk by the tolerance, so the larger the pore, the fewer
+        positions it could have occupied and still be measured. Weighting
+        each kept pore by the inverse of that chance - the frame area over
+        the area of positions that would have kept it - removes the bias
+        towards small pores that the filter otherwise puts into size,
+        shape and orientation statistics.
+
+        Parameters
+        ----------
+        bbox : Tuple[int, int, int, int]
+            ``(min_row, min_col, max_row, max_col)`` with exclusive maxima,
+            as given by ``RegionProperties.bbox``.
+        mask_shape : Tuple[int, int]
+            ``(height, width)`` of the frame in pixels.
+        tolerance : int
+            Border tolerance used by ``_filter_boundary_pores``.
+
+        Returns
+        -------
+        float
+            Weight of at least 1; equal to 1 only in the limit of a point
+            pore in an infinitely large frame.
+
+        Raises
+        ------
+        ValueError
+            If the bounding box could not have passed the filter, which
+            would make the weight undefined.
+        """
+        img_h, img_w = mask_shape
+        min_r, min_c, max_r, max_c = bbox
+        # Kept iff tolerance < min_row and max_row < height - tolerance
+        # (likewise for columns), which leaves this many top-left positions
+        # along each axis.
+        rows_free = img_h - 2 * tolerance - 1 - (max_r - min_r)
+        cols_free = img_w - 2 * tolerance - 1 - (max_c - min_c)
+        if rows_free < 1 or cols_free < 1:
+            raise ValueError(
+                f"Bounding box {bbox} cannot pass a {tolerance} px border "
+                f"filter in a {img_h}x{img_w} frame."
+            )
+        return (img_h * img_w) / (rows_free * cols_free)
+
     def plot_boundary_rejection_visualization(
         self, save_to_plots_dir: bool = True
     ) -> Optional[Path]:
@@ -1587,6 +1782,10 @@ class PorousMaterialAnalyzer:
         """
         Calculate morphological metrics for each individual pore.
 
+        Each pore also carries an ``edge_correction_weight``: the
+        Miles-Lantuejoul weight when border pores are rejected, and 1.0
+        when they are not, since then no pore is selected by its size.
+
         Returns:
             List of dictionaries, each containing metrics for one pore
         """
@@ -1605,6 +1804,12 @@ class PorousMaterialAnalyzer:
                 if not name.startswith("_"):
                     result_dict = method()
                     pore_result.update(result_dict)
+            pore_result[EDGE_WEIGHT_KEY] = (
+                self._edge_correction_weight(
+                    prop.bbox, self.mask.shape, self.boundary_tolerance
+                )
+                if self.reject_boundary_pores else 1.0
+            )
             results.append(pore_result)
 
         self.morphology_results = results
@@ -1669,6 +1874,7 @@ class PorousMaterialAnalyzer:
             props=self.props,
             generate_plots=self.generate_plots,
             pixel_size=self.pixel_size,
+            neighbour_props=self.props_all,
         )
         self.spatial_metrics = calculator.calculate_spatial_metrics(
             output_dir=self.output_dir["plots"]
@@ -1688,7 +1894,10 @@ class PorousMaterialAnalyzer:
         """
         logger.info("Calculating topology and connectivity metrics...")
         calculator = TopologyConnectivityAnalysis(
-            mask=self.mask, props=self.props, pixel_size=self.pixel_size
+            mask=self.mask,
+            props=self.props,
+            pixel_size=self.pixel_size,
+            neighbour_props=self.props_all,
         )
         self.topology_metrics = calculator.calculate_all_topology_metrics(
             output_dir=self.output_dir["plots"],
@@ -2051,6 +2260,11 @@ class PorousMaterialAnalyzer:
                     "Description": f"Maximum {description}",
                 }
             )
+            report_data.extend(
+                corrected_morphology_rows(
+                    metric_name, stats, unit, description
+                )
+            )
 
         # --- GLOBAL DESCRIPTORS ---
         report_data.append(
@@ -2085,6 +2299,18 @@ class PorousMaterialAnalyzer:
                 )
             }
         )
+        report_data.append(
+            {
+                "Category": "Global Descriptors",
+                "Metric": "Anisotropy (corrected)",
+                "Value": self.global_descriptors["anisotropy_corrected"],
+                "Unit": "-",
+                "Description": (
+                    "Anisotropy weighted by edge_correction_weight, "
+                    "compensating for border pores excluded by size"
+                ),
+            }
+        )
 
         # --- SPATIAL METRICS ---
         for key, value in self.spatial_metrics.items():
@@ -2109,7 +2335,8 @@ class PorousMaterialAnalyzer:
                 "Value": self.topology_metrics["fractal_dimension"],
                 "Unit": "-",
                 "Description": (
-                    "Fractal dimension from box-counting method"
+                    "Fractal dimension of the pore boundaries from "
+                    "box-counting"
                 ),
             }
         )
@@ -2174,6 +2401,31 @@ class PorousMaterialAnalyzer:
                     "Description": "Maximum coordination number",
                 }
             )
+            pores_with_cn = [
+                pore for pore in self.morphology_results
+                if pore.get("coordination_number") is not None
+            ]
+            if pores_with_cn:
+                cn_corrected = calculate_weighted_statistics(
+                    [pore["coordination_number"] for pore in pores_with_cn],
+                    [pore[EDGE_WEIGHT_KEY] for pore in pores_with_cn],
+                )
+                for key, label in CORRECTED_STAT_LABELS.items():
+                    report_data.append(
+                        {
+                            "Category": "Topology & Connectivity",
+                            "Metric": (
+                                "Coordination Number "
+                                f"({key.replace('_', ', ')})"
+                            ),
+                            "Value": cn_corrected[key],
+                            "Unit": "-",
+                            "Description": (
+                                f"{label} coordination number "
+                                "(Miles-Lantuejoul weights)"
+                            ),
+                        }
+                    )
 
         df_report = pd.DataFrame(report_data)
         df_individual = pd.DataFrame(self.morphology_results)

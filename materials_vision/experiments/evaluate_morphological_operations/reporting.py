@@ -1,192 +1,108 @@
-"""Quantitative metric computation and xlsx reporting.
+"""Folding the classical evaluations into the report the models have.
 
-All metrics come from ``materials_vision.metrics``; this module only
-orchestrates those functions and serializes the results. No metric is
-defined or modified here.
+No metric is computed here. Every figure comes from
+``materials_vision.evaluation`` - ``aggregate`` and ``cross_sections``
+over the per-image evaluations - so the JSON written below has the
+layout of the segmentation models' reports, entry for entry, and a
+script reading one can read the other.
+
+One addition: a breakdown **per image**. The classical predictions
+cover a handful of images, and on so few a pooled figure can rest
+largely on one of them; the per-image rows show whether it does.
 """
-
+import json
 import logging
+from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Sequence
 
-import numpy as np # type: ignore
-import pandas as pd # type: ignore
-
-from materials_vision.metrics import (
-    boundary_scores_batched,
-    iou_scores_batch,
-    summarize_evaluation_boundary_score,
-    summarize_evaluation_iou,
-)
+from materials_vision.evaluation import (AggregateResult, ImageEvaluation,
+                                         aggregate, cross_sections)
 
 logger = logging.getLogger(__name__)
 
+# The same cross-sections, under the same keys, as the model reports.
+JSON_CROSS_SECTIONS = {
+    "per_material": "material",
+    "per_scale_bin": "scale_bin",
+    "per_formulation": "formulation",
+}
 
-def _evaluate(
-    true_masks: List[np.ndarray],
-    pred_masks: List[np.ndarray],
-    threshold: float,
-    scales: Sequence[float],
-) -> pd.Series:
-    """
-    Compute the combined IoU and boundary metric series for a batch.
-
-    Parameters
-    ----------
-    true_masks : List[np.ndarray]
-        Ground-truth instance masks.
-    pred_masks : List[np.ndarray]
-        Prediction instance masks (same order as ``true_masks``).
-    threshold : float
-        IoU greedy-match threshold.
-    scales : Sequence[float]
-        Boundary tolerance scales.
-
-    Returns
-    -------
-    pd.Series
-        Metric name to value mapping.
-    """
-    iou_results = iou_scores_batch(true_masks, pred_masks, threshold)
-    precision, recall, fscore = boundary_scores_batched(
-        true_masks, pred_masks, list(scales)
-    )
-    iou_report = summarize_evaluation_iou(iou_results)
-    boundary_report = summarize_evaluation_boundary_score(
-        precision, recall, fscore
-    )
-    combined = pd.concat([iou_report, boundary_report])
-    return combined["value"]
+HEADLINE_FIELDS = (
+    "f1", "precision", "recall", "mean_pair_iou",
+    "merges_per_100_gt", "splits_per_100_gt", "pore_count_error",
+)
 
 
-def evaluate_variant(
-    true_masks: List[np.ndarray],
-    pred_masks: List[np.ndarray],
-    threshold: float,
-    scales: Sequence[float],
-) -> pd.Series:
-    """
-    Aggregate metrics over all samples of a single variant.
+def variant_report(evaluations: Sequence[ImageEvaluation]) -> dict:
+    """Every figure for one variant: pooled, per cross-section, per image.
 
     Parameters
     ----------
-    true_masks : List[np.ndarray]
-        Ground-truth masks.
-    pred_masks : List[np.ndarray]
-        Prediction masks.
-    threshold : float
-        IoU greedy-match threshold.
-    scales : Sequence[float]
-        Boundary tolerance scales.
+    evaluations : sequence of ImageEvaluation
 
     Returns
     -------
-    pd.Series
-        Aggregated metric values.
+    dict
+        ``overall``, the keys of ``JSON_CROSS_SECTIONS``, and
+        ``per_image``, each holding ``AggregateResult`` fields.
     """
-    return _evaluate(true_masks, pred_masks, threshold, scales)
-
-
-def evaluate_variant_per_sample(
-    stems: List[str],
-    true_masks: List[np.ndarray],
-    pred_masks: List[np.ndarray],
-    threshold: float,
-    scales: Sequence[float],
-) -> pd.DataFrame:
-    """
-    Compute metrics independently for each sample of a variant.
-
-    Parameters
-    ----------
-    stems : List[str]
-        Sample identifiers, used as the row index.
-    true_masks : List[np.ndarray]
-        Ground-truth masks.
-    pred_masks : List[np.ndarray]
-        Prediction masks.
-    threshold : float
-        IoU greedy-match threshold.
-    scales : Sequence[float]
-        Boundary tolerance scales.
-
-    Returns
-    -------
-    pd.DataFrame
-        One row per sample, columns are metric names.
-    """
-    rows = {}
-    for stem, true_mask, pred_mask in zip(stems, true_masks, pred_masks):
-        rows[stem] = _evaluate(
-            [true_mask], [pred_mask], threshold, scales
-        )
-    report = pd.DataFrame.from_dict(rows, orient="index")
-    report.index.name = "sample"
+    report = {"overall": asdict(aggregate(evaluations))}
+    for field, key in JSON_CROSS_SECTIONS.items():
+        report[field] = [
+            asdict(section) for section in cross_sections(evaluations, key)
+        ]
+    report["per_image"] = [
+        asdict(aggregate([evaluation], label=evaluation.record.image_id))
+        for evaluation in evaluations
+    ]
     return report
 
 
-def _build_summary(
-    aggregate_by_variant: Dict[str, pd.Series],
-    per_sample_by_variant: Dict[str, pd.DataFrame],
-) -> pd.DataFrame:
-    """
-    Build the summary frame with a mean and a std column per variant.
-
-    The mean column holds the aggregated metric value; the std column
-    holds the per-sample standard deviation (ddof=1) of that metric.
+def write_json(
+    destination: Path,
+    evaluations_by_variant: dict[str, Sequence[ImageEvaluation]],
+) -> dict:
+    """Save the report of every variant.
 
     Parameters
     ----------
-    aggregate_by_variant : Dict[str, pd.Series]
-        Mapping ``variant -> aggregated metric series``.
-    per_sample_by_variant : Dict[str, pd.DataFrame]
-        Mapping ``variant -> per-sample metric frame``.
+    destination : Path
+    evaluations_by_variant : dict
+        Variant name to its per-image evaluations.
 
     Returns
     -------
-    pd.DataFrame
-        Summary indexed by metric, with ``<variant>`` and
-        ``<variant>_std`` columns.
+    dict
+        The payload written.
     """
-    summary = pd.DataFrame(aggregate_by_variant)
-    summary.index.name = "metric"
-    columns = []
-    for variant in aggregate_by_variant:
-        std = per_sample_by_variant[variant].std(ddof=1)
-        summary[f"{variant}_std"] = std
-        columns.extend([variant, f"{variant}_std"])
-    return summary[columns]
+    payload = {
+        variant: variant_report(evaluations)
+        for variant, evaluations in evaluations_by_variant.items()
+    }
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(payload, indent=2, default=str))
+    logger.info("Wrote %s.", destination)
+    return payload
 
 
-def write_xlsx_report(
-    output_dir: Path,
-    aggregate_by_variant: Dict[str, pd.Series],
-    per_sample_by_variant: Dict[str, pd.DataFrame],
-) -> Path:
-    """
-    Write aggregate and per-sample metrics to an xlsx report.
+def log_headline(results: dict[str, AggregateResult]) -> None:
+    """Log the headline figures of every variant, one row each.
 
     Parameters
     ----------
-    output_dir : Path
-        Directory where ``report.xlsx`` is written.
-    aggregate_by_variant : Dict[str, pd.Series]
-        Mapping ``variant -> aggregated metric series``.
-    per_sample_by_variant : Dict[str, pd.DataFrame]
-        Mapping ``variant -> per-sample metric frame``.
-
-    Returns
-    -------
-    Path
-        Path to the written report.
+    results : dict
+        Variant name to its pooled figures.
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
-    report_path = output_dir / "report.xlsx"
-    summary = _build_summary(aggregate_by_variant, per_sample_by_variant)
-    with pd.ExcelWriter(report_path, engine="openpyxl") as writer:
-        summary.to_excel(writer, sheet_name="summary")
-        for variant, frame in per_sample_by_variant.items():
-            sheet = f"per_sample_{variant}"[:31]
-            frame.to_excel(writer, sheet_name=sheet)
-    logger.info("Report written to %s", report_path)
-    return report_path
+    header = "  ".join(f"{field:>10.10}" for field in HEADLINE_FIELDS)
+    logger.info("%-24s %s", "variant", header)
+    for name, result in results.items():
+        values = "  ".join(
+            f"{getattr(result, field):10.4f}" for field in HEADLINE_FIELDS
+        )
+        logger.info("%-24s %s", name, values)
+    first = next(iter(results.values()))
+    logger.info(
+        "Scored on %d image(s), %d annotated instance(s).",
+        first.n_images, first.n_gt,
+    )

@@ -7,7 +7,8 @@ import logging
 
 from materials_vision.utils import load_pixel_sizes
 from materials_vision.quantitative_analysis.quantitative_analysis import (
-    PorousMaterialAnalyzer, PoreMorphologyMetrics,
+    EDGE_WEIGHT_KEY, PorousMaterialAnalyzer, PoreMorphologyMetrics,
+    corrected_morphology_rows,
 )
 from materials_vision.quantitative_analysis.stats_utils import (
     calculate_statistics,
@@ -511,6 +512,15 @@ class BatchPorousMaterialAnalyzer:
             combined_global['anisotropy'] = np.nan
             logger.warning("No valid numeric values for anisotropy")
 
+        corrected_anisotropy_values = [
+            img['global_descriptors'].get('anisotropy_corrected', np.nan)
+            for img in all_image_results
+        ]
+        combined_global['anisotropy_corrected'] = (
+            float(np.mean(corrected_anisotropy_values))
+            if corrected_anisotropy_values else np.nan
+        )
+
         # Calculate batch_porosity_variance based on mode
         if self.batch_variance_mode == "across_images":
             if len(numeric_porosity_values) > 1:
@@ -633,17 +643,24 @@ class BatchPorousMaterialAnalyzer:
             logger.warning("No valid numeric values for fractal_r_squared")
 
         # Coordination number - recalculate from ALL individual values
-        all_cn_values = []
-        for pore in all_individual_pores:
-            if (
-                'coordination_number' in pore
-                    and pore['coordination_number'] is not None
-            ):
-                all_cn_values.append(pore['coordination_number'])
+        pores_with_cn = [
+            pore for pore in all_individual_pores
+            if pore.get('coordination_number') is not None
+        ]
+        all_cn_values = [
+            pore['coordination_number'] for pore in pores_with_cn
+        ]
+        cn_weights = (
+            [pore[EDGE_WEIGHT_KEY] for pore in pores_with_cn]
+            if all(EDGE_WEIGHT_KEY in pore for pore in pores_with_cn)
+            else None
+        )
 
         # Recalculate statistics from combined individual values
         if all_cn_values:
-            combined_cn_stats = calculate_statistics(all_cn_values)
+            combined_cn_stats = calculate_statistics(
+                all_cn_values, weights=cn_weights
+            )
             combined_topology['coordination_number_stats'] = combined_cn_stats
         else:
             combined_topology['coordination_number_stats'] = None
@@ -800,6 +817,11 @@ class BatchPorousMaterialAnalyzer:
                     "Unit": unit,
                     "Description": f"{stat_name.capitalize()} {description}",
                 })
+            report_data.extend(
+                corrected_morphology_rows(
+                    metric_name, stats, unit, description
+                )
+            )
 
         # --- GLOBAL DESCRIPTORS ---
         report_data.append({
@@ -829,6 +851,16 @@ class BatchPorousMaterialAnalyzer:
             "Value": combined_results['global_descriptors']['anisotropy'],
             "Unit": "-",
             "Description": "Average anisotropy across all images",
+        })
+        report_data.append({
+            "Category": "Global Descriptors",
+            "Metric": "Anisotropy (corrected, averaged)",
+            "Value": combined_results['global_descriptors'][
+                'anisotropy_corrected'],
+            "Unit": "-",
+            "Description": (
+                "Average edge-corrected anisotropy across all images"
+            ),
         })
 
         # --- SPATIAL METRICS ---
@@ -863,7 +895,12 @@ class BatchPorousMaterialAnalyzer:
         if combined_results['topology_metrics']['coordination_number_stats']:
             cn_stats = combined_results['topology_metrics'][
                 'coordination_number_stats']
-            for key in ['mean', 'std', 'median', 'min', 'max']:
+            cn_keys = ['mean', 'std', 'median', 'min', 'max'] + [
+                key for key in (
+                    'mean_corrected', 'std_corrected', 'median_corrected'
+                ) if key in cn_stats
+            ]
+            for key in cn_keys:
                 report_data.append({
                     "Category": "Topology & Connectivity",
                     "Metric": f"Coordination Number ({key}, averaged)",

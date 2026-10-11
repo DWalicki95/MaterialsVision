@@ -195,12 +195,22 @@ class PorousMaterialAnalyzerRandomRemoval(PorousMaterialAnalyzer):
                 'area_um2': area_um2
             })
 
-        # Filter self.props to exclude these pores
+        # A removed pore stands for one the model missed, so it leaves the
+        # mask and the neighbour set too: porosity is counted from the
+        # mask, and neighbour distances and the Voronoi tessellation run
+        # over every pore in the frame, not only the measured ones.
         original_count = len(self.props)
         self.props = [
             prop for prop in self.props
             if prop.label not in labels_to_remove
         ]
+        self.props_all = [
+            prop for prop in self.props_all
+            if prop.label not in labels_to_remove
+        ]
+        self.mask = np.where(
+            np.isin(self.mask, list(labels_to_remove)), 0, self.mask
+        )
 
         logger.info(
             f"Filtered pores: {original_count} -> {len(self.props)} "

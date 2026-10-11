@@ -13,7 +13,7 @@ import pytest
 import scripts.create_cv_folds as create_cli
 import scripts.train_cv_fold as cli
 import scripts.train_final_model as final
-from materials_vision.tracking import TRAINING_EXPERIMENT
+from materials_vision.tracking import REHEARSAL_EXPERIMENT, TRAINING_EXPERIMENT
 
 
 @pytest.fixture
@@ -110,7 +110,41 @@ def test_the_final_model_still_trains_on_train_and_val(
     assert _image_ids(kwargs["val_loader"]) == set(
         frozen_table.loc[subset == "val", "image_id"]
     )
-    assert kwargs["tracking"] is None
+
+
+def test_the_final_model_is_recorded_with_its_provenance(
+    tmp_path, frozen_split, trainer_calls
+):
+    split_csv, manifest = frozen_split
+    args = argparse.Namespace(
+        split=split_csv, manifest=manifest, save_root=tmp_path / "ck",
+        epochs=final.N_EPOCHS, n_train=0,
+    )
+
+    final.execute(args)
+
+    [(_, kwargs)] = trainer_calls
+    tracking = kwargs["tracking"]
+    assert tracking.experiment == TRAINING_EXPERIMENT
+    assert tracking.tags["part"] == "final"
+    [provenance] = tracking.artifacts
+    assert provenance.exists()
+    assert provenance.parent == tmp_path / "ck"
+
+
+def test_a_final_model_rehearsal_is_kept_apart(
+    tmp_path, frozen_split, trainer_calls
+):
+    split_csv, manifest = frozen_split
+    args = argparse.Namespace(
+        split=split_csv, manifest=manifest, save_root=tmp_path / "ck",
+        epochs=1, n_train=2,
+    )
+
+    final.execute(args)
+
+    [(_, kwargs)] = trainer_calls
+    assert kwargs["tracking"].experiment == REHEARSAL_EXPERIMENT
 
 
 def test_fold_one_is_the_final_model_and_is_refused(tmp_path, folds):
