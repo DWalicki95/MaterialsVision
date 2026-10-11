@@ -11,6 +11,7 @@ checkpoints/
 *.log
 *.pyc
 *.png
+*.jpg
 *.csv
 
 outputs/
@@ -26,4 +27,4 @@ mlflow.db
 review.json
 run_metadata.json
 dataset_summary.md
-validation_report.md
+validation_report.mddemo_data/
