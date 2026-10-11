@@ -1,188 +1,230 @@
-"""Filesystem traversal and matching of prediction samples.
+"""Finding the classical predictions on disk and reading them as labels.
 
-Predictions live under a nested directory tree::
+The classical segmentations were produced outside this repository, in
+Fiji, one image at a time, and saved under a nested tree::
 
-    ROOT/<group>/<sample>/image/<sample>.tif
     ROOT/<group>/<sample>/predicted_image/<variant>/<sample>*.tif
 
-This module locates originals and prediction masks, and matches each
-sample to its ground-truth entry.
-"""
+``<sample>`` is the name the image carried when it was exported for
+annotation, e.g. ``AS1_40_14_jpg.rf.675e59e3...``: the dataset's
+``image_id`` followed by the suffix the export tool appended. That
+prefix is what ties a prediction to its row of the split, so the
+ground truth can be read through the same sample source the models
+were scored with.
 
+Every variant must be present for every sample. A variant missing on
+one image would score the variants on different populations, and
+their figures could then not be set side by side.
+"""
 import logging
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
 
 import numpy as np
 import tifffile
-from PIL import Image
+from skimage.segmentation import relabel_sequential
 
 logger = logging.getLogger(__name__)
 
-_IMAGE_SUBDIR = "image"
-_PREDICTION_SUBDIR = "predicted_image"
-_IMAGE_EXTENSIONS = (".tif", ".tiff", ".jpg", ".jpeg", ".png")
+PREDICTION_SUBDIR = "predicted_image"
+
+MASK_EXTENSIONS = (".tif", ".tiff")
+
+_EXPORT_SUFFIX = re.compile(
+    r"_(jpg|jpeg|png|tif|tiff)\.rf\.[0-9a-f]+$", re.IGNORECASE
+)
 
 
-def iter_sample_dirs(predictions_root: Path) -> Iterator[Path]:
+class PredictionLoadError(ValueError):
+    """Raised when the predictions on disk cannot be read unambiguously
+    as one instance label image per sample and variant."""
+
+
+@dataclass(frozen=True)
+class ClassicalSample:
+    """One image's classical predictions.
+
+    Parameters
+    ----------
+    image_id : str
+        Identifier of the image in the manifest and the split.
+    sample_dir : Path
+    mask_paths : dict of str to Path
+        Variant name to the label image it produced.
     """
-    Yield sample directories (two levels below the root).
+
+    image_id: str
+    sample_dir: Path
+    mask_paths: dict[str, Path]
+
+
+def image_id_from_sample_dir(name: str) -> str:
+    """Recover the dataset's ``image_id`` from a sample directory name.
+
+    Parameters
+    ----------
+    name : str
+        E.g. ``"AS1_40_14_jpg.rf.675e59e3641e9b985aa3282dfc6f641f"``.
+
+    Returns
+    -------
+    str
+        E.g. ``"AS1_40_14"``. A name without the export suffix is
+        taken to be the identifier already.
+    """
+    return _EXPORT_SUFFIX.sub("", name)
+
+
+def find_samples(
+    predictions_root: Path, variants: tuple[str, ...]
+) -> tuple[ClassicalSample, ...]:
+    """Locate every sample and the mask of each variant.
 
     Parameters
     ----------
     predictions_root : Path
-        Root directory holding group directories.
+        Directory holding the group directories.
+    variants : tuple of str
+        Variant subdirectory names to read.
 
-    Yields
+    Returns
+    -------
+    tuple of ClassicalSample
+        Ordered by ``image_id``.
+
+    Raises
     ------
-    Path
-        Each sample directory (``ROOT/<group>/<sample>``).
+    PredictionLoadError
+        If the root holds no sample, a variant is missing or ambiguous
+        for some sample, or two directories map to the same image.
     """
-    for group_dir in sorted(p for p in predictions_root.iterdir()
-                            if p.is_dir()):
-        for sample_dir in sorted(p for p in group_dir.iterdir()
-                                 if p.is_dir()):
-            yield sample_dir
-
-
-def _find_file_with_prefix(
-    directory: Path, prefix: str, extensions: tuple
-) -> Optional[Path]:
-    """Return the first file matching prefix and an allowed extension."""
-    if not directory.is_dir():
-        return None
-    for candidate in sorted(directory.iterdir()):
-        if not candidate.is_file():
-            continue
-        if candidate.suffix.lower() not in extensions:
-            continue
-        if candidate.name.startswith(prefix):
-            return candidate
-    return None
-
-
-def find_original_image(sample_dir: Path) -> Optional[Path]:
-    """
-    Locate the original image for a sample.
-
-    The original may be stored as ``.tif``, ``.jpg`` or ``.png``.
-
-    Parameters
-    ----------
-    sample_dir : Path
-        Sample directory.
-
-    Returns
-    -------
-    Optional[Path]
-        Path to the original image, or None when missing.
-    """
-    image_dir = sample_dir / _IMAGE_SUBDIR
-    found = _find_file_with_prefix(
-        image_dir, sample_dir.name, _IMAGE_EXTENSIONS
-    )
-    if found is None:
-        logger.error("No original image in %s", image_dir)
-    return found
-
-
-def find_prediction_masks(
-    sample_dir: Path, variants: List[str]
-) -> Dict[str, Path]:
-    """
-    Locate prediction mask files for each watershed variant.
-
-    Parameters
-    ----------
-    sample_dir : Path
-        Sample directory.
-    variants : List[str]
-        Variant subdirectory names (e.g. ``"interactive_watershed"``).
-
-    Returns
-    -------
-    Dict[str, Path]
-        Mapping ``variant -> mask_path`` for variants that were found.
-    """
-    masks = {}
-    for variant in variants:
-        variant_dir = sample_dir / _PREDICTION_SUBDIR / variant
-        found = _find_file_with_prefix(
-            variant_dir, sample_dir.name, (".tif", ".tiff")
+    if not predictions_root.is_dir():
+        raise PredictionLoadError(
+            f"Predictions root not found: {predictions_root}"
         )
-        if found is None:
-            logger.error("No prediction mask in %s", variant_dir)
-            continue
-        masks[variant] = found
-    return masks
+    samples: dict[str, ClassicalSample] = {}
+    for sample_dir in _sample_dirs(predictions_root):
+        image_id = image_id_from_sample_dir(sample_dir.name)
+        if image_id in samples:
+            raise PredictionLoadError(
+                f"{sample_dir} and {samples[image_id].sample_dir} both "
+                f"hold predictions for {image_id}"
+            )
+        samples[image_id] = ClassicalSample(
+            image_id=image_id,
+            sample_dir=sample_dir,
+            mask_paths={
+                variant: _variant_mask(sample_dir, variant)
+                for variant in variants
+            },
+        )
+    if not samples:
+        raise PredictionLoadError(
+            f"No sample directory under {predictions_root}"
+        )
+    logger.info(
+        "Found %d sample(s) with %d variant(s) under %s.",
+        len(samples), len(variants), predictions_root,
+    )
+    return tuple(samples[key] for key in sorted(samples))
 
 
-def match_sample_to_gt(
-    sample_dir_name: str, gt_index: Dict[str, dict]
-) -> Optional[dict]:
-    """
-    Match a sample directory name to a ground-truth entry.
-
-    Tries an exact stem match first, then a ``startswith`` fallback to
-    tolerate differing ``_image`` suffixes.
-
-    Parameters
-    ----------
-    sample_dir_name : str
-        Name of the sample directory.
-    gt_index : Dict[str, dict]
-        Ground-truth index keyed by canonical stem.
-
-    Returns
-    -------
-    Optional[dict]
-        Ground-truth entry, or None when no match is found.
-    """
-    if sample_dir_name in gt_index:
-        return gt_index[sample_dir_name]
-    for stem, entry in gt_index.items():
-        if stem.startswith(sample_dir_name) or \
-                sample_dir_name.startswith(stem):
-            return entry
-    logger.error("Sample %s not found in JSON annotations",
-                 sample_dir_name)
-    return None
-
-
-def load_tif(path: Path) -> np.ndarray:
-    """
-    Load a .tif file as a NumPy array.
+def load_prediction_labels(path: Path) -> np.ndarray:
+    """Read one predicted label image.
 
     Parameters
     ----------
     path : Path
-        Path to the .tif file.
 
     Returns
     -------
     np.ndarray
-        Image or mask array.
+        ``int32`` labels numbered ``1..n``, 0 = background.
+
+    Raises
+    ------
+    PredictionLoadError
+        If the file does not hold a usable label image.
     """
-    return tifffile.imread(str(path))
+    try:
+        return as_instance_labels(tifffile.imread(str(path)))
+    except PredictionLoadError as error:
+        raise PredictionLoadError(f"{path}: {error}") from error
 
 
-def load_image(path: Path) -> np.ndarray:
-    """
-    Load an image of any supported format as a NumPy array.
+def as_instance_labels(array: np.ndarray) -> np.ndarray:
+    """Turn a stored label image into dense integer labels.
 
-    Uses ``tifffile`` for TIFF files and Pillow otherwise.
+    Fiji saves label images as ``float32``. They are accepted only if
+    every value is a non-negative whole number: a fractional value
+    would mean the file is an intensity image rather than labels, and
+    rounding it would invent instance boundaries.
 
     Parameters
     ----------
-    path : Path
-        Path to the image file.
+    array : np.ndarray
 
     Returns
     -------
     np.ndarray
-        Image array.
+        ``int32`` labels numbered ``1..n``, 0 = background. A new
+        array; the input is not modified.
+
+    Raises
+    ------
+    PredictionLoadError
+        If the array is not 2-D, or holds non-finite, negative or
+        fractional values, or labels beyond the ``int32`` range.
     """
-    if path.suffix.lower() in (".tif", ".tiff"):
-        return tifffile.imread(str(path))
-    with Image.open(path) as image:
-        return np.asarray(image)
+    if array.ndim != 2:
+        raise PredictionLoadError(
+            f"expected a 2-D label image, got shape {array.shape}"
+        )
+    values = np.asarray(array, dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        raise PredictionLoadError("label image holds non-finite values")
+    if values.min(initial=0) < 0:
+        raise PredictionLoadError("label image holds negative values")
+    if np.any(values != np.floor(values)):
+        raise PredictionLoadError(
+            "label image holds fractional values; it is not a label "
+            "image"
+        )
+    if values.max(initial=0) > np.iinfo(np.int32).max:
+        raise PredictionLoadError("labels exceed the int32 range")
+    labels, _, _ = relabel_sequential(values.astype(np.int32))
+    return labels
+
+
+def _sample_dirs(predictions_root: Path) -> list[Path]:
+    """Sample directories, two levels below the root, in name order."""
+    return [
+        sample_dir
+        for group_dir in sorted(predictions_root.iterdir())
+        if group_dir.is_dir()
+        for sample_dir in sorted(group_dir.iterdir())
+        if sample_dir.is_dir()
+    ]
+
+
+def _variant_mask(sample_dir: Path, variant: str) -> Path:
+    """The single mask a variant produced for one sample."""
+    variant_dir = sample_dir / PREDICTION_SUBDIR / variant
+    if not variant_dir.is_dir():
+        raise PredictionLoadError(
+            f"{sample_dir.name}: no {variant} prediction "
+            f"({variant_dir} is missing)"
+        )
+    candidates = sorted(
+        path for path in variant_dir.iterdir()
+        if path.is_file()
+        and path.suffix.lower() in MASK_EXTENSIONS
+        and path.name.startswith(sample_dir.name)
+    )
+    if len(candidates) != 1:
+        raise PredictionLoadError(
+            f"{variant_dir}: expected one mask, found "
+            f"{[path.name for path in candidates]}"
+        )
+    return candidates[0]

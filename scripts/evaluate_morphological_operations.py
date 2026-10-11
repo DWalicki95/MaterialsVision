@@ -1,5 +1,7 @@
-from materials_vision.experiments.evaluate_morphological_operations.main import main
+import sys
 
+from materials_vision.experiments.evaluate_morphological_operations import \
+    main as evaluation
 
 if __name__ == "__main__":
-    main()
+    sys.exit(evaluation.main())
