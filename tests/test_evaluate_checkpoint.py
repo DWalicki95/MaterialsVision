@@ -9,7 +9,7 @@ never gets that far while an allowed one does.
 """
 import pytest
 
-import scripts.evaluate_checkpoint as cli
+import scripts.peft_sam.evaluate_checkpoint as cli
 
 
 class ReachedModelWork(Exception):

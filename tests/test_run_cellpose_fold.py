@@ -10,8 +10,8 @@ import json
 import pandas as pd
 import pytest
 
+import scripts.cellpose.run_cellpose_fold as cli
 import scripts.create_cv_folds as create_cli
-import scripts.run_cellpose_fold as cli
 from materials_vision.experiments.cellpose.split_training import (
     N_EPOCHS, snapshot_path)
 
@@ -67,8 +67,10 @@ def calls(monkeypatch):
         recorded["evaluate"].append(argv)
         return cli.EXIT_OK
 
-    monkeypatch.setattr("scripts.run_cellpose_fold.train_cellpose", train)
-    monkeypatch.setattr("scripts.evaluate_cellpose.main", evaluate)
+    monkeypatch.setattr(
+        "scripts.cellpose.run_cellpose_fold.train_cellpose", train
+    )
+    monkeypatch.setattr("scripts.cellpose.evaluate_cellpose.main", evaluate)
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     return recorded
 

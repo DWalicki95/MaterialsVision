@@ -3,13 +3,13 @@ import json
 
 import pytest
 
-import scripts.compare_cellpose_cv as cli
-import scripts.evaluate_cellpose as evaluate_cli
+import scripts.cellpose.compare_cellpose_cv as cli
+import scripts.cellpose.evaluate_cellpose as evaluate_cli
 from materials_vision.experiments.cellpose.split_evaluation import \
     CellposeSettings
 from materials_vision.experiments.cellpose.split_training import snapshot_path
-from scripts.run_cellpose_fold import run_name
-from scripts.summarize_cv import FoldScores, SummaryError
+from scripts.cellpose.run_cellpose_fold import run_name
+from scripts.peft_sam.summarize_cv import FoldScores, SummaryError
 
 RECIPE = {
     "snapshot": {"arm": "lr1e-5", "learning_rate": 1e-5,

@@ -236,7 +236,7 @@ Step 1 — Data Preparation  (data_prep/)
    group_material_into_datasets.py  Organize by material type and magnification
    split_dataset_into_subsets.py    Stratified train/test split
 
-Step 2 — Segmentation  (scripts/)
+Step 2 — Segmentation  (scripts/cellpose/)
    run_cellpose_inference.py        Generate pore masks from SEM images
 
 Step 3 — Quantitative Analysis  (scripts/quantitative_analysis/)
@@ -245,7 +245,7 @@ Step 3 — Quantitative Analysis  (scripts/quantitative_analysis/)
                                          (core logic in materials_vision/
                                          quantitative_analysis/macroscopic_metrics.py)
 
-Optional — Model Training  (scripts/)
+Optional — Model Training  (scripts/cellpose/)
    retrain_cellpose.py              Fine-tune Cellpose-SAM (YAML-configured)
    grid_search_cellpose.py          Systematic hyperparameter search
 ```
@@ -257,7 +257,7 @@ Optional — Model Training  (scripts/)
 All three path arguments are required:
 
 ```bash
-python scripts/run_cellpose_inference.py \
+python scripts/cellpose/run_cellpose_inference.py \
     --path-to-files /path/to/sem/images \
     --model-path /path/to/cellpose/model \
     --output-path /path/to/output/masks
@@ -304,7 +304,7 @@ Optional flags:
 #    materials_vision/experiments/cellpose/retraining/cellpose_retraining_config.yaml
 
 # 2. Run — no CLI arguments needed
-python scripts/retrain_cellpose.py
+python scripts/cellpose/retrain_cellpose.py
 ```
 
 Training includes MLflow experiment tracking, real-time resource monitoring,
@@ -317,13 +317,13 @@ automatic model checkpointing, and loss visualization.
 #    materials_vision/experiments/cellpose/cellpose_grid_search/grid_search_config.yaml
 
 # 2. Preview all combinations without running
-python scripts/grid_search_cellpose.py \
+python scripts/cellpose/grid_search_cellpose.py \
     --config materials_vision/experiments/cellpose/cellpose_grid_search/grid_search_config.yaml \
     --mode full \
     --dry-run
 
 # 3. Run the full grid search
-python scripts/grid_search_cellpose.py \
+python scripts/cellpose/grid_search_cellpose.py \
     --config materials_vision/experiments/cellpose/cellpose_grid_search/grid_search_config.yaml \
     --mode full \
     --gpu-device 0
@@ -385,10 +385,12 @@ MaterialsVision/
 │   ├── metrics.py                 # Evaluation metrics (IoU, boundary scores)
 │   └── utils.py                   # General utilities (load_pixel_sizes, ...)
 ├── scripts/                       # Entry point scripts
-│   ├── run_cellpose_inference.py      # CLI: --path-to-files --model-path --output-path
-│   ├── retrain_cellpose.py            # YAML-configured
-│   ├── grid_search_cellpose.py        # CLI: --config --mode --gpu-device
-│   ├── finetune_peft_sam.py           # LoRA fine-tuning of SAM
+│   ├── cellpose/                      # Cellpose-SAM training, evaluation, inference
+│   │   ├── run_cellpose_inference.py  # CLI: --path-to-files --model-path --output-path
+│   │   ├── retrain_cellpose.py        # YAML-configured
+│   │   └── grid_search_cellpose.py    # CLI: --config --mode --gpu-device
+│   ├── peft_sam/                      # PEFT-SAM study: runs, evaluation, final model, CV
+│   │   └── finetune_peft_sam.py       # LoRA fine-tuning of SAM
 │   ├── augment_dataset.py             # Dataset augmentation
 │   ├── generate_synthetic_microstructures.py  # Synthetic SEM image generation
 │   ├── evaluate_morphological_operations.py   # Watershed vs. DL comparison

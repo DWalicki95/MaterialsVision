@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 import scripts.create_cv_folds as create_cli
-import scripts.summarize_cv as cli
+import scripts.peft_sam.summarize_cv as cli
 from materials_vision.data.samples import SampleRecord
 from materials_vision.evaluation.aggregate import (aggregate, cross_sections,
                                                    evaluate_image)

@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-import scripts.screen_hparam_arms as screen
+import scripts.peft_sam.screen_hparam_arms as screen
 
 
 def _record(f1, k_f1=0.86):

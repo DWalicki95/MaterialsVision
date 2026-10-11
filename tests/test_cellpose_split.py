@@ -17,8 +17,8 @@ import pandas as pd
 import pytest
 import torch
 
-import scripts.evaluate_cellpose as evaluate_cli
-import scripts.train_cellpose_split as train_cli
+import scripts.cellpose.evaluate_cellpose as evaluate_cli
+import scripts.cellpose.train_cellpose_split as train_cli
 from materials_vision.data.samples import PreparedSample, SampleRecord
 from materials_vision.evaluation import SizeBins, aggregate
 from materials_vision.experiments.cellpose.split_evaluation import (
@@ -104,7 +104,9 @@ def trainer_calls(monkeypatch):
         calls.append((name, kwargs))
         return Path("unused")
 
-    monkeypatch.setattr("scripts.train_cellpose_split.train_cellpose", record)
+    monkeypatch.setattr(
+        "scripts.cellpose.train_cellpose_split.train_cellpose", record
+    )
     return calls
 
 

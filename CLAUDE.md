@@ -61,14 +61,32 @@ component in isolation while nothing checked that the pipeline used it.
 
 1. **Data prep** (`data_prep/`) — filter by magnification, group into
    per-material/magnification datasets, stratified train/test split.
-2. **Segmentation** (`scripts/run_cellpose_inference.py`) — runs a trained
-   Cellpose-SAM model over SEM images, produces `*_masks.tif`.
+2. **Segmentation** (`scripts/cellpose/run_cellpose_inference.py`) — runs
+   a trained Cellpose-SAM model over SEM images, produces `*_masks.tif`.
 3. **Quantitative analysis** (`scripts/quantitative_analysis/`) — turns masks
    into per-pore metrics (Excel reports) and then aggregate macroscopic
    metrics across a whole material dataset.
-4. **Model training/tuning** (`scripts/retrain_cellpose.py`,
-   `scripts/grid_search_cellpose.py`, `scripts/finetune_peft_sam.py`) — all
-   MLflow-tracked, configured via YAML rather than CLI flags.
+4. **Model training/tuning** (`scripts/cellpose/retrain_cellpose.py`,
+   `scripts/cellpose/grid_search_cellpose.py`,
+   `scripts/peft_sam/finetune_peft_sam.py`) — all MLflow-tracked,
+   configured via YAML rather than CLI flags.
+
+### Scripts layout (`scripts/`)
+
+- `scripts/peft_sam/` — everything specific to the PEFT-SAM study:
+  augmentation runs (`run_e*`), hyperparameter arms, post-processing
+  calibration, `evaluate_checkpoint`, the final model, its CV folds and
+  `summarize_cv`.
+- `scripts/cellpose/` — Cellpose-SAM training, recipe selection,
+  evaluation, CV folds and inference.
+- `scripts/` itself — what serves every model: data inventory, splits and
+  CV folds, instance masks, Phase 0 review, size bins, the classical
+  baseline comparison, the demo data and `quantitative_analysis/`.
+
+Scripts import each other as `scripts.<dir>.<module>`, so run them from the
+repository root with `PYTHONPATH=.`. Launch scripts under `checkpoints/`
+and the plans under `.claude/` record the paths as they were when each run
+was made and are deliberately not updated.
 
 ### Package layout (`materials_vision/`)
 

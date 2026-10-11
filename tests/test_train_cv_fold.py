@@ -11,8 +11,8 @@ import pandas as pd
 import pytest
 
 import scripts.create_cv_folds as create_cli
-import scripts.train_cv_fold as cli
-import scripts.train_final_model as final
+import scripts.peft_sam.train_cv_fold as cli
+import scripts.peft_sam.train_final_model as final
 from materials_vision.tracking import REHEARSAL_EXPERIMENT, TRAINING_EXPERIMENT
 
 
@@ -34,7 +34,7 @@ def trainer_calls(monkeypatch):
     """Stand in for the trainer and record what it was handed."""
     calls = []
     monkeypatch.setattr(
-        "scripts.train_final_model.train_run",
+        "scripts.peft_sam.train_final_model.train_run",
         lambda name, **kwargs: calls.append((name, kwargs)),
     )
     return calls

@@ -36,7 +36,7 @@ import scripts.compare_classical_baseline as comparison
 from materials_vision.evaluation import (SIZE_BIN_LABELS, SizeBins,
                                          SizeBinsLoadError, load_size_bins)
 from materials_vision.logging_config import setup_logging
-from scripts.summarize_cv import SummaryError
+from scripts.peft_sam.summarize_cv import SummaryError
 
 logger = logging.getLogger(__name__)
 

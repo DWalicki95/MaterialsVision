@@ -20,7 +20,7 @@ from materials_vision.experiments.evaluate_morphological_operations import \
     data_loading
 from materials_vision.experiments.evaluate_morphological_operations import \
     main as cli
-from scripts.summarize_cv import FoldScores, SummaryError
+from scripts.peft_sam.summarize_cv import FoldScores, SummaryError
 
 PredictionLoadError = data_loading.PredictionLoadError
 as_instance_labels = data_loading.as_instance_labels

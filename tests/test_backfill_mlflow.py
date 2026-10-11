@@ -10,7 +10,7 @@ import mlflow
 import pytest
 from mlflow import MlflowClient
 
-import scripts.backfill_mlflow as backfill
+import scripts.peft_sam.backfill_mlflow as backfill
 from materials_vision import tracking
 from materials_vision.evaluation.watershed import WatershedParams
 
