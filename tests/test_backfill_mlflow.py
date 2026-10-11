@@ -131,3 +131,39 @@ def test_losses_land_on_both_axes(store, tmp_path):
     )
     assert validation == [(1, 0.5), (2, 0.4)]
     assert len(client.get_metric_history(run_id, "train/loss")) == 4
+
+
+def test_test_scores_are_read_from_the_runs_own_report(store, tmp_path):
+    import json
+
+    report = tmp_path / "own_test_scores.json"
+    report.write_text(json.dumps({
+        "run_x/epoch-24": {"overall": {"f1": 0.85}},
+        "other_run/epoch-12": {"overall": {"f1": 0.10}},
+    }))
+    run = backfill.HistoricalRun(
+        tmp_path / "root", "run_x", "final", "FULL_B", 1, provenance=None,
+        test_scores=report,
+    )
+    experiment = tracking.ensure_experiment("test_backfill")
+    with mlflow.start_run(experiment_id=experiment) as active:
+        run_id = active.info.run_id
+
+    assert backfill.import_test_scores(run_id, run) == 1
+
+    key = tracking.evaluation_metric_name(
+        "test",
+        tracking.postprocessing_id(backfill.CALIBRATION_2026_09_14),
+        "f1",
+    )
+    [point] = MlflowClient().get_metric_history(run_id, key)
+    assert (point.step, point.value) == (24, 0.85)
+
+
+def test_a_run_never_scored_on_test_takes_no_test_figures(tmp_path):
+    run = backfill.HistoricalRun(
+        tmp_path / "root", "run_x", "E8", "FULL_B", 1, provenance=None,
+        test_scores=None,
+    )
+
+    assert backfill.import_test_scores("unused-run-id", run) == 0

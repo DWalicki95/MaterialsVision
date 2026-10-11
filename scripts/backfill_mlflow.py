@@ -134,6 +134,14 @@ class HistoricalRun:
     extra_tags : tuple of (str, str)
         For the orientation run, its role as the first seed of the
         part II reference.
+    test_scores : Path or None
+        The TEST report the run's scored snapshot is read from. ``None``
+        for a run never scored on TEST that shares its name with one
+        that was, whose figures would otherwise be attached to it.
+    mlflow_name : str, optional
+        Shown in the interface instead of ``name``, for a run that
+        shares its name with another one trained into a different
+        directory.
     """
 
     save_root: Path
@@ -144,6 +152,8 @@ class HistoricalRun:
     provenance: Path
     curves: tuple[CurveReport, ...] = ()
     extra_tags: tuple[tuple[str, str], ...] = ()
+    test_scores: Optional[Path] = TEST_SCORES
+    mlflow_name: Optional[str] = None
 
     @property
     def checkpoint_dir(self) -> Path:
@@ -216,6 +226,29 @@ HISTORICAL_RUNS = (
         "FULL_B", 20260907,
         CHECKPOINTS / "final" / "full_b_trainval_seed20260907_provenance.json",
         extra_tags=(("train_subset", "train+val"),),
+    ),
+    # The same recipe trained for twice the epochs, into its own
+    # directory; scored on TEST afterwards under the same setting.
+    HistoricalRun(
+        CHECKPOINTS / "final_24ep", "full_b_trainval_seed20260907", "final",
+        "FULL_B", 20260907,
+        CHECKPOINTS / "final_24ep"
+        / "full_b_trainval_seed20260907_provenance.json",
+        extra_tags=(("train_subset", "train+val"),),
+        test_scores=CHECKPOINTS / "final_24ep" / "test_scores.json",
+        mlflow_name="full_b_trainval_seed20260907_24ep",
+    ),
+    # The E8 composite on TRAIN for 24 epochs, scored on VALIDATION at
+    # every epoch. Descriptive: no decision rule was fixed for it. It
+    # was never scored on TEST; the TEST entry under its name belongs to
+    # the 12-epoch run.
+    HistoricalRun(
+        CHECKPOINTS / "e8_24ep", "full_b_seed20260907", "E8", "FULL_B",
+        20260907,
+        CHECKPOINTS / "e8_24ep" / "full_b_seed20260907_provenance.json",
+        curves=(CurveReport(CHECKPOINTS / "e8_24ep" / "e8_24ep_curves.json"),),
+        test_scores=None,
+        mlflow_name="full_b_seed20260907_24ep",
     ),
 )
 
@@ -489,16 +522,16 @@ def import_test_scores(run_id: str, run: HistoricalRun) -> int:
     int
         Snapshots imported: zero or one.
     """
-    if not TEST_SCORES.exists():
+    if run.test_scores is None or not run.test_scores.exists():
         return 0
-    payload = json.loads(TEST_SCORES.read_text())
+    payload = json.loads(run.test_scores.read_text())
     imported = 0
     for key, record in payload.items():
         name, epoch, label = parse_curve_key(key)
         if name != run.name:
             continue
         setting = postprocessing_id(
-            setting_for_label(label, CurveReport(TEST_SCORES))
+            setting_for_label(label, CurveReport(run.test_scores))
         )
         log_evaluation_to_run(
             run_id, epoch, "test", setting, record["overall"],
@@ -556,7 +589,7 @@ def import_run(run: HistoricalRun, experiment_id: str) -> str:
 
     record = json.loads(run.provenance.read_text())
     with mlflow.start_run(
-        experiment_id=experiment_id, run_name=run.name,
+        experiment_id=experiment_id, run_name=run.mlflow_name or run.name,
         tags=run_tags(run, record),
     ) as active:
         run_id = active.info.run_id
