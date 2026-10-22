@@ -159,6 +159,9 @@ def train_recipe(
     epochs: int,
     n_train: int = 0,
     tracking: Optional[RunTracking] = None,
+    save_every_kth_epoch: Optional[int] = None,
+    lora_learning_rate: float = LORA_LEARNING_RATE,
+    decoder_learning_rate: float = DECODER_LEARNING_RATE,
 ) -> None:
     """Train the adopted recipe on the given images.
 
@@ -167,12 +170,12 @@ def train_recipe(
     can differ from the final model in its images and in nothing that
     was chosen.
 
-    Only the scored snapshot is kept as a numbered file. The trainer
-    numbers a snapshot whenever the epoch count divides by the interval
-    it is given, so an interval equal to the budget yields exactly the
-    last epoch; the intermediate ones could not be looked at without a
-    held-out set to look at them on, and each costs well over a
-    gigabyte.
+    By default only the scored snapshot is kept as a numbered file. The
+    trainer numbers a snapshot whenever the epoch count divides by the
+    interval it is given, so an interval equal to the budget yields
+    exactly the last epoch; without a validation set the intermediate
+    ones could not be looked at, and each costs well over a gigabyte. A
+    run that does have one to choose an epoch on keeps them all.
 
     The seed is set before anything else is built, in the order the
     final model was trained in, because the initial state of the
@@ -186,16 +189,22 @@ def train_recipe(
     train_subset : str
         Subset of ``split`` trained on, e.g. ``"train+val"``.
     monitor_subset : str
-        Subset the trainer's validation loss is computed on. Its images
-        must also be trained on, or they would be withheld for a loss
-        nothing reads.
+        Subset the trainer's validation loss is computed on. Where
+        nothing is chosen, its images must also be trained on, or they
+        would be withheld for a loss nothing reads.
     save_root : Path
     epochs : int
-        The last epoch is the snapshot scored.
+        Where no epoch is chosen, the last one is the snapshot scored.
     n_train : int, optional
         Use this many training images; 0 means all of them.
     tracking : RunTracking, optional
         Record the run in MLflow as it trains.
+    save_every_kth_epoch : int, optional
+        Keep a numbered snapshot every this many epochs. Defaults to
+        ``epochs``, i.e. the last one only.
+    lora_learning_rate, decoder_learning_rate : float, optional
+        The recipe's rates unless a study varies them on purpose; a run
+        meant to reproduce the final model leaves both alone.
     """
     torch.manual_seed(RUN_SEED)
     train_source = build_source(split, manifest, train_subset)
@@ -215,12 +224,19 @@ def train_recipe(
         name, RUN_SEED, ", ".join(policy.families),
         len(train_loader), train_subset.upper(), split.name,
     )
-    logger.info(
-        "The %d monitoring image(s) are also trained on. The validation "
-        "loss reported on them measures memorization and decides "
-        "nothing; the snapshot scored is %s, fixed before training.",
-        len(monitor_loader), scored_snapshot(save_root, epochs, name),
-    )
+    if set(monitor_subset.split("+")) <= set(train_subset.split("+")):
+        logger.info(
+            "The %d monitoring image(s) are also trained on. The "
+            "validation loss reported on them measures memorization and "
+            "decides nothing; the snapshot scored is %s, fixed before "
+            "training.",
+            len(monitor_loader), scored_snapshot(save_root, epochs, name),
+        )
+    else:
+        logger.info(
+            "The %d monitoring image(s) come from %s, which is not "
+            "trained on.", len(monitor_loader), monitor_subset.upper(),
+        )
     train_run(
         name,
         model_type=BASE_MODEL,
@@ -228,10 +244,12 @@ def train_recipe(
         val_loader=monitor_loader,
         n_epochs=epochs,
         save_root=save_root,
-        lora_learning_rate=LORA_LEARNING_RATE,
-        decoder_learning_rate=DECODER_LEARNING_RATE,
+        lora_learning_rate=lora_learning_rate,
+        decoder_learning_rate=decoder_learning_rate,
         early_stopping=None,
-        save_every_kth_epoch=epochs,
+        save_every_kth_epoch=(
+            epochs if save_every_kth_epoch is None else save_every_kth_epoch
+        ),
         tracking=tracking,
     )
 
