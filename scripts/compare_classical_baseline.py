@@ -48,13 +48,13 @@ from typing import Any, Optional, Sequence
 
 from materials_vision.evaluation import DECISION_SCALE, SIZE_BIN_LABELS
 from materials_vision.logging_config import setup_logging
-from scripts.compare_cellpose_cv import (cellpose_settings,
-                                         load_cellpose_folds,
-                                         load_peft_sam_folds)
-from scripts.run_cellpose_fold import DEFAULT_SAVE_ROOT
-from scripts.select_cellpose_recipe import DEFAULT_RECIPE
-from scripts.summarize_cv import (DEFAULT_EVAL_DIR, DEFAULT_FOLDS_DIR, N_FOLDS,
-                                  SummaryError, pooled)
+from scripts.cellpose.compare_cellpose_cv import (cellpose_settings,
+                                                  load_cellpose_folds,
+                                                  load_peft_sam_folds)
+from scripts.cellpose.run_cellpose_fold import DEFAULT_SAVE_ROOT
+from scripts.cellpose.select_cellpose_recipe import DEFAULT_RECIPE
+from scripts.peft_sam.summarize_cv import (DEFAULT_EVAL_DIR, DEFAULT_FOLDS_DIR,
+                                           N_FOLDS, SummaryError, pooled)
 
 logger = logging.getLogger(__name__)
 

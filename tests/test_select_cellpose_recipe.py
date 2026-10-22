@@ -3,11 +3,11 @@ import json
 
 import pytest
 
-import scripts.select_cellpose_recipe as cli
+import scripts.cellpose.select_cellpose_recipe as cli
 from materials_vision.experiments.cellpose.split_evaluation import (
     CellposeSettings, calibration_grid)
 from materials_vision.experiments.cellpose.split_training import saved_epochs
-from scripts.train_cellpose_split import run_name
+from scripts.cellpose.train_cellpose_split import run_name
 
 N_VAL = 107
 

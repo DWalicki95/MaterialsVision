@@ -20,7 +20,7 @@ import sys
 
 import pytest
 
-import scripts.compare_to_baseline as cli
+import scripts.peft_sam.compare_to_baseline as cli
 
 # Where each run peaks on the pooled metric. Deliberately three
 # different epochs: it is the spread of these positions that makes a

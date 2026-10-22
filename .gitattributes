@@ -1,0 +1,9 @@
+# The repository is worked on from both WSL and Windows. Windows git
+# converts line endings to CRLF on checkout by default, which makes
+# unchanged files show up as modified on the WSL side; LF is enforced
+# in the working tree regardless of the client.
+* text=auto eol=lf
+
+# SEM sidecar fixtures keep the CRLF line endings the microscope writes,
+# because the parser is tested against them as they arrive.
+tests/fixtures/** -text

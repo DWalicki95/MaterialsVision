@@ -20,11 +20,10 @@ logs/
 
 mlflow.db
 
-# Only the current experiment plan is versioned; local settings, locks
-# and superseded plan drafts stay out of the repository.
+# Experiment plans, local settings and locks stay out of the repository.
 .claude/*
-!.claude/plan_eksperymentu_augmentacji_peft_sam_v3_geometria.md
 review.json
 run_metadata.json
 dataset_summary.md
-validation_report.mddemo_data/
+validation_report.md
+demo_data/

@@ -56,6 +56,7 @@ N_FOLDS = 5
 FROZEN_SET_FOLDS: Mapping[int, str] = {1: "test", 2: "val"}
 
 TRAIN = "train"
+VALIDATION = "val"
 HELD_OUT = "test"
 SCALE_OUTLIER_BIN = "outlier"
 
@@ -333,6 +334,67 @@ def fold_table(
     fold["split"] = np.where(is_held, HELD_OUT, TRAIN)
     fold["used"] = ~(is_held & (fold["scale_bin"] == SCALE_OUTLIER_BIN))
     return fold.sort_values(
+        ["split", "formulation", "image_id"]
+    ).reset_index(drop=True)
+
+
+def carve_validation(
+    fold: pd.DataFrame, formulations: frozenset[str]
+) -> pd.DataFrame:
+    """Move whole formulations of a fold's training set to validation.
+
+    A fold has nothing left to choose and so no validation set. A study
+    that does choose something on a fold - an epoch, say - has to take
+    the images it chooses on out of training first, or the choice would
+    be made on what the model learnt from; and it cannot make it on the
+    held-out set, which would then both choose and measure.
+
+    The rule for close-ups is the one the split and the folds apply to
+    every set but training: they follow their formulation and are
+    marked unused, neither trained on nor scored.
+
+    Parameters
+    ----------
+    fold : pandas.DataFrame
+        A table returned by ``fold_table``. Not modified.
+    formulations : frozenset of str
+        Formulations to move. Each must lie wholly in the fold's
+        training set.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Same columns and held-out rows, ``split`` set to ``val`` for the
+        moved formulations, ``used`` recomputed for them, rows ordered
+        as ``fold_table`` orders them.
+
+    Raises
+    ------
+    FoldError
+        If no formulation is given, or one is absent from the fold or
+        not in its training set.
+    """
+    if not formulations:
+        raise FoldError("No formulation given to move to validation.")
+    present = set(fold["formulation"])
+    missing = sorted(formulations - present)
+    if missing:
+        raise FoldError(f"Formulation(s) {missing} not in the fold")
+    moved = fold["formulation"].isin(formulations)
+    outside_train = sorted(
+        set(fold.loc[moved & (fold["split"] != TRAIN), "formulation"])
+    )
+    if outside_train:
+        raise FoldError(
+            f"Formulation(s) {outside_train} are not in the fold's "
+            f"training set, so they cannot be moved out of it."
+        )
+    carved = fold.copy()
+    carved.loc[moved, "split"] = VALIDATION
+    carved.loc[moved, "used"] = (
+        carved.loc[moved, "scale_bin"] != SCALE_OUTLIER_BIN
+    )
+    return carved.sort_values(
         ["split", "formulation", "image_id"]
     ).reset_index(drop=True)
 
