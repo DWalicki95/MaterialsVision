@@ -92,7 +92,28 @@ EVALUATION_FIELDS = (
 # Epochs the headline of part II is read over: the mean of the last
 # three snapshots of a twelve-epoch run, because the deployed model is
 # the last snapshot and no validation set is left to pick a peak with.
+# A run of another length is read over its own last three.
 LATE_EPOCHS = (10, 11, 12)
+
+# The run parameter a run's length is read from, as training logs it.
+N_EPOCHS_PARAM = "n_epochs"
+
+
+def late_epochs_of(n_epochs: int) -> tuple[int, ...]:
+    """The last epochs of a run of this length, as many as part II reads.
+
+    Parameters
+    ----------
+    n_epochs : int
+
+    Returns
+    -------
+    tuple of int
+        ``(10, 11, 12)`` for twelve epochs; fewer for a run shorter
+        than the window.
+    """
+    first = max(1, n_epochs - len(LATE_EPOCHS) + 1)
+    return tuple(range(first, n_epochs + 1))
 
 
 def configure_tracking(tracking_uri: Optional[str] = None) -> str:
@@ -455,6 +476,10 @@ def summarize_curve(
 
     Read back from the store rather than from the evaluation in hand,
     so that a curve scored in several sittings is summarized whole.
+    The late window is the run's own last three epochs, taken from the
+    length it was trained for rather than from the epochs scored so
+    far, so a curve scored only part of the way has no late mean yet.
+    A run that records no length is read over ``LATE_EPOCHS``.
 
     Parameters
     ----------
@@ -468,8 +493,13 @@ def summarize_curve(
     """
     from mlflow import MlflowClient
 
+    client = MlflowClient()
+    n_epochs = client.get_run(run_id).data.params.get(N_EPOCHS_PARAM)
+    late_epochs = (
+        LATE_EPOCHS if n_epochs is None else late_epochs_of(int(n_epochs))
+    )
     key = evaluation_metric_name(subset, postprocessing, "f1")
-    history = MlflowClient().get_metric_history(run_id, key)
+    history = client.get_metric_history(run_id, key)
     latest: dict[int, tuple[int, float]] = {}
     for entry in history:
         known = latest.get(entry.step)
@@ -480,7 +510,7 @@ def summarize_curve(
         evaluation_metric_name(
             subset, postprocessing, f"f1_{name}", section="summary"
         ): value
-        for name, value in late_epoch_summary(curve).items()
+        for name, value in late_epoch_summary(curve, late_epochs).items()
     }
     log_metrics_at(run_id, summary)
     return summary
