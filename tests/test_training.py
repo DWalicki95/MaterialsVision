@@ -21,7 +21,12 @@ from materials_vision.training import (BATCH_SIZE, DECODER_LEARNING_RATE,
                                        LORA_RANK, N_OBJECTS_PER_BATCH,
                                        NUM_WORKERS, PEFT_KWARGS,
                                        CosineAnnealingIgnoringMetric,
-                                       _trainable_groups, build_loader)
+                                       _check_trainable,
+                                       _hold_decoder_batchnorm_in_eval,
+                                       _parameter_groups, _select_trainable,
+                                       _trainable_groups,
+                                       _without_interactive_training,
+                                       build_loader)
 
 
 class _FakeRecord:
@@ -344,3 +349,176 @@ def test_the_schedule_anneals_to_nothing_at_its_horizon():
     assert rates[0] < 1.0
     assert rates == sorted(rates, reverse=True)
     assert rates[-1] == pytest.approx(0.0, abs=1e-9)
+
+
+class _FakeUnetr(torch.nn.Module):
+    def __init__(self, encoder):
+        super().__init__()
+        self.encoder = encoder
+        self.norm = torch.nn.BatchNorm1d(4)
+        self.head = torch.nn.Linear(4, 1)
+
+    def forward(self, x):
+        features = self.encoder.base(x) + self.encoder.correction(x)
+        return self.head(self.norm(features)).sum()
+
+
+def _shared_encoder_pair():
+    """A model and a decoder sharing one encoder, as the real pair do.
+
+    The encoder is frozen except for its correction, the decoder owns a
+    batch-norm layer, and both halves feed one scalar output so a single
+    backward pass reaches everything that can train.
+    """
+    encoder = torch.nn.Module()
+    encoder.base = torch.nn.Linear(4, 4)
+    encoder.correction = torch.nn.Linear(4, 4)
+    for parameter in encoder.base.parameters():
+        parameter.requires_grad = False
+
+    model = torch.nn.Module()
+    model.encoder = encoder
+
+    return model, _FakeUnetr(encoder)
+
+
+def _step_once(trainable):
+    """Freeze, build the optimizer and step, the way a run does."""
+    torch.manual_seed(0)
+    model, unetr = _shared_encoder_pair()
+    correction, decoder = _select_trainable(
+        *_trainable_groups(model, unetr), trainable
+    )
+    optimizer = torch.optim.AdamW(_parameter_groups(
+        correction, LORA_LEARNING_RATE, decoder, DECODER_LEARNING_RATE,
+    ))
+    before = {
+        name: p.detach().clone() for name, p in unetr.named_parameters()
+    }
+    unetr(torch.randn(3, 4)).backward()
+    optimizer.step()
+    moved = {
+        name for name, p in unetr.named_parameters()
+        if not torch.equal(before[name], p)
+    }
+    return moved, optimizer
+
+
+@pytest.mark.parametrize("trainable, prefixes", [
+    ("both", ("encoder.correction", "norm", "head")),
+    ("lora", ("encoder.correction",)),
+    ("decoder", ("norm", "head")),
+])
+def test_only_the_chosen_half_moves_in_a_step(trainable, prefixes):
+    moved, _ = _step_once(trainable)
+
+    assert moved
+    assert all(name.startswith(prefixes) for name in moved)
+    assert not any(name.startswith("encoder.base") for name in moved)
+
+
+def test_a_frozen_half_never_comes_first_in_the_optimizer():
+    """The trainer logs the first group's rate as the run's rate."""
+    _, optimizer = _step_once("decoder")
+
+    assert [g["lr"] for g in optimizer.param_groups] == [
+        DECODER_LEARNING_RATE
+    ]
+
+
+def test_a_frozen_half_stops_requiring_gradients():
+    model, unetr = _shared_encoder_pair()
+    correction, decoder = _trainable_groups(model, unetr)
+
+    _select_trainable(correction, decoder, "lora")
+
+    assert not any(p.requires_grad for p in decoder)
+    assert all(p.requires_grad for p in correction)
+
+
+def test_an_unknown_choice_of_what_trains_is_rejected():
+    with pytest.raises(ValueError, match="trainable"):
+        _check_trainable("encoder", None)
+
+
+def test_a_momentum_a_frozen_decoder_would_ignore_is_rejected():
+    with pytest.raises(ValueError, match="momentum"):
+        _check_trainable("lora", 0.01)
+
+
+def test_a_frozen_decoder_normalizes_as_at_inference_in_training_mode():
+    """The trainer calls ``train()`` on the decoder every epoch.
+
+    A held layer must still use its running statistics and leave them
+    unchanged, or the correction would be adapted to a decoder that
+    behaves differently from the one it is evaluated with.
+    """
+    torch.manual_seed(0)
+    _, unetr = _shared_encoder_pair()
+    assert _hold_decoder_batchnorm_in_eval(unetr) == 1
+    x = torch.randn(3, 4) * 5 + 2
+    unetr.eval()
+    with torch.no_grad():
+        expected = unetr(x)
+    running_mean = unetr.norm.running_mean.clone()
+
+    unetr.train()
+    with torch.no_grad():
+        observed = unetr(x)
+
+    assert not unetr.norm.training
+    assert torch.equal(unetr.norm.running_mean, running_mean)
+    assert torch.equal(observed, expected)
+
+
+class _FakeJointTrainer:
+    def __init__(self):
+        self.stepped = []
+
+    def _interactive_train_iteration(self, x, y):
+        weight = torch.ones(1, requires_grad=True)
+        return (weight * x).sum(), None, None, None, None
+
+    def _backprop(self, loss):
+        self.stepped.append(loss)
+
+    def _backprop_mixed(self, loss):
+        self.stepped.append(loss)
+
+
+def test_a_decoder_only_run_never_steps_the_interactive_branch():
+    trainer = _without_interactive_training(_FakeJointTrainer)()
+
+    loss = trainer._interactive_train_iteration(torch.ones(1), None)[0]
+    trainer._backprop(loss)
+    trainer._backprop_mixed(loss)
+
+    assert not loss.requires_grad
+    assert trainer.stepped == []
+
+
+def test_a_decoder_only_run_still_steps_the_instance_branch():
+    trainer = _without_interactive_training(_FakeJointTrainer)()
+    loss = (torch.ones(1, requires_grad=True) * 2).sum()
+
+    trainer._backprop_mixed(loss)
+
+    assert trainer.stepped == [loss]
+
+
+def test_the_decoder_only_override_matches_the_real_trainer():
+    """A renamed method would turn the override into a silent no-op."""
+    from micro_sam.training.joint_sam_trainer import JointSamTrainer
+
+    derived = _without_interactive_training(JointSamTrainer)
+
+    assert issubclass(derived, JointSamTrainer)
+
+
+def test_the_decoder_only_override_refuses_a_trainer_it_cannot_patch():
+    with pytest.raises(AttributeError, match="_backprop_mixed"):
+        _without_interactive_training(type(
+            "Partial", (), {
+                "_interactive_train_iteration": None, "_backprop": None,
+            },
+        ))

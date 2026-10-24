@@ -18,7 +18,9 @@ run and make the name "low-rank fine-tuning" misleading. The instance
 decoder trains in full, and at nine and a half million parameters it is
 the largest thing learning here - worth stating plainly, because "we
 train a fraction of a percent of the model" is true of the low-rank
-correction alone and false of the run.
+correction alone and false of the run. A run can be told to adapt only
+one of the two, which exists to ablate each half against the other;
+every comparison between augmentation policies trains both.
 
 **Two learning rates, not one.** The low-rank correction and the
 instance decoder are in different regimes and cannot share a rate. The
@@ -143,6 +145,14 @@ PEFT_KWARGS: dict[str, Any] = {
 # docstring for why leaving the mask decoder trainable would change
 # what the run is.
 FREEZE_PARTS = ["prompt_encoder", "mask_decoder"]
+
+# What a run adapts: the low-rank correction and the instance decoder
+# together, the correction alone, or the decoder alone.
+TRAINABLE_CHOICES = ("both", "lora", "decoder")
+
+_BATCHNORM_KINDS = (
+    torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d,
+)
 
 # Thirty times the library's default, and measured rather than argued.
 # A low-rank correction starts at exactly zero and holds under a
@@ -379,6 +389,202 @@ def _trainable_groups(
     return correction, decoder
 
 
+def _check_trainable(
+    trainable: str, decoder_batchnorm_momentum: Optional[float]
+) -> None:
+    """Reject a choice of what trains before any model is built.
+
+    Parameters
+    ----------
+    trainable : str
+    decoder_batchnorm_momentum : float, optional
+
+    Raises
+    ------
+    ValueError
+        If ``trainable`` is not one of :data:`TRAINABLE_CHOICES`, or if
+        a batch-norm momentum is given for a run whose decoder is
+        frozen - its batch statistics are held fixed there, so the
+        momentum would be silently ignored.
+    """
+    if trainable not in TRAINABLE_CHOICES:
+        raise ValueError(
+            f"trainable must be one of {TRAINABLE_CHOICES}, "
+            f"got {trainable!r}."
+        )
+    if trainable == "lora" and decoder_batchnorm_momentum is not None:
+        raise ValueError(
+            "decoder_batchnorm_momentum has no effect when only the "
+            "low-rank correction trains: the frozen decoder's batch "
+            "statistics are held fixed."
+        )
+
+
+def _select_trainable(
+    correction: list[Any], decoder: list[Any], trainable: str
+) -> tuple[list[Any], list[Any]]:
+    """Freeze the half of the model a run does not adapt.
+
+    Freezing is done on the parameters rather than only by leaving them
+    out of the optimizer, so that no gradient is computed for them and
+    nothing downstream can mistake them for trained.
+
+    Parameters
+    ----------
+    correction, decoder : list of torch.nn.Parameter
+        From :func:`_trainable_groups`. Parameters of the frozen half
+        have ``requires_grad`` switched off.
+    trainable : str
+        One of :data:`TRAINABLE_CHOICES`.
+
+    Returns
+    -------
+    tuple of list
+        The correction's parameters, then the decoder's, with the
+        frozen half emptied.
+    """
+    train_correction = trainable in ("both", "lora")
+    train_decoder = trainable in ("both", "decoder")
+    for parameter in [
+        *([] if train_correction else correction),
+        *([] if train_decoder else decoder),
+    ]:
+        parameter.requires_grad = False
+    return (
+        correction if train_correction else [],
+        decoder if train_decoder else [],
+    )
+
+
+def _parameter_groups(
+    correction: list[Any],
+    lora_learning_rate: float,
+    decoder: list[Any],
+    decoder_learning_rate: float,
+) -> list[dict[str, Any]]:
+    """The optimizer's groups, leaving out a frozen half.
+
+    The trainer logs the rate of the first group as the run's rate, so
+    a group with nothing in it must not come first.
+
+    Parameters
+    ----------
+    correction : list of torch.nn.Parameter
+    lora_learning_rate : float
+    decoder : list of torch.nn.Parameter
+    decoder_learning_rate : float
+
+    Returns
+    -------
+    list of dict
+    """
+    groups = [
+        {"params": correction, "lr": lora_learning_rate},
+        {"params": decoder, "lr": decoder_learning_rate},
+    ]
+    return [group for group in groups if group["params"]]
+
+
+def _decoder_batchnorm_layers(unetr: Any) -> list[Any]:
+    """The decoder's batch-norm layers, excluding the shared encoder.
+
+    Parameters
+    ----------
+    unetr : torch.nn.Module
+
+    Returns
+    -------
+    list of torch.nn.Module
+    """
+    return [
+        module for name, module in unetr.named_modules()
+        if not name.startswith("encoder")
+        and isinstance(module, _BATCHNORM_KINDS)
+    ]
+
+
+def _hold_decoder_batchnorm_in_eval(unetr: Any) -> int:
+    """Keep a frozen decoder normalizing the way it does at inference.
+
+    The trainer switches the decoder to training mode at the start of
+    every epoch. A frozen decoder would then normalize each step by the
+    statistics of its single image - so the correction would be adapted
+    to a decoder that behaves differently from the one it is evaluated
+    with - and would keep rewriting its running statistics. A hook ahead
+    of every forward pass returns the layers to evaluation mode,
+    whatever the trainer set.
+
+    Parameters
+    ----------
+    unetr : torch.nn.Module
+
+    Returns
+    -------
+    int
+        How many layers are held, so a caller can log a zero rather
+        than assume it worked.
+    """
+    layers = _decoder_batchnorm_layers(unetr)
+
+    def hold(_module: Any, _inputs: Any) -> None:
+        for layer in layers:
+            layer.eval()
+
+    unetr.register_forward_pre_hook(hold)
+    return len(layers)
+
+
+def _without_interactive_training(trainer_class: type) -> type:
+    """A trainer that runs the interactive branch but never steps it.
+
+    With the correction frozen, nothing on the interactive side has a
+    gradient - the prompt encoder and the mask decoder are frozen as
+    well - so its loss cannot be backpropagated and the trainer would
+    stop at the first step. The branch is still run, under ``no_grad``,
+    so its losses keep being logged and show the interactive model
+    staying where it started.
+
+    Parameters
+    ----------
+    trainer_class : type
+        The joint trainer to derive from.
+
+    Returns
+    -------
+    type
+
+    Raises
+    ------
+    AttributeError
+        If the trainer no longer has a method this overrides, which
+        would otherwise turn the override into a silent no-op.
+    """
+    overridden = (
+        "_interactive_train_iteration", "_backprop", "_backprop_mixed",
+    )
+    missing = [n for n in overridden if not hasattr(trainer_class, n)]
+    if missing:
+        raise AttributeError(
+            f"{trainer_class.__name__} has no {', '.join(missing)}; "
+            "the decoder-only override needs updating."
+        )
+
+    class DecoderOnlyTrainer(trainer_class):  # type: ignore[valid-type,misc]
+        def _interactive_train_iteration(self, x: Any, y: Any) -> Any:
+            with torch.no_grad():
+                return super()._interactive_train_iteration(x, y)
+
+        def _backprop(self, loss: torch.Tensor) -> None:
+            if loss.requires_grad:
+                super()._backprop(loss)
+
+        def _backprop_mixed(self, loss: torch.Tensor) -> None:
+            if loss.requires_grad:
+                super()._backprop_mixed(loss)
+
+    return DecoderOnlyTrainer
+
+
 def _set_decoder_batchnorm_momentum(unetr: Any, momentum: float) -> int:
     """Slow down how fast the decoder's batch statistics move.
 
@@ -401,16 +607,10 @@ def _set_decoder_batchnorm_momentum(unetr: Any, momentum: float) -> int:
         How many layers were changed, so a caller can log a zero rather
         than assume it worked.
     """
-    kinds = (
-        torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d,
-    )
-    changed = 0
-    for name, module in unetr.named_modules():
-        if name.startswith("encoder") or not isinstance(module, kinds):
-            continue
-        module.momentum = momentum
-        changed += 1
-    return changed
+    layers = _decoder_batchnorm_layers(unetr)
+    for layer in layers:
+        layer.momentum = momentum
+    return len(layers)
 
 
 def train_run(
@@ -425,6 +625,7 @@ def train_run(
     decoder_learning_rate: float = DECODER_LEARNING_RATE,
     lora_rank: int = LORA_RANK,
     update_matrices: Optional[Sequence[str]] = None,
+    trainable: str = "both",
     scheduler_horizon_epochs: Optional[int] = None,
     decoder_batchnorm_momentum: Optional[float] = None,
     early_stopping: Optional[int] = None,
@@ -490,6 +691,16 @@ def train_run(
     update_matrices : sequence of str, optional
         Attention projections that receive the correction. ``None``
         keeps the frozen choice, the query and value projections.
+    trainable : {"both", "lora", "decoder"}, optional
+        What the run adapts. ``"both"`` is the configuration every
+        comparison of policies uses. ``"lora"`` freezes the instance
+        decoder and holds its batch statistics at their pretrained
+        values; the correction still learns from both losses, the
+        instance one reaching it through the frozen decoder.
+        ``"decoder"`` freezes the correction, which therefore stays at
+        exactly zero, and runs the interactive branch without stepping
+        it. The rate of the frozen half is ignored, and the checkpoint
+        keeps its usual layout either way.
     scheduler_horizon_epochs : int, optional
         Epochs the rate is annealed over. Defaults to the run's own
         length; a run meant to be stopped early and resumed later has
@@ -498,7 +709,8 @@ def train_run(
         train at nothing.
     decoder_batchnorm_momentum : float, optional
         Overrides how fast the decoder's batch statistics move.
-        ``None`` leaves the library's value untouched.
+        ``None`` leaves the library's value untouched. Must be ``None``
+        when ``trainable`` is ``"lora"``.
     early_stopping : int, optional
         Epochs without improvement before stopping. ``None`` disables
         it, which is what a comparison of fixed budgets needs: a run
@@ -516,7 +728,15 @@ def train_run(
     tracking : RunTracking, optional
         Record the run in MLflow as it trains. ``None`` records it in
         TensorBoard only, as every run before this option existed was.
+
+    Raises
+    ------
+    ValueError
+        If ``trainable`` is unknown or conflicts with
+        ``decoder_batchnorm_momentum``.
     """
+    _check_trainable(trainable, decoder_batchnorm_momentum)
+
     import torch_em
     from micro_sam.instance_segmentation import get_unetr
     from micro_sam.training.joint_sam_trainer import (JointSamLogger,
@@ -556,11 +776,21 @@ def train_run(
             ),
         )
 
-    correction, decoder = _trainable_groups(model, unetr)
-    optimizer = torch.optim.AdamW([
-        {"params": correction, "lr": lora_learning_rate},
-        {"params": decoder, "lr": decoder_learning_rate},
-    ])
+    correction, decoder = _select_trainable(
+        *_trainable_groups(model, unetr), trainable
+    )
+    if trainable == "lora":
+        logger.info(
+            "Batch-norm held in evaluation mode on %d frozen decoder "
+            "layer(s).", _hold_decoder_batchnorm_in_eval(unetr),
+        )
+    optimizer = torch.optim.AdamW(_parameter_groups(
+        correction, lora_learning_rate, decoder, decoder_learning_rate,
+    ))
+    trainer_class = (
+        _without_interactive_training(JointSamTrainer)
+        if trainable == "decoder" else JointSamTrainer
+    )
     horizon = (
         n_epochs if scheduler_horizon_epochs is None
         else scheduler_horizon_epochs
@@ -569,15 +799,15 @@ def train_run(
         mask_distances_in_bg=True
     )
     logger.info(
-        "Training %r from %s: %d epoch(s) x %d step(s), rank %d, "
+        "Training %r (%s) from %s: %d epoch(s) x %d step(s), rank %d, "
         "correction %d parameter(s) at lr %.0e, decoder %d at %.0e, "
         "annealed over %d epoch(s).",
-        name, model_type, n_epochs, len(train_loader), lora_rank,
-        sum(p.numel() for p in correction), lora_learning_rate,
+        name, trainable, model_type, n_epochs, len(train_loader),
+        lora_rank, sum(p.numel() for p in correction), lora_learning_rate,
         sum(p.numel() for p in decoder), decoder_learning_rate, horizon,
     )
 
-    trainer = JointSamTrainer(
+    trainer = trainer_class(
         name=name,
         save_root=str(save_root),
         train_loader=train_loader,
@@ -618,8 +848,9 @@ def train_run(
         steps_per_epoch=len(train_loader),
         n_val_images=len(val_loader),
         peft_kwargs=peft_kwargs,
-        lora_learning_rate=lora_learning_rate,
-        decoder_learning_rate=decoder_learning_rate,
+        trainable=trainable,
+        lora_learning_rate=lora_learning_rate if correction else None,
+        decoder_learning_rate=decoder_learning_rate if decoder else None,
         scheduler_horizon_epochs=horizon,
         decoder_batchnorm_momentum=decoder_batchnorm_momentum,
         early_stopping=early_stopping,
@@ -638,8 +869,9 @@ def training_params(
     steps_per_epoch: int,
     n_val_images: int,
     peft_kwargs: dict[str, Any],
-    lora_learning_rate: float,
-    decoder_learning_rate: float,
+    trainable: str,
+    lora_learning_rate: Optional[float],
+    decoder_learning_rate: Optional[float],
     scheduler_horizon_epochs: int,
     decoder_batchnorm_momentum: Optional[float],
     early_stopping: Optional[int],
@@ -653,6 +885,10 @@ def training_params(
     than only what differed from a default a reader would have to look
     up - and so that a change to a default shows up as a difference
     between two runs' parameters.
+
+    The rate of a half that does not train is recorded as ``None``
+    rather than as the value the caller happened to pass, so a run's
+    page cannot suggest that something frozen was trained.
 
     Returns
     -------
@@ -669,6 +905,7 @@ def training_params(
             ",".join(map(str, peft_kwargs["attention_layers_to_update"]))
             or "all"
         ),
+        "trainable": trainable,
         "lora_learning_rate": lora_learning_rate,
         "decoder_learning_rate": decoder_learning_rate,
         "scheduler": "cosine",
