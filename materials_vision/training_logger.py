@@ -47,7 +47,9 @@ from micro_sam.training.joint_sam_trainer import JointSamLogger
 logger = logging.getLogger(__name__)
 
 # Names of the optimizer's parameter groups, in the order the training
-# module builds them.
+# module builds them. A group that carries its own name is reported by
+# it instead, which is what keeps a run that trains only one half from
+# reporting its single group under the other half's name.
 PARAMETER_GROUP_NAMES = ("lora", "decoder")
 
 # Order of the decoder's output channels.
@@ -77,15 +79,18 @@ def learning_rates(optimizer: torch.optim.Optimizer) -> dict[str, float]:
     Returns
     -------
     dict of str to float
-        Groups beyond the named ones are numbered, so an optimizer built
-        differently from the training module's still reports every rate.
+        A group's own ``"name"`` comes first. Unnamed groups take the
+        name of their position, and groups beyond the named ones are
+        numbered, so an optimizer built differently from the training
+        module's still reports every rate.
     """
     rates = {}
     for index, group in enumerate(optimizer.param_groups):
-        name = (
+        positional = (
             PARAMETER_GROUP_NAMES[index]
             if index < len(PARAMETER_GROUP_NAMES) else f"group{index}"
         )
+        name = group.get("name", positional)
         rates[name] = float(group["lr"])
     return rates
 

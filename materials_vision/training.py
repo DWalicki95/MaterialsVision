@@ -1,97 +1,24 @@
 """
-The single place a training run is configured.
+Shared training setup for PEFT-SAM (LoRA) fine-tuning.
 
-This study attributes a change in segmentation quality to a change in
-the augmentation policy. That inference only holds if the policy is the
-only thing that differed between two runs, so everything else - the
-backbone, the adaptation, the frozen components, the optimizer rate,
-the shape of the loader - has one definition rather than one per script
-that happens to start a run.
+Every training script builds its model, data loaders and optimizer
+through this module, so runs differ only in the arguments they pass.
 
-**What trains and what does not.** The image encoder is frozen except
-for low-rank corrections on the query and value projections of every
-attention block. The prompt encoder and the mask decoder are frozen
-outright, which is not the library default: left alone, the library
-keeps the mask decoder trainable, and at four million parameters
-against the correction's eight hundred thousand it would dominate the
-run and make the name "low-rank fine-tuning" misleading. The instance
-decoder trains in full, and at nine and a half million parameters it is
-the largest thing learning here - worth stating plainly, because "we
-train a fraction of a percent of the model" is true of the low-rank
-correction alone and false of the run. A run can be told to adapt only
-one of the two, which exists to ablate each half against the other;
-every comparison between augmentation policies trains both.
-
-**Two learning rates, not one.** The low-rank correction and the
-instance decoder are in different regimes and cannot share a rate. The
-correction starts at exactly zero and holds under a million
-parameters, so it needs a rate well above the library's default to
-move at all. The decoder is ten times larger, starts from pretrained
-weights and is trained in full, which is the regime the library's
-default was tuned for. Running both at the correction's rate trains
-the decoder far too fast: it drives its training loss down threefold
-while its validation loss turns upward within three epochs, and the
-run peaks long before its budget is spent. One rate per group is the
-smallest change that lets each move at its own pace.
-
-**The optimizer is built here rather than by the library.** The
-library's training entry point accepts a single rate and builds the
-parameter list itself, so two rates are not reachable through it. What
-it does around that is reproduced below unchanged - the same frozen
-parts, the same prompt conversion, the same losses, the same trainer
-and its settings - and the differences are limited to the optimizer,
-the schedule, and the two deliberate departures noted at the call
-site.
-
-**The schedule has the budget as its horizon.** A rate that stays flat
-leaves the model wherever the last few steps happened to put it, and
-with one image per step that is a noisy place: neighbouring epochs of
-the same run landed up to 0.045 apart in instance F1, more than three
-times the spread between independent seeds. Annealing over the run's
-budget removes most of that by ending every run at a rate near zero,
-which also makes the end of a run a defensible point of comparison
-rather than a sample from a moving target.
-
-**One image per step.** Rotations by ninety degrees swap an image's
-sides, and images from the two microscopes differ in height because one
-of them carries an information panel that is cropped away. Batching
-would therefore have to group samples by shape - the encoder's input is
-padded to a square and would not care, but the decoder's targets are
-built at content resolution and keep it. A batch of one removes the
-question. It also matches the reference work, and the gradient of a
-step already averages over roughly twenty-five instances.
-
-**The order images arrive in is the sampler's, not the loader's.**
-Asking the loader to shuffle draws the permutation from the global
-random stream, whose state depends on how much randomness everything
-else consumed first - and that differs between augmentation policies.
-Two policies at one seed would then see different image orders, and
-part of any measured difference would be the ordering rather than the
-augmentation. The sampler draws from its own stream, keyed to the run
-seed and the epoch alone, and carries the epoch into the index so that
-augmentation varies from pass to pass even though samples are prepared
-in worker processes.
-
-**The geometry correction is not optional.** The library resizes an
-image to the encoder's square canvas by reading two axes of the tensor
-that hold the batch size and the channel count rather than the height
-and the width. For a three-channel image in a batch of one that puts
-every image at 341 by 1024 whatever its real shape, squeezing the
-content vertically by a factor of two and a quarter - and a wall two
-pixels across survives horizontally while vanishing vertically, so the
-model would be taught a directional distortion the material does not
-have. Inference does not go through that path, so the damage is a
-train-time-only distortion that would never show up as an error. The
-correction is installed before the model is built and then verified by
-reading the geometry back out of the library, because a correction that
-silently failed to install would leave no other trace.
-
-**The loader emits content resolution and nothing else.** No resizing,
-no padding, no normalization: the model performs all three inside its
-own forward pass, and doing any of them earlier would either duplicate
-the normalization or pad before the model scales, shrinking the working
-resolution that every visibility criterion in this study was calibrated
-against.
+Contents
+--------
+- Model defaults: LoRA rank and target layers, frozen components,
+  trainable part (``both``, ``lora`` or ``decoder``).
+- Learning rates: separate rates for the LoRA layers and the instance
+  decoder, with a cosine schedule annealed over the run length.
+- Data: ``build_source`` reads a subset of the split, ``build_loader``
+  wraps it in a DataLoader (batch size 1, seeded sampler, optional
+  augmentation, images at native resolution).
+- ``prepare_geometry``: fixes the library's encoder input resize, which
+  otherwise distorts the image aspect ratio during training. Must be
+  called before a model is built.
+- ``train_run``: runs one fine-tuning to completion.
+- ``training_params`` / ``tracked_run``: MLflow parameters and run
+  logging.
 """
 import logging
 from contextlib import contextmanager
@@ -112,7 +39,8 @@ from materials_vision.sam_geometry import (patch_resize_longest_side,
 from materials_vision.tracking import (CHECKPOINT_DIR_TAG, RunTracking,
                                        checkpoint_dir_tag, configure_tracking,
                                        ensure_experiment)
-from materials_vision.training_logger import MlflowJointSamLogger
+from materials_vision.training_logger import (PARAMETER_GROUP_NAMES,
+                                              MlflowJointSamLogger)
 
 logger = logging.getLogger(__name__)
 
@@ -465,7 +393,9 @@ def _parameter_groups(
     """The optimizer's groups, leaving out a frozen half.
 
     The trainer logs the rate of the first group as the run's rate, so
-    a group with nothing in it must not come first.
+    a group with nothing in it must not come first. Each group carries
+    its name, because with one left out its position no longer says
+    which half it is.
 
     Parameters
     ----------
@@ -478,9 +408,10 @@ def _parameter_groups(
     -------
     list of dict
     """
+    lora_name, decoder_name = PARAMETER_GROUP_NAMES
     groups = [
-        {"params": correction, "lr": lora_learning_rate},
-        {"params": decoder, "lr": decoder_learning_rate},
+        {"params": correction, "lr": lora_learning_rate, "name": lora_name},
+        {"params": decoder, "lr": decoder_learning_rate, "name": decoder_name},
     ]
     return [group for group in groups if group["params"]]
 
