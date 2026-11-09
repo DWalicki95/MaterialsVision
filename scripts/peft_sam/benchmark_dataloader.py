@@ -136,18 +136,16 @@ STEP_REPEATS = 10
 MODEL_TYPE = "vit_l"
 
 # The encoder is adapted by low-rank updates to the query and value
-# projections of every attention block; the prompt encoder and the
-# mask decoder are left as they are. The instance decoder trains in
-# full. This mirrors the training configuration because a step timed
-# under a different one would be timing a different model.
+# projections of every attention block; SAM's prompt encoder and mask
+# decoder are frozen (FROZEN_SAM_PARTS). The UNETR instance decoder
+# trains in full. This mirrors the training configuration because a
+# step timed under a different one would be timing a different model.
 PEFT_KWARGS = {
     "rank": 8,
     "update_matrices": ["q", "v"],
     "attention_layers_to_update": [],
     "quantize": False,
 }
-
-FREEZE_PARTS = ["prompt_encoder", "mask_decoder"]
 
 # The trainer runs its forward passes in half precision, so a step
 # timed in full precision would be timing a slower model than the one
@@ -444,6 +442,8 @@ def build_model(device: torch.device):
     import micro_sam.training as sam_training
     from micro_sam.instance_segmentation import get_unetr
 
+    from materials_vision.training import FROZEN_SAM_PARTS
+
     patch_resize_longest_side()
     measured = verify_preprocess_geometry()
     for geometry_px, content_px in measured.items():
@@ -455,7 +455,7 @@ def build_model(device: torch.device):
     model, state = sam_training.get_trainable_sam_model(
         model_type=MODEL_TYPE,
         device=device,
-        freeze=FREEZE_PARTS,
+        freeze=list(FROZEN_SAM_PARTS),
         return_state=True,
         peft_kwargs=dict(PEFT_KWARGS),
     )
