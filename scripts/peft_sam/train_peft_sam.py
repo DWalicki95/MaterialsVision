@@ -3,11 +3,12 @@
 Train a single PEFT-SAM (LoRA) model with configurable settings.
 
 All training settings are command-line options: epoch count, learning
-rates, trainable part (LoRA, the UNETR instance decoder or both), LoRA
-rank, augmentation policy, seed and data subsets. Unset options fall
-back to the default recipe - 12 epochs, cosine learning-rate
-schedule, ``full_b`` augmentation, training on TRAIN with validation
-loss on VALIDATION.
+rates, trainable part (LoRA, the UNETR instance decoder or both),
+whether the interactive loss trains LoRA, LoRA rank, augmentation
+policy, seed and data subsets. Unset options fall back to the default
+recipe - 12 epochs, cosine learning-rate schedule, ``full_b``
+augmentation, joint interactive and instance loss, training on TRAIN
+with validation loss on VALIDATION.
 
 Runs are logged to a separate MLflow experiment and checkpoint
 directory. A checkpoint is saved every epoch; to pick the best one,
@@ -27,6 +28,9 @@ Only the instance decoder, at three times its adopted rate:
     $ python scripts/peft_sam/train_peft_sam.py \\
         --trainable instance_decoder \\
         --decoder-lr 3e-5
+
+The adopted recipe with LoRA learning from the instance loss alone:
+    $ python scripts/peft_sam/train_peft_sam.py --interactive-loss off
 
 Rehearse the whole path in minutes:
     $ python scripts/peft_sam/train_peft_sam.py --epochs 1 --n-train 8 \\
@@ -48,7 +52,8 @@ from materials_vision.tracking import REHEARSAL_EXPERIMENT, RunTracking
 from materials_vision.training import (DECODER_LEARNING_RATE,
                                        LORA_LEARNING_RATE, LORA_RANK,
                                        TRAINABLE_CHOICES, build_loader,
-                                       build_source, train_run)
+                                       build_source,
+                                       resolve_interactive_loss, train_run)
 from scripts.peft_sam.run_e8_full import (BASE_MODEL, N_EPOCHS, RUN_SEED,
                                           VARIANTS, build_full_policy,
                                           spaced_indices)
@@ -154,6 +159,30 @@ def trains_instance_decoder(trainable: str) -> bool:
     return trainable in ("both", "instance_decoder")
 
 
+def interactive_loss_of(args: argparse.Namespace) -> bool:
+    """Whether the interactive loss trains the low-rank correction.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+
+    Returns
+    -------
+    bool
+
+    Raises
+    ------
+    ValueError
+        If it was asked for while the correction is frozen;
+        :func:`refusal` reports that before a run starts.
+    """
+    requested = (
+        None if args.interactive_loss is None
+        else args.interactive_loss == "on"
+    )
+    return resolve_interactive_loss(args.trainable, requested)
+
+
 def horizon_of(args: argparse.Namespace) -> int:
     """Epochs the rate is annealed over.
 
@@ -189,7 +218,10 @@ def run_name(args: argparse.Namespace) -> str:
     """
     if args.name is not None:
         return args.name
-    parts = [args.policy, args.trainable, f"e{args.epochs}"]
+    parts = [args.policy, args.trainable]
+    if trains_lora(args.trainable) and not interactive_loss_of(args):
+        parts.append("nointeractive")
+    parts.append(f"e{args.epochs}")
     if args.scheduler_horizon is not None:
         parts.append(f"h{args.scheduler_horizon}")
     if trains_lora(args.trainable):
@@ -252,6 +284,11 @@ def refusal(args: argparse.Namespace) -> Optional[str]:
             f"--save-every must lie between 1 and the number of epochs "
             f"({args.epochs}), got {args.save_every}."
         )
+    if args.interactive_loss == "on" and not trains_lora(args.trainable):
+        return (
+            f"--interactive-loss on cannot train anything under "
+            f"--trainable {args.trainable}: the correction is frozen."
+        )
     if trains_lora(args.trainable) and args.lora_lr <= 0:
         return f"--lora-lr must be positive, got {args.lora_lr:g}."
     if trains_instance_decoder(args.trainable) and args.decoder_lr <= 0:
@@ -308,6 +345,7 @@ def provenance_record(args: argparse.Namespace) -> dict[str, Any]:
         "run": run_name(args),
         "base_model": BASE_MODEL,
         "trainable": args.trainable,
+        "interactive_loss": interactive_loss_of(args),
         "epochs": args.epochs,
         "scheduler_horizon_epochs": horizon_of(args),
         "lora_learning_rate": (
@@ -356,6 +394,7 @@ def build_tracking(
         tags={
             "study": "adhoc",
             "trainable": args.trainable,
+            "interactive_loss": "on" if interactive_loss_of(args) else "off",
             "epochs": str(args.epochs),
             "policy": args.policy.upper(),
             "seed": str(args.seed),
@@ -424,8 +463,9 @@ def execute(args: argparse.Namespace) -> None:
         indices=spaced_indices(len(monitor_source), args.n_monitor),
     )
     logger.info(
-        "%s: %s trains, policy %s, seed %d, %d training image(s) from %s "
-        "of %s.", name, args.trainable, args.policy, args.seed,
+        "%s: %s trains, interactive loss %s, policy %s, seed %d, %d "
+        "training image(s) from %s of %s.", name, args.trainable,
+        "on" if interactive_loss_of(args) else "off", args.policy, args.seed,
         len(train_loader), args.train_subset.upper(), args.split.name,
     )
     log_monitoring(args, len(monitor_loader))
@@ -441,6 +481,7 @@ def execute(args: argparse.Namespace) -> None:
         decoder_learning_rate=args.decoder_lr,
         lora_rank=args.lora_rank,
         trainable=args.trainable,
+        interactive_loss=interactive_loss_of(args),
         scheduler_horizon_epochs=args.scheduler_horizon,
         early_stopping=None,
         save_every_kth_epoch=args.save_every,
@@ -472,6 +513,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="What is adapted: the low-rank correction, the UNETR "
              "instance decoder, or both. SAM's prompt encoder and mask "
              "decoder stay frozen in every case. Default both.",
+    )
+    parser.add_argument(
+        "--interactive-loss", choices=("on", "off"), default=None,
+        help="Whether the interactive loss, back-propagated through "
+             "SAM's frozen mask decoder, trains the low-rank correction "
+             "alongside the instance loss. Default: on wherever the "
+             "correction trains, as in the library's joint objective. "
+             "With it off, best.pt no longer reflects the run; score "
+             "the numbered snapshots instead.",
     )
     parser.add_argument(
         "--lora-lr", type=float, default=None,

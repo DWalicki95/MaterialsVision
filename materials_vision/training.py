@@ -8,7 +8,8 @@ Contents
 --------
 - Model defaults: LoRA rank and target layers, SAM components frozen
   in every run, trainable part (``both``, ``lora`` or
-  ``instance_decoder``).
+  ``instance_decoder``), and whether the interactive loss trains the
+  low-rank correction alongside the instance loss.
 - Learning rates: separate rates for the LoRA layers and the instance
   decoder, with a cosine schedule annealed over the run length.
 - Data: ``build_source`` reads a subset of the split, ``build_loader``
@@ -82,8 +83,6 @@ FROZEN_SAM_PARTS = ["prompt_encoder", "mask_decoder"]
 # What a run adapts on top of FROZEN_SAM_PARTS: the low-rank correction
 # in the image encoder, the UNETR instance decoder built by
 # ``get_unetr``, or both. SAM's own mask decoder is never among them.
-# Runs logged before 2026-11-09 record ``instance_decoder`` as
-# ``decoder``.
 TRAINABLE_CHOICES = ("both", "lora", "instance_decoder")
 
 _BATCHNORM_KINDS = (
@@ -357,6 +356,47 @@ def _check_trainable(
         )
 
 
+def resolve_interactive_loss(
+    trainable: str, interactive_loss: Optional[bool]
+) -> bool:
+    """Whether the interactive loss steps the optimizer.
+
+    The library's joint trainer takes two optimizer steps per image:
+    one on the interactive loss, which reaches the low-rank correction
+    through SAM's frozen mask decoder, and one on the instance loss.
+    Only the correction can learn from the first, so with the
+    correction frozen there is nothing for it to train.
+
+    Parameters
+    ----------
+    trainable : str
+        One of :data:`TRAINABLE_CHOICES`.
+    interactive_loss : bool, optional
+        ``None`` keeps the library's joint objective wherever the
+        correction trains, and turns the loss off where it does not.
+
+    Returns
+    -------
+    bool
+
+    Raises
+    ------
+    ValueError
+        If the interactive loss is asked for while the correction is
+        frozen, where it would be silently ignored.
+    """
+    trains_correction = trainable in ("both", "lora")
+    if interactive_loss is None:
+        return trains_correction
+    if interactive_loss and not trains_correction:
+        raise ValueError(
+            "The interactive loss cannot train anything when only the "
+            "instance decoder trains: it reaches the instance decoder "
+            "by no path, and the correction is frozen."
+        )
+    return interactive_loss
+
+
 def _select_trainable(
     correction: list[Any], instance_decoder: list[Any], trainable: str
 ) -> tuple[list[Any], list[Any]]:
@@ -481,12 +521,19 @@ def _hold_decoder_batchnorm_in_eval(unetr: Any) -> int:
 def _without_interactive_training(trainer_class: type) -> type:
     """A trainer that runs the interactive branch but never steps it.
 
-    With the correction frozen, nothing on the interactive side has a
-    gradient - the prompt encoder and the mask decoder are frozen as
-    well - so its loss cannot be backpropagated and the trainer would
-    stop at the first step. The branch is still run, under ``no_grad``,
-    so its losses keep being logged and show the interactive model
-    staying where it started.
+    Used wherever the interactive loss is off. With the correction
+    frozen this is not a choice: nothing on the interactive side then
+    has a gradient - the prompt encoder and the mask decoder are frozen
+    as well - so its loss cannot be backpropagated and the trainer
+    would stop at the first step. With the correction training, it
+    leaves the instance loss as the only thing the correction learns
+    from, and one optimizer step per image instead of two.
+
+    The branch is still run, under ``no_grad``, so its losses keep
+    being logged and show how far the interactive model drifts when
+    nothing holds it in place. The instance branch is unaffected: the
+    instance decoder runs the image encoder again on its own forward
+    pass rather than reusing the interactive branch's embeddings.
 
     Parameters
     ----------
@@ -510,10 +557,11 @@ def _without_interactive_training(trainer_class: type) -> type:
     if missing:
         raise AttributeError(
             f"{trainer_class.__name__} has no {', '.join(missing)}; "
-            "the instance-decoder-only override needs updating."
+            "the override that turns the interactive loss off needs "
+            "updating."
         )
 
-    class DecoderOnlyTrainer(trainer_class):  # type: ignore[valid-type,misc]
+    class NoInteractiveLoss(trainer_class):  # type: ignore[valid-type,misc]
         def _interactive_train_iteration(self, x: Any, y: Any) -> Any:
             with torch.no_grad():
                 return super()._interactive_train_iteration(x, y)
@@ -526,7 +574,26 @@ def _without_interactive_training(trainer_class: type) -> type:
             if loss.requires_grad:
                 super()._backprop_mixed(loss)
 
-    return DecoderOnlyTrainer
+    return NoInteractiveLoss
+
+
+def _joint_trainer_class(interactive_loss: bool) -> type:
+    """The library's joint trainer, with or without the interactive loss.
+
+    Parameters
+    ----------
+    interactive_loss : bool
+        From :func:`resolve_interactive_loss`.
+
+    Returns
+    -------
+    type
+    """
+    from micro_sam.training.joint_sam_trainer import JointSamTrainer
+
+    if interactive_loss:
+        return JointSamTrainer
+    return _without_interactive_training(JointSamTrainer)
 
 
 def _set_decoder_batchnorm_momentum(unetr: Any, momentum: float) -> int:
@@ -570,6 +637,7 @@ def train_run(
     lora_rank: int = LORA_RANK,
     update_matrices: Optional[Sequence[str]] = None,
     trainable: str = "both",
+    interactive_loss: Optional[bool] = None,
     scheduler_horizon_epochs: Optional[int] = None,
     decoder_batchnorm_momentum: Optional[float] = None,
     early_stopping: Optional[int] = None,
@@ -646,6 +714,16 @@ def train_run(
         exactly zero, and runs the interactive branch without stepping
         it. The rate of the frozen half is ignored, and the checkpoint
         keeps its usual layout either way.
+    interactive_loss : bool, optional
+        Whether the interactive loss trains the correction alongside
+        the instance loss, as the library's joint objective does.
+        ``None`` resolves through :func:`resolve_interactive_loss`:
+        on wherever the correction trains, off where it does not.
+        With it off, the trainer's own validation metric - which
+        weighs the interactive branch three times as heavily as the
+        instance one - no longer tracks what the run learns, so
+        ``best.pt`` and early stopping are both chosen on it in
+        vain; keep numbered snapshots and score them instead.
     scheduler_horizon_epochs : int, optional
         Epochs the rate is annealed over. Defaults to the run's own
         length; a run meant to be stopped early and resumed later has
@@ -678,14 +756,14 @@ def train_run(
     ------
     ValueError
         If ``trainable`` is unknown or conflicts with
-        ``decoder_batchnorm_momentum``.
+        ``decoder_batchnorm_momentum`` or ``interactive_loss``.
     """
     _check_trainable(trainable, decoder_batchnorm_momentum)
+    interactive_loss = resolve_interactive_loss(trainable, interactive_loss)
 
     import torch_em
     from micro_sam.instance_segmentation import get_unetr
-    from micro_sam.training.joint_sam_trainer import (JointSamLogger,
-                                                      JointSamTrainer)
+    from micro_sam.training.joint_sam_trainer import JointSamLogger
     from micro_sam.training.training import _check_loader
     from micro_sam.training.util import (ConvertToSamInputs,
                                          get_trainable_sam_model)
@@ -733,10 +811,7 @@ def train_run(
         correction, lora_learning_rate,
         instance_decoder, decoder_learning_rate,
     ))
-    trainer_class = (
-        _without_interactive_training(JointSamTrainer)
-        if trainable == "instance_decoder" else JointSamTrainer
-    )
+    trainer_class = _joint_trainer_class(interactive_loss)
     horizon = (
         n_epochs if scheduler_horizon_epochs is None
         else scheduler_horizon_epochs
@@ -745,11 +820,12 @@ def train_run(
         mask_distances_in_bg=True
     )
     logger.info(
-        "Training %r (%s) from %s: %d epoch(s) x %d step(s), rank %d, "
-        "correction %d parameter(s) at lr %.0e, decoder %d at %.0e, "
-        "annealed over %d epoch(s).",
-        name, trainable, model_type, n_epochs, len(train_loader),
-        lora_rank, sum(p.numel() for p in correction), lora_learning_rate,
+        "Training %r (%s, interactive loss %s) from %s: %d epoch(s) x "
+        "%d step(s), rank %d, correction %d parameter(s) at lr %.0e, "
+        "decoder %d at %.0e, annealed over %d epoch(s).",
+        name, trainable, "on" if interactive_loss else "off", model_type,
+        n_epochs, len(train_loader), lora_rank,
+        sum(p.numel() for p in correction), lora_learning_rate,
         sum(p.numel() for p in instance_decoder), decoder_learning_rate,
         horizon,
     )
@@ -796,6 +872,7 @@ def train_run(
         n_val_images=len(val_loader),
         peft_kwargs=peft_kwargs,
         trainable=trainable,
+        interactive_loss=interactive_loss,
         lora_learning_rate=lora_learning_rate if correction else None,
         decoder_learning_rate=(
             decoder_learning_rate if instance_decoder else None
@@ -819,6 +896,7 @@ def training_params(
     n_val_images: int,
     peft_kwargs: dict[str, Any],
     trainable: str,
+    interactive_loss: bool,
     lora_learning_rate: Optional[float],
     decoder_learning_rate: Optional[float],
     scheduler_horizon_epochs: int,
@@ -839,6 +917,9 @@ def training_params(
     rather than as the value the caller happened to pass, so a run's
     page cannot suggest that something frozen was trained.
 
+    ``interactive_loss`` is absent from runs logged before 2026-11-09.
+    Those runs had it on unless only the instance decoder trained.
+
     Returns
     -------
     dict of str to Any
@@ -855,6 +936,7 @@ def training_params(
             or "all"
         ),
         "trainable": trainable,
+        "interactive_loss": interactive_loss,
         "lora_learning_rate": lora_learning_rate,
         "decoder_learning_rate": decoder_learning_rate,
         "scheduler": "cosine",

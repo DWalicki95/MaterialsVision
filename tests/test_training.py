@@ -10,6 +10,9 @@ guarding constants against themselves - they pin the numbers a reader
 of the study would cite, so that changing one requires changing a test
 and noticing.
 """
+import contextlib
+import types
+
 import numpy as np
 import pytest
 import torch
@@ -23,10 +26,12 @@ from materials_vision.training import (BATCH_SIZE, DECODER_LEARNING_RATE,
                                        CosineAnnealingIgnoringMetric,
                                        _check_trainable,
                                        _hold_decoder_batchnorm_in_eval,
+                                       _joint_trainer_class,
                                        _parameter_groups, _select_trainable,
                                        _trainable_groups,
                                        _without_interactive_training,
-                                       build_loader)
+                                       build_loader,
+                                       resolve_interactive_loss)
 from materials_vision.training_logger import learning_rates
 
 
@@ -505,7 +510,7 @@ class _FakeJointTrainer:
         self.stepped.append(loss)
 
 
-def test_an_instance_decoder_only_run_never_steps_the_interactive_branch():
+def test_without_the_interactive_loss_its_branch_is_never_stepped():
     trainer = _without_interactive_training(_FakeJointTrainer)()
 
     loss = trainer._interactive_train_iteration(torch.ones(1), None)[0]
@@ -516,7 +521,7 @@ def test_an_instance_decoder_only_run_never_steps_the_interactive_branch():
     assert trainer.stepped == []
 
 
-def test_an_instance_decoder_only_run_still_steps_the_instance_branch():
+def test_without_the_interactive_loss_the_instance_branch_still_steps():
     trainer = _without_interactive_training(_FakeJointTrainer)()
     loss = (torch.ones(1, requires_grad=True) * 2).sum()
 
@@ -525,7 +530,7 @@ def test_an_instance_decoder_only_run_still_steps_the_instance_branch():
     assert trainer.stepped == [loss]
 
 
-def test_the_decoder_only_override_matches_the_real_trainer():
+def test_the_override_matches_the_real_trainer():
     """A renamed method would turn the override into a silent no-op."""
     from micro_sam.training.joint_sam_trainer import JointSamTrainer
 
@@ -534,10 +539,111 @@ def test_the_decoder_only_override_matches_the_real_trainer():
     assert issubclass(derived, JointSamTrainer)
 
 
-def test_the_decoder_only_override_refuses_a_trainer_it_cannot_patch():
+def test_the_override_refuses_a_trainer_it_cannot_patch():
     with pytest.raises(AttributeError, match="_backprop_mixed"):
         _without_interactive_training(type(
             "Partial", (), {
                 "_interactive_train_iteration": None, "_backprop": None,
             },
         ))
+
+
+@pytest.mark.parametrize("trainable, expected", [
+    ("both", True), ("lora", True), ("instance_decoder", False),
+])
+def test_the_interactive_loss_defaults_to_on_where_the_correction_trains(
+    trainable, expected
+):
+    assert resolve_interactive_loss(trainable, None) is expected
+
+
+@pytest.mark.parametrize("trainable", ["both", "lora"])
+def test_the_interactive_loss_can_be_turned_off_while_the_correction_trains(
+    trainable
+):
+    assert resolve_interactive_loss(trainable, False) is False
+
+
+def test_the_interactive_loss_is_refused_where_it_cannot_train_anything():
+    with pytest.raises(ValueError, match="interactive loss"):
+        resolve_interactive_loss("instance_decoder", True)
+
+
+def test_the_trainer_class_follows_the_interactive_loss():
+    from micro_sam.training.joint_sam_trainer import JointSamTrainer
+
+    assert _joint_trainer_class(True) is JointSamTrainer
+    without = _joint_trainer_class(False)
+    assert without is not JointSamTrainer
+    assert issubclass(without, JointSamTrainer)
+
+
+def _optimizer_steps_in_one_epoch(monkeypatch, interactive_loss, n_images):
+    """Run the library's own epoch loop on stand-ins and count steps.
+
+    Only the two branches' forward passes are replaced; the loop that
+    alternates them, and the step after each, are the library's. The
+    trainer class is chosen the way :func:`train_run` chooses it.
+    """
+    from micro_sam.training import joint_sam_trainer
+
+    class StandIn(joint_sam_trainer.JointSamTrainer):
+        def _interactive_train_iteration(self, x, y):
+            loss = self.unetr.encoder.correction(x).pow(2).mean()
+            return loss, None, None, None, None
+
+        def _check_input_normalization(self, x, input_check_done):
+            return True
+
+    monkeypatch.setattr(joint_sam_trainer, "JointSamTrainer", StandIn)
+    trainer = object.__new__(_joint_trainer_class(interactive_loss))
+
+    torch.manual_seed(0)
+    model, unetr = _shared_encoder_pair()
+    correction, decoder = _select_trainable(
+        *_trainable_groups(model, unetr), "both"
+    )
+    optimizer = torch.optim.AdamW(_parameter_groups(
+        correction, LORA_LEARNING_RATE, decoder, DECODER_LEARNING_RATE,
+    ))
+    steps = []
+    optimizer.register_step_post_hook(lambda *_: steps.append(1))
+    trainer.model, trainer.unetr, trainer.optimizer = model, unetr, optimizer
+    trainer.train_loader = [
+        (torch.randn(3, 4), torch.zeros(3, 2, 4)) for _ in range(n_images)
+    ]
+    trainer.instance_loss = lambda outputs, y: outputs
+    trainer.device = "cpu"
+    trainer.logger = None
+    trainer._iteration = 0
+    trainer.max_iteration = n_images + 1
+    before = [p.detach().clone() for p in correction]
+
+    trainer._train_epoch_impl(
+        types.SimpleNamespace(update=lambda n: None),
+        contextlib.nullcontext, trainer._backprop,
+    )
+
+    moved = any(not torch.equal(b, p) for b, p in zip(before, correction))
+    return len(steps), moved
+
+
+def test_the_joint_objective_steps_twice_per_image(monkeypatch):
+    n_steps, correction_moved = _optimizer_steps_in_one_epoch(
+        monkeypatch, interactive_loss=True, n_images=3
+    )
+
+    assert n_steps == 6
+    assert correction_moved
+
+
+def test_without_the_interactive_loss_the_correction_steps_once_per_image(
+    monkeypatch
+):
+    """The instance loss alone must still reach the correction."""
+    n_steps, correction_moved = _optimizer_steps_in_one_epoch(
+        monkeypatch, interactive_loss=False, n_images=3
+    )
+
+    assert n_steps == 3
+    assert correction_moved

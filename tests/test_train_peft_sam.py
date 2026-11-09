@@ -2,8 +2,8 @@
 
 The trainer is replaced with a recorder, so the tests check which
 settings reach it from the command line - defaults, learning rates,
-trainable part, augmentation, data subsets, run naming and input
-validation - on a small split that builds real data loaders.
+trainable part, interactive loss, augmentation, data subsets, run
+naming and input validation - on a small split that builds real data loaders.
 """
 import json
 
@@ -56,6 +56,7 @@ def test_without_options_the_adopted_recipe_reaches_the_trainer(
         f"_seed{RUN_SEED}"
     assert kwargs["n_epochs"] == N_EPOCHS
     assert kwargs["trainable"] == "both"
+    assert kwargs["interactive_loss"] is True
     assert kwargs["lora_learning_rate"] == LORA_LEARNING_RATE
     assert kwargs["decoder_learning_rate"] == DECODER_LEARNING_RATE
     assert kwargs["lora_rank"] == LORA_RANK
@@ -182,6 +183,7 @@ def test_settings_that_differ_never_share_a_directory(
 ):
     variants = [
         (), ("--epochs", "20"), ("--trainable", "lora"),
+        ("--interactive-loss", "off"),
         ("--lora-lr", "1e-3"), ("--decoder-lr", "3e-5"),
         ("--scheduler-horizon", "24"), ("--lora-rank", "4"),
         ("--policy", "none"), ("--seed", "1"),
@@ -211,6 +213,10 @@ def test_snapshots_expected_follow_the_interval(frozen_split, tmp_path):
     (("--epochs", "4", "--save-every", "5"), "--save-every"),
     (("--lora-lr", "0"), "--lora-lr"),
     (("--trainable", "lora", "--decoder-lr", "-1"), None),
+    (("--trainable", "instance_decoder", "--interactive-loss", "on"),
+     "--interactive-loss on"),
+    (("--trainable", "instance_decoder", "--interactive-loss", "off"),
+     None),
     (("--lora-rank", "0"), "--lora-rank"),
     (("--n-train", "-1"), "negative"),
     (("--monitor-subset", "test"), "TEST"),
@@ -237,3 +243,47 @@ def test_a_missing_split_is_refused(frozen_split, tmp_path):
 def test_an_unknown_choice_of_what_trains_is_rejected():
     with pytest.raises(SystemExit):
         cli.parse_args(["--trainable", "encoder"])
+
+
+@pytest.mark.parametrize("trainable", ["both", "lora"])
+def test_the_interactive_loss_can_be_turned_off(
+    frozen_split, tmp_path, trainer_calls, trainable
+):
+    args = _args(
+        frozen_split, tmp_path, "--trainable", trainable,
+        "--interactive-loss", "off",
+    )
+
+    cli.execute(args)
+
+    [(name, kwargs)] = trainer_calls
+    assert name.startswith(f"full_b_{trainable}_nointeractive_e")
+    assert kwargs["interactive_loss"] is False
+    assert kwargs["tracking"].tags["interactive_loss"] == "off"
+    record = json.loads(
+        (args.save_root / f"{name}_provenance.json").read_text()
+    )
+    assert record["interactive_loss"] is False
+
+
+def test_an_instance_decoder_run_has_no_interactive_loss_to_name(
+    frozen_split, tmp_path, trainer_calls
+):
+    """It never had one, so its name stays what it always was."""
+    cli.execute(_args(
+        frozen_split, tmp_path, "--trainable", "instance_decoder",
+    ))
+
+    [(name, kwargs)] = trainer_calls
+    assert "nointeractive" not in name
+    assert kwargs["interactive_loss"] is False
+    assert kwargs["tracking"].tags["interactive_loss"] == "off"
+
+
+def test_turning_the_interactive_loss_on_explicitly_changes_nothing(
+    frozen_split, tmp_path
+):
+    default = _args(frozen_split, tmp_path)
+    explicit = _args(frozen_split, tmp_path, "--interactive-loss", "on")
+
+    assert cli.run_name(explicit) == cli.run_name(default)
