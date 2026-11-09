@@ -27,6 +27,7 @@ from materials_vision.training import (BATCH_SIZE, DECODER_LEARNING_RATE,
                                        _trainable_groups,
                                        _without_interactive_training,
                                        build_loader)
+from materials_vision.training_logger import learning_rates
 
 
 class _FakeRecord:
@@ -424,6 +425,18 @@ def test_a_frozen_half_never_comes_first_in_the_optimizer():
     assert [g["lr"] for g in optimizer.param_groups] == [
         DECODER_LEARNING_RATE
     ]
+
+
+@pytest.mark.parametrize("trainable, expected", [
+    ("both", {"lora": LORA_LEARNING_RATE, "decoder": DECODER_LEARNING_RATE}),
+    ("lora", {"lora": LORA_LEARNING_RATE}),
+    ("decoder", {"decoder": DECODER_LEARNING_RATE}),
+])
+def test_each_rate_reaches_the_logs_under_its_own_half(trainable, expected):
+    """With one group left out, position no longer names a group."""
+    _, optimizer = _step_once(trainable)
+
+    assert learning_rates(optimizer) == pytest.approx(expected)
 
 
 def test_a_frozen_half_stops_requiring_gradients():
