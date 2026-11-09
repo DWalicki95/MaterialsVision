@@ -82,7 +82,7 @@ def test_it_trains_on_train_and_monitors_on_held_out_validation(
 
 @pytest.mark.parametrize("trainable, fragment, absent", [
     ("lora", "_lora0.001_", "_dec"),
-    ("decoder", "_dec0.001_", "_lora0"),
+    ("instance_decoder", "_dec0.001_", "_lora0"),
 ])
 def test_one_half_trains_under_a_name_without_the_frozen_rate(
     frozen_split, tmp_path, trainer_calls, trainable, fragment, absent
@@ -124,7 +124,8 @@ def test_a_rate_given_for_a_frozen_half_is_reported_as_ignored(
     frozen_split, tmp_path
 ):
     args = _args(
-        frozen_split, tmp_path, "--trainable", "decoder", "--lora-lr", "1e-3",
+        frozen_split, tmp_path, "--trainable", "instance_decoder",
+        "--lora-lr", "1e-3",
     )
 
     assert cli.ignored_rates(args) == ["--lora-lr"]
@@ -133,7 +134,9 @@ def test_a_rate_given_for_a_frozen_half_is_reported_as_ignored(
 def test_the_adopted_rates_are_never_reported_as_ignored(
     frozen_split, tmp_path
 ):
-    args = _args(frozen_split, tmp_path, "--trainable", "decoder")
+    args = _args(
+        frozen_split, tmp_path, "--trainable", "instance_decoder"
+    )
 
     assert cli.ignored_rates(args) == []
 

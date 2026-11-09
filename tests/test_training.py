@@ -17,7 +17,7 @@ import torch
 from materials_vision.augmentation import (AugmentationPolicy,
                                            OrientationConfig, PolicyConfig)
 from materials_vision.training import (BATCH_SIZE, DECODER_LEARNING_RATE,
-                                       FREEZE_PARTS, LORA_LEARNING_RATE,
+                                       FROZEN_SAM_PARTS, LORA_LEARNING_RATE,
                                        LORA_RANK, N_OBJECTS_PER_BATCH,
                                        NUM_WORKERS, PEFT_KWARGS,
                                        CosineAnnealingIgnoringMetric,
@@ -122,7 +122,13 @@ def test_adaptation_method_is_named_not_inherited():
 
 
 def test_prompt_encoder_and_mask_decoder_are_frozen():
-    assert set(FREEZE_PARTS) == {"prompt_encoder", "mask_decoder"}
+    assert set(FROZEN_SAM_PARTS) == {"prompt_encoder", "mask_decoder"}
+
+
+def test_the_trainable_choice_names_the_instance_decoder():
+    """A bare ``decoder`` read as SAM's mask decoder, which never trains."""
+    with pytest.raises(ValueError, match="trainable"):
+        _check_trainable("decoder", None)
 
 
 def test_the_two_halves_do_not_share_a_learning_rate():
@@ -408,7 +414,7 @@ def _step_once(trainable):
 @pytest.mark.parametrize("trainable, prefixes", [
     ("both", ("encoder.correction", "norm", "head")),
     ("lora", ("encoder.correction",)),
-    ("decoder", ("norm", "head")),
+    ("instance_decoder", ("norm", "head")),
 ])
 def test_only_the_chosen_half_moves_in_a_step(trainable, prefixes):
     moved, _ = _step_once(trainable)
@@ -420,7 +426,7 @@ def test_only_the_chosen_half_moves_in_a_step(trainable, prefixes):
 
 def test_a_frozen_half_never_comes_first_in_the_optimizer():
     """The trainer logs the first group's rate as the run's rate."""
-    _, optimizer = _step_once("decoder")
+    _, optimizer = _step_once("instance_decoder")
 
     assert [g["lr"] for g in optimizer.param_groups] == [
         DECODER_LEARNING_RATE
@@ -430,7 +436,7 @@ def test_a_frozen_half_never_comes_first_in_the_optimizer():
 @pytest.mark.parametrize("trainable, expected", [
     ("both", {"lora": LORA_LEARNING_RATE, "decoder": DECODER_LEARNING_RATE}),
     ("lora", {"lora": LORA_LEARNING_RATE}),
-    ("decoder", {"decoder": DECODER_LEARNING_RATE}),
+    ("instance_decoder", {"decoder": DECODER_LEARNING_RATE}),
 ])
 def test_each_rate_reaches_the_logs_under_its_own_half(trainable, expected):
     """With one group left out, position no longer names a group."""
@@ -499,7 +505,7 @@ class _FakeJointTrainer:
         self.stepped.append(loss)
 
 
-def test_a_decoder_only_run_never_steps_the_interactive_branch():
+def test_an_instance_decoder_only_run_never_steps_the_interactive_branch():
     trainer = _without_interactive_training(_FakeJointTrainer)()
 
     loss = trainer._interactive_train_iteration(torch.ones(1), None)[0]
@@ -510,7 +516,7 @@ def test_a_decoder_only_run_never_steps_the_interactive_branch():
     assert trainer.stepped == []
 
 
-def test_a_decoder_only_run_still_steps_the_instance_branch():
+def test_an_instance_decoder_only_run_still_steps_the_instance_branch():
     trainer = _without_interactive_training(_FakeJointTrainer)()
     loss = (torch.ones(1, requires_grad=True) * 2).sum()
 

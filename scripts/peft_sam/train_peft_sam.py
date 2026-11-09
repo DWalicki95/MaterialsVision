@@ -3,10 +3,11 @@
 Train a single PEFT-SAM (LoRA) model with configurable settings.
 
 All training settings are command-line options: epoch count, learning
-rates, trainable part (LoRA, decoder or both), LoRA rank, augmentation
-policy, seed and data subsets. Unset options fall back to the default
-recipe - 12 epochs, cosine learning-rate schedule, ``full_b``
-augmentation, training on TRAIN with validation loss on VALIDATION.
+rates, trainable part (LoRA, the UNETR instance decoder or both), LoRA
+rank, augmentation policy, seed and data subsets. Unset options fall
+back to the default recipe - 12 epochs, cosine learning-rate
+schedule, ``full_b`` augmentation, training on TRAIN with validation
+loss on VALIDATION.
 
 Runs are logged to a separate MLflow experiment and checkpoint
 directory. A checkpoint is saved every epoch; to pick the best one,
@@ -22,8 +23,9 @@ Only the low-rank correction, for twenty epochs:
     $ python scripts/peft_sam/train_peft_sam.py --trainable lora \\
         --epochs 20
 
-Only the decoder, at three times its adopted rate:
-    $ python scripts/peft_sam/train_peft_sam.py --trainable decoder \\
+Only the instance decoder, at three times its adopted rate:
+    $ python scripts/peft_sam/train_peft_sam.py \\
+        --trainable instance_decoder \\
         --decoder-lr 3e-5
 
 Rehearse the whole path in minutes:
@@ -138,7 +140,7 @@ def trains_lora(trainable: str) -> bool:
     return trainable in ("both", "lora")
 
 
-def trains_decoder(trainable: str) -> bool:
+def trains_instance_decoder(trainable: str) -> bool:
     """Whether the instance decoder is adapted.
 
     Parameters
@@ -149,7 +151,7 @@ def trains_decoder(trainable: str) -> bool:
     -------
     bool
     """
-    return trainable in ("both", "decoder")
+    return trainable in ("both", "instance_decoder")
 
 
 def horizon_of(args: argparse.Namespace) -> int:
@@ -192,7 +194,7 @@ def run_name(args: argparse.Namespace) -> str:
         parts.append(f"h{args.scheduler_horizon}")
     if trains_lora(args.trainable):
         parts.append(f"lora{args.lora_lr:g}")
-    if trains_decoder(args.trainable):
+    if trains_instance_decoder(args.trainable):
         parts.append(f"dec{args.decoder_lr:g}")
     if args.lora_rank != LORA_RANK:
         parts.append(f"r{args.lora_rank}")
@@ -252,7 +254,7 @@ def refusal(args: argparse.Namespace) -> Optional[str]:
         )
     if trains_lora(args.trainable) and args.lora_lr <= 0:
         return f"--lora-lr must be positive, got {args.lora_lr:g}."
-    if trains_decoder(args.trainable) and args.decoder_lr <= 0:
+    if trains_instance_decoder(args.trainable) and args.decoder_lr <= 0:
         return f"--decoder-lr must be positive, got {args.decoder_lr:g}."
     if args.lora_rank < 1:
         return f"--lora-rank must be positive, got {args.lora_rank}."
@@ -284,7 +286,8 @@ def ignored_rates(args: argparse.Namespace) -> list[str]:
     ignored = []
     if args.lora_lr_given and not trains_lora(args.trainable):
         ignored.append("--lora-lr")
-    if args.decoder_lr_given and not trains_decoder(args.trainable):
+    if (args.decoder_lr_given
+            and not trains_instance_decoder(args.trainable)):
         ignored.append("--decoder-lr")
     return ignored
 
@@ -311,7 +314,8 @@ def provenance_record(args: argparse.Namespace) -> dict[str, Any]:
             args.lora_lr if trains_lora(args.trainable) else None
         ),
         "decoder_learning_rate": (
-            args.decoder_lr if trains_decoder(args.trainable) else None
+            args.decoder_lr if trains_instance_decoder(args.trainable)
+            else None
         ),
         "lora_rank": args.lora_rank,
         "policy": args.policy,
@@ -465,8 +469,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--trainable", choices=TRAINABLE_CHOICES, default="both",
-        help="What is adapted: the low-rank correction and the decoder, "
-             "or only one of them. Default both.",
+        help="What is adapted: the low-rank correction, the UNETR "
+             "instance decoder, or both. SAM's prompt encoder and mask "
+             "decoder stay frozen in every case. Default both.",
     )
     parser.add_argument(
         "--lora-lr", type=float, default=None,
