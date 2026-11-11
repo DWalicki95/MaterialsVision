@@ -27,7 +27,9 @@ from materials_vision.training import (BATCH_SIZE, DECODER_LEARNING_RATE,
                                        _check_trainable,
                                        _hold_decoder_batchnorm_in_eval,
                                        _joint_trainer_class,
-                                       _parameter_groups, _select_trainable,
+                                       _parameter_groups,
+                                       _resolve_scheduler_horizon,
+                                       _select_trainable,
                                        _trainable_groups,
                                        _without_interactive_training,
                                        build_loader,
@@ -468,6 +470,44 @@ def test_an_unknown_choice_of_what_trains_is_rejected():
 def test_a_momentum_a_frozen_decoder_would_ignore_is_rejected():
     with pytest.raises(ValueError, match="momentum"):
         _check_trainable("lora", 0.01)
+
+
+def test_the_scheduler_horizon_defaults_to_the_run_length():
+    assert _resolve_scheduler_horizon(10, None) == 10
+
+
+def test_a_scheduler_horizon_longer_than_the_run_is_accepted():
+    assert _resolve_scheduler_horizon(10, 50) == 50
+
+
+@pytest.mark.parametrize(
+    ("n_epochs", "horizon", "match"),
+    [
+        (10, 4, "shorter than"),
+        (0, None, "n_epochs"),
+        (10, 0, "scheduler_horizon_epochs"),
+    ],
+)
+def test_an_invalid_schedule_is_rejected(n_epochs, horizon, match):
+    with pytest.raises(ValueError, match=match):
+        _resolve_scheduler_horizon(n_epochs, horizon)
+
+
+def test_train_run_rejects_a_short_horizon_before_building_a_model(
+    monkeypatch,
+):
+    import materials_vision.training as training
+
+    def must_not_run() -> None:
+        raise AssertionError("validation ran after model setup began")
+
+    monkeypatch.setattr(training, "prepare_geometry", must_not_run)
+    with pytest.raises(ValueError, match="shorter than"):
+        training.train_run(
+            "x", model_type="vit_b", train_loader=None,
+            val_loader=None, n_epochs=10, save_root=None,
+            scheduler_horizon_epochs=4,
+        )
 
 
 def test_a_frozen_decoder_normalizes_as_at_inference_in_training_mode():

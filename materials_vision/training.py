@@ -89,23 +89,8 @@ _BATCHNORM_KINDS = (
     torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d,
 )
 
-# Thirty times the library's default, and measured rather than argued.
-# A low-rank correction starts at exactly zero and holds under a
-# million parameters, so a rate tuned for whole decoders barely moves
-# it. A four-point grid over both rates, ten epochs each, put the two
-# arms at this rate a full point of instance F1 above the two at a
-# third of it - 0.858 and 0.860 against 0.847 and 0.844 - and that gap
-# held whichever rate the decoder ran at.
 LORA_LEARNING_RATE = 3e-4
 
-# The library's own default, which is where a pretrained decoder
-# trained in full belongs. The same grid could not separate this from
-# three times it: the two differed by 0.0026 where the spread between
-# seeds is 0.0136. Where a probe cannot decide, this holds the flatter
-# curve and the better average across epochs two to ten, it is the
-# value a reader would expect to see defended, and it is not the arm
-# the watershed calibration was performed on - which removes the one
-# way that calibration could have favoured a winner.
 DECODER_LEARNING_RATE = 1e-5
 
 # Instances sampled per step to prompt the interactive branch. With
@@ -115,31 +100,33 @@ N_OBJECTS_PER_BATCH = 25
 
 BATCH_SIZE = 1
 
-# Iterative prompting rounds per step, the probability of feeding the
-# previous round's mask back in, how much the boxes derived from the
-# annotation are distorted, steps between logged images, and batches of
-# each loader checked before training starts. All five are the
-# library's own values, restated because the optimizer below is built
-# here rather than there: a fork that quietly changed one of them would
-# make every number this study reports incomparable with the runs that
-# came before it.
+# The next five are micro_sam's own defaults, written out so that a
+# library update cannot silently change them between runs.
+
+# How many times per step SAM refines its mask, each round getting a
+# new click on the spot it got wrong.
 N_SUB_ITERATION = 8
 
+# Chance that a refinement round also gets SAM's previous mask as a
+# hint, not just the clicks.
 MASK_PROB = 0.5
 
+# How much the box prompts are randomly shifted, as a fraction of the
+# box size, so the model learns to cope with imprecise boxes.
 BOX_DISTORTION_FACTOR = 0.025
 
+# Save example predictions to the training log every this many steps.
 LOG_IMAGE_INTERVAL = 100
 
+# Number of batches from each data loader checked for valid labels
+# before training starts.
 VERIFY_N_LABELS_IN_LOADER = 50
 
-# Worker processes preparing samples ahead of the GPU. Measured to hide
-# sample preparation entirely behind the optimizer step, with a margin
-# of four; it cannot change what a run produces, because a sample's
-# augmentation is seeded from its position in the epoch rather than
-# from the order in which workers finish.
+# Background processes loading and augmenting images while the GPU
+# trains. Affects speed only, never the results.
 NUM_WORKERS = 4
 
+# Which part of the data split the model is trained on.
 TRAIN_SUBSET = "train"
 
 
@@ -261,17 +248,13 @@ def build_loader(
 
 
 class CosineAnnealingIgnoringMetric(CosineAnnealingLR):
-    """Cosine annealing that tolerates being handed a metric.
+    """Cosine annealing that ignores the argument passed to ``step``.
 
-    The trainer advances its scheduler as ``step(current_metric)``,
-    written for the plateau scheduler it defaults to. Every other
-    scheduler reads that positional argument as an epoch number, so a
-    cosine schedule handed a validation loss of 0.077 would look up the
-    rate for epoch zero on every epoch and hold its initial rate for
-    the whole run, while appearing to work. Swallowing the argument is
-    the smallest correct answer, and subclassing rather than wrapping
-    keeps the state dictionary and the checkpoint round-trip the
-    trainer expects.
+    After every epoch the trainer calls ``step(validation_loss)``.
+    A plain ``CosineAnnealingLR`` reads that argument as an epoch
+    number, so it would keep resetting to epoch zero and the learning
+    rate would never decrease. This class ignores the argument and
+    advances the schedule by exactly one epoch per call.
     """
 
     def step(  # type: ignore[override]
@@ -354,6 +337,50 @@ def _check_trainable(
             "low-rank correction trains: the frozen decoder's batch "
             "statistics are held fixed."
         )
+
+
+def _resolve_scheduler_horizon(
+    n_epochs: int, scheduler_horizon_epochs: Optional[int]
+) -> int:
+    """Return the number of epochs the cosine schedule spans.
+
+    Parameters
+    ----------
+    n_epochs : int
+        Epochs the run trains for.
+    scheduler_horizon_epochs : int, optional
+        Requested schedule length. ``None`` means ``n_epochs``.
+
+    Returns
+    -------
+    int
+
+    Raises
+    ------
+    ValueError
+        If ``n_epochs`` or the horizon is below one, or if the horizon
+        is shorter than the run. Cosine annealing is periodic, so past
+        its horizon the learning rate would climb back up from zero.
+    """
+    if n_epochs < 1:
+        raise ValueError(
+            f"n_epochs must be at least 1, got {n_epochs}."
+        )
+    horizon = (
+        n_epochs if scheduler_horizon_epochs is None
+        else scheduler_horizon_epochs
+    )
+    if horizon < 1:
+        raise ValueError(
+            f"scheduler_horizon_epochs must be at least 1, got {horizon}."
+        )
+    if horizon < n_epochs:
+        raise ValueError(
+            f"scheduler_horizon_epochs ({horizon}) is shorter than "
+            f"n_epochs ({n_epochs}); the learning rate would rise again "
+            "after reaching zero."
+        )
+    return horizon
 
 
 def resolve_interactive_loss(
@@ -725,11 +752,12 @@ def train_run(
         ``best.pt`` and early stopping are both chosen on it in
         vain; keep numbered snapshots and score them instead.
     scheduler_horizon_epochs : int, optional
-        Epochs the rate is annealed over. Defaults to the run's own
-        length; a run meant to be stopped early and resumed later has
-        to pass the full budget instead, or its rate would fall to zero
-        at the point it was interrupted and the resumed half would
-        train at nothing.
+        Number of epochs over which the learning rate falls from its
+        initial value to zero. ``None`` means ``n_epochs``. Must not be
+        shorter than ``n_epochs``. A longer horizon ends the run before
+        the rate reaches zero, so the final model is not equivalent to
+        one trained on a full schedule of ``n_epochs``. There is no
+        resume: every call starts training from scratch.
     decoder_batchnorm_momentum : float, optional
         Overrides how fast the decoder's batch statistics move.
         ``None`` leaves the library's value untouched. Must be ``None``
@@ -756,9 +784,11 @@ def train_run(
     ------
     ValueError
         If ``trainable`` is unknown or conflicts with
-        ``decoder_batchnorm_momentum`` or ``interactive_loss``.
+        ``decoder_batchnorm_momentum`` or ``interactive_loss``, or if
+        ``n_epochs`` and ``scheduler_horizon_epochs`` are invalid.
     """
     _check_trainable(trainable, decoder_batchnorm_momentum)
+    horizon = _resolve_scheduler_horizon(n_epochs, scheduler_horizon_epochs)
     interactive_loss = resolve_interactive_loss(trainable, interactive_loss)
 
     import torch_em
@@ -812,10 +842,6 @@ def train_run(
         instance_decoder, decoder_learning_rate,
     ))
     trainer_class = _joint_trainer_class(interactive_loss)
-    horizon = (
-        n_epochs if scheduler_horizon_epochs is None
-        else scheduler_horizon_epochs
-    )
     instance_loss = torch_em.loss.DiceBasedDistanceLoss(
         mask_distances_in_bg=True
     )
