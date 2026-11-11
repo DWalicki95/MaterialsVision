@@ -7,11 +7,12 @@ runs unreadable next to old ones in the tool that already holds them.
 Everything it logs is additionally written to the active MLflow run,
 together with three things it does not record at all.
 
-**Both learning rates.** The library reports the rate of the first
+**Every learning rate.** The library reports the rate of the first
 parameter group only, which here is the low-rank correction. The
-decoder runs at a rate thirty times lower, and part II of this study
-varies one of the two while holding the other, so a chart showing one
-of them would hide exactly the difference being tested.
+decoder runs at a rate thirty times lower, a full-weight adaptation
+adds the encoder's own weights at a third rate, and part II of this
+study varies one of them while holding the others, so a chart showing
+one of them would hide exactly the difference being tested.
 
 **Per-epoch figures on the epoch axis.** Instance metrics are computed
 afterwards, one point per epoch snapshot. Losses averaged over each
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 # module builds them. A group that carries its own name is reported by
 # it instead, which is what keeps a run that trains only one half from
 # reporting its single group under the other half's name.
-PARAMETER_GROUP_NAMES = ("lora", "decoder")
+PARAMETER_GROUP_NAMES = ("lora", "decoder", "encoder")
 
 # Order of the decoder's output channels.
 DECODER_MAP_NAMES = (

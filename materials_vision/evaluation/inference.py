@@ -11,17 +11,28 @@ path than an answer to another.
 **The adaptation has to be rebuilt before the weights will fit.** A
 checkpoint stores the corrected weights but not the shape of the
 wrapper they belong in, and the weights only load into a wrapper built
-at the same rank. Rather than ask a caller to remember which rank a
-given file was trained at, the rank is read back out of the weights:
-the first factor of the correction has it as its leading dimension.
+the same way: the same rank, the same projections, the same blocks.
+Rather than ask a caller to remember how a given file was trained, all
+three are read back out of the weights' names and shapes. A checkpoint
+without low-rank factors - a full-weight adaptation - is loaded into
+the plain model. Loading stays strict, so anything this reading gets
+wrong fails loudly instead of leaving weights behind.
+
+**Two ways to turn decoder output into instances.** ``ais`` grows them
+by a watershed from the decoder's distance maps, which is what every
+figure of this study so far used. ``apg`` derives a point prompt per
+seed and lets SAM's own mask decoder draw each instance, which is the
+only inference path that uses the interactive branch the joint
+objective trains.
 
 **The images are monochrome and the encoder takes three channels.** The
 one working channel is repeated rather than converted, and values are
 put on the 0-255 scale the predictor checks for.
 """
 import logging
+import re
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import torch
@@ -37,6 +48,25 @@ logger = logging.getLogger(__name__)
 RGB_CHANNELS = 3
 
 GREY_LEVELS = 255.0
+
+SEGMENTATION_MODES = ("ais", "apg")
+
+# Watershed settings the prompt-based path has no step for: it seeds
+# from unsmoothed maps and draws instances with SAM's mask decoder.
+APG_UNUSED_SETTINGS = ("foreground_smoothing", "distance_smoothing")
+
+# Order in which the library names the projections a correction can sit
+# on; the rebuilt configuration lists them in it.
+_LORA_MATRICES = ("q", "k", "v", "mlp")
+
+# First factor of a correction, in an attention projection or in the
+# MLP, with the block it sits in.
+_LORA_FACTOR_KEY = re.compile(
+    r"image_encoder\.blocks\.(\d+)\."
+    r"(?:attn\.qkv\.w_a_linear_([qkv])|mlp\.w_a_linear_1)\.weight$"
+)
+
+_BLOCK_KEY = re.compile(r"image_encoder\.blocks\.(\d+)\.")
 
 
 def to_rgb(image: np.ndarray) -> np.ndarray:
@@ -59,43 +89,148 @@ def to_rgb(image: np.ndarray) -> np.ndarray:
     return np.clip(stacked, 0, GREY_LEVELS).astype(np.uint8)
 
 
-def detect_lora_rank(checkpoint: Path, default_rank: int) -> int:
-    """Read the size of the low-rank correction out of a checkpoint.
-
-    Asking the caller to remember invites exactly the mistake this
-    replaces: a rank-32 checkpoint refused by a rank-8 wrapper,
-    hundreds of lines of shape mismatches, and an hour of training with
-    nothing to show.
+def read_model_state(checkpoint: Path) -> Mapping[str, Any]:
+    """The model weights of a checkpoint, mapped rather than read.
 
     Parameters
     ----------
     checkpoint : Path
-    default_rank : int
-        Returned, with a warning, if the checkpoint holds no low-rank
-        weights at all.
 
     Returns
     -------
-    int
+    mapping of str to torch.Tensor
+        Tensors are memory-mapped, so reading names and shapes does not
+        pull a gigabyte of weights off the disk.
     """
-    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    model_state = state.get("model_state", state)
-    for key, value in model_state.items():
-        if key.endswith("w_a_linear_q.weight"):
-            return int(value.shape[0])
-    logger.warning(
-        "%s holds no low-rank weights; assuming rank %d.",
-        checkpoint, default_rank,
+    state = torch.load(
+        checkpoint, map_location="cpu", weights_only=False, mmap=True,
     )
-    return default_rank
+    return state.get("model_state", state)
+
+
+def peft_kwargs_from_state(
+    model_state: Mapping[str, Any]
+) -> Optional[dict[str, Any]]:
+    """Read how a checkpoint's encoder was wrapped out of its weights.
+
+    Parameters
+    ----------
+    model_state : mapping of str to torch.Tensor
+
+    Returns
+    -------
+    dict or None
+        The library's wrapper arguments: the rank from the first
+        factor's leading dimension, the projections that carry factors,
+        and the blocks that do - an empty list when it is every block,
+        which is how the frozen configuration states it. ``None`` when
+        the checkpoint holds no factors at all.
+
+    Raises
+    ------
+    ValueError
+        If the factors disagree on their rank or on which projections
+        they sit on, a layout no single wrapper can rebuild.
+    """
+    from micro_sam.models.peft_sam import LoRASurgery
+
+    matrices_per_block: dict[int, set[str]] = {}
+    ranks = set()
+    for key, value in model_state.items():
+        match = _LORA_FACTOR_KEY.search(key)
+        if match is None:
+            continue
+        block = int(match.group(1))
+        matrices_per_block.setdefault(block, set()).add(
+            match.group(2) or "mlp"
+        )
+        ranks.add(int(value.shape[0]))
+    if not matrices_per_block:
+        return None
+    if len(ranks) != 1:
+        raise ValueError(f"The low-rank factors disagree on rank: {ranks}.")
+    layouts = {frozenset(m) for m in matrices_per_block.values()}
+    if len(layouts) != 1:
+        raise ValueError(
+            "Blocks carry factors on different projections: "
+            f"{sorted(sorted(layout) for layout in layouts)}."
+        )
+    every_block = {
+        int(match.group(1)) for key in model_state
+        if (match := _BLOCK_KEY.search(key)) is not None
+    }
+    adapted = set(matrices_per_block)
+    (layout,) = layouts
+    return {
+        "rank": ranks.pop(),
+        "peft_module": LoRASurgery,
+        "update_matrices": [m for m in _LORA_MATRICES if m in layout],
+        "attention_layers_to_update": (
+            [] if adapted == every_block else sorted(adapted)
+        ),
+        "quantize": False,
+    }
+
+
+def _segmenter_class(segmentation_mode: str) -> type:
+    """The library class that turns decoder output into instances.
+
+    Parameters
+    ----------
+    segmentation_mode : str
+        One of :data:`SEGMENTATION_MODES`.
+
+    Returns
+    -------
+    type
+
+    Raises
+    ------
+    ValueError
+        For an unknown mode.
+    """
+    from micro_sam.instance_segmentation import (
+        AutomaticPromptGenerator, InstanceSegmentationWithDecoder)
+
+    classes = {
+        "ais": InstanceSegmentationWithDecoder,
+        "apg": AutomaticPromptGenerator,
+    }
+    if segmentation_mode not in classes:
+        raise ValueError(
+            f"segmentation_mode must be one of {SEGMENTATION_MODES}, got "
+            f"{segmentation_mode!r}."
+        )
+    return classes[segmentation_mode]
+
+
+def describe_adaptation(peft_kwargs: Optional[dict[str, Any]]) -> str:
+    """Say in a few words how an encoder was adapted, for the logs.
+
+    Parameters
+    ----------
+    peft_kwargs : dict or None
+        From :func:`peft_kwargs_from_state`.
+
+    Returns
+    -------
+    str
+    """
+    if peft_kwargs is None:
+        return "no low-rank factors (plain encoder weights)"
+    layers = peft_kwargs["attention_layers_to_update"]
+    return (
+        f"rank {peft_kwargs['rank']} on "
+        f"{','.join(peft_kwargs['update_matrices'])} in "
+        f"{'every block' if not layers else f'blocks {layers}'}"
+    )
 
 
 def build_segmenter(
     checkpoint: Path,
     model_type: str,
-    peft_kwargs: dict[str, Any],
-    default_rank: int,
     device: Optional[str] = None,
+    segmentation_mode: str = "ais",
 ) -> Any:
     """Load a trained checkpoint as an automatic instance segmenter.
 
@@ -105,36 +240,96 @@ def build_segmenter(
     model_type : str
         Architecture of the image encoder the checkpoint was trained
         on, not the name of a pretrained checkpoint.
-    peft_kwargs : dict
-        The adaptation configuration the checkpoint was trained under.
-        Its rank is replaced by the one read from the weights.
-    default_rank : int
-        Used only when the checkpoint carries no correction.
     device : str, optional
         ``None`` lets the library pick, which means the GPU when one is
         visible. Forcing the CPU keeps a check off a GPU that a training
         run is using to the last gigabyte.
+    segmentation_mode : str, optional
+        One of :data:`SEGMENTATION_MODES`.
 
     Returns
     -------
     InstanceSegmentationWithDecoder
+        Or its prompt-based subclass for ``apg``.
     """
-    from micro_sam.instance_segmentation import (
-        InstanceSegmentationWithDecoder, get_predictor_and_decoder)
+    from micro_sam.instance_segmentation import get_predictor_and_decoder
 
-    rebuilt = dict(peft_kwargs)
-    rebuilt["rank"] = detect_lora_rank(checkpoint, default_rank)
+    segmenter_class = _segmenter_class(segmentation_mode)
+    peft_kwargs = peft_kwargs_from_state(read_model_state(checkpoint))
     logger.info(
-        "%s: rebuilding the wrapper at rank %d.", checkpoint,
-        rebuilt["rank"],
+        "%s: rebuilding the encoder with %s.", checkpoint,
+        describe_adaptation(peft_kwargs),
     )
     predictor, decoder = get_predictor_and_decoder(
         model_type=model_type,
         checkpoint_path=str(checkpoint),
         device=device,
-        peft_kwargs=rebuilt,
+        peft_kwargs=peft_kwargs,
     )
-    return InstanceSegmentationWithDecoder(predictor, decoder)
+    return segmenter_class(predictor, decoder)
+
+
+def build_pretrained_segmenter(
+    model_type: str,
+    device: Optional[str] = None,
+    segmentation_mode: str = "ais",
+) -> Any:
+    """Load a generalist checkpoint as shipped, the zero-shot baseline.
+
+    No low-rank correction and no fine-tuned decoder: the encoder and
+    the instance decoder are exactly what ``micro_sam`` ships for this
+    model type.
+
+    Parameters
+    ----------
+    model_type : str
+        A registry name that carries an instance decoder, such as
+        ``vit_l_lm``.
+    device : str, optional
+    segmentation_mode : str, optional
+        One of :data:`SEGMENTATION_MODES`.
+
+    Returns
+    -------
+    InstanceSegmentationWithDecoder
+
+    Raises
+    ------
+    ValueError
+        If the library's checkpoint for ``model_type`` carries no
+        instance decoder to segment with.
+    """
+    from micro_sam.instance_segmentation import get_predictor_and_decoder
+
+    segmenter_class = _segmenter_class(segmentation_mode)
+    predictor, decoder = get_predictor_and_decoder(
+        model_type=model_type, checkpoint_path=None, device=device,
+    )
+    return segmenter_class(predictor, decoder)
+
+
+def generate_kwargs(segmenter: Any, settings: WatershedParams) -> dict:
+    """The keyword arguments a segmenter's ``generate`` accepts.
+
+    Parameters
+    ----------
+    segmenter : InstanceSegmentationWithDecoder
+    settings : WatershedParams
+
+    Returns
+    -------
+    dict
+        The library's watershed arguments, without the smoothing ones
+        when the segmenter is prompt-based: it has no smoothing step,
+        and passing them would stop it with a type error.
+    """
+    from micro_sam.instance_segmentation import AutomaticPromptGenerator
+
+    kwargs = settings.library_kwargs()
+    if isinstance(segmenter, AutomaticPromptGenerator):
+        for name in APG_UNUSED_SETTINGS:
+            del kwargs[name]
+    return kwargs
 
 
 def segment(
@@ -171,7 +366,8 @@ def segment(
         given, which would otherwise have to be guessed.
     """
     segmentation = segmenter.generate(
-        output_mode="instance_segmentation", **settings.library_kwargs()
+        output_mode="instance_segmentation",
+        **generate_kwargs(segmenter, settings),
     )
     # The watershed hands back floating-point labels. They are whole
     # numbers, but an identifier that can be compared for equality

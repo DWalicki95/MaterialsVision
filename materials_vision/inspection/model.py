@@ -14,11 +14,12 @@ from typing import Any, Optional
 import numpy as np
 
 from materials_vision.data.samples import PreparedSample
-from materials_vision.evaluation.inference import (build_segmenter, segment,
+from materials_vision.evaluation.inference import (build_pretrained_segmenter,
+                                                   build_segmenter, segment,
                                                    to_rgb)
 from materials_vision.evaluation.watershed import (DEPLOYED_POSTPROCESSING,
                                                    WatershedParams)
-from materials_vision.training import LORA_RANK, PEFT_KWARGS, prepare_geometry
+from materials_vision.training import prepare_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 MODEL_TYPE = "vit_l"
 
 # The pretrained generalist every checkpoint of this study started
-# adaptation from - see PEFT_KWARGS's neighbourhood in training.py and
+# adaptation from - see BASE_MODEL in scripts/peft_sam/run_e8_full.py and
 # the P0 pilot that chose it over the electron-microscopy generalist.
 # Its own name carries the encoder architecture, unlike MODEL_TYPE above,
 # which names it separately from a checkpoint file because a fine-tuned
@@ -57,9 +58,7 @@ def load_segmenter(
     InstanceSegmentationWithDecoder
     """
     prepare_geometry()
-    return build_segmenter(
-        Path(checkpoint), model_type, PEFT_KWARGS, LORA_RANK, device=device
-    )
+    return build_segmenter(Path(checkpoint), model_type, device=device)
 
 
 def load_pretrained_segmenter(
@@ -89,14 +88,8 @@ def load_pretrained_segmenter(
         If the library's checkpoint for ``model_type`` carries no
         instance decoder to segment with.
     """
-    from micro_sam.instance_segmentation import (
-        InstanceSegmentationWithDecoder, get_predictor_and_decoder)
-
     prepare_geometry()
-    predictor, decoder = get_predictor_and_decoder(
-        model_type=model_type, checkpoint_path=None, device=device,
-    )
-    return InstanceSegmentationWithDecoder(predictor, decoder)
+    return build_pretrained_segmenter(model_type, device=device)
 
 
 def predict(

@@ -43,8 +43,7 @@ from materials_vision.evaluation.inference import (build_segmenter, segment,
 from materials_vision.evaluation.watershed import (FROZEN_WATERSHED,
                                                    WatershedParams)
 from materials_vision.logging_config import setup_logging
-from materials_vision.training import (LORA_RANK, PEFT_KWARGS, build_source,
-                                       prepare_geometry)
+from materials_vision.training import build_source, prepare_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -169,8 +168,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     source = build_source(args.split, args.manifest, "train")
     prepare_geometry()
     segmenter = build_segmenter(
-        args.checkpoint, MODEL_TYPE, PEFT_KWARGS, LORA_RANK,
-        device=args.device,
+        args.checkpoint, MODEL_TYPE, device=args.device,
     )
 
     index = []

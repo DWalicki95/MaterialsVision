@@ -13,6 +13,7 @@ import pytest
 import scripts.peft_sam.train_peft_sam as cli
 from materials_vision.tracking import REHEARSAL_EXPERIMENT
 from materials_vision.training import (DECODER_LEARNING_RATE,
+                                       ENCODER_LEARNING_RATE,
                                        LORA_LEARNING_RATE, LORA_RANK)
 from scripts.peft_sam.run_e8_full import N_EPOCHS, RUN_SEED, build_full_policy
 
@@ -188,6 +189,16 @@ def test_settings_that_differ_never_share_a_directory(
         ("--scheduler-horizon", "24"), ("--lora-rank", "4"),
         ("--policy", "none"), ("--seed", "1"),
         ("--train-subset", "train+val"), ("--n-train", "4"),
+        ("--peft-layers", "12-23"),
+        ("--update-matrices", "q", "k", "v", "mlp"),
+        ("--peft-layers", "12-23", "--update-matrices", "q", "k", "v",
+         "mlp"),
+        ("--peft-method", "late_ft", "--peft-layers", "12-23"),
+        ("--peft-method", "late_ft", "--peft-layers", "18-23"),
+        ("--peft-method", "late_ft", "--peft-layers", "12-23",
+         "--encoder-lr", "3e-5"),
+        ("--peft-method", "full_ft"),
+        ("--base-model", "vit_l", "--decoder-lr", "1e-4"),
     ]
     names = {
         cli.run_name(_args(frozen_split, tmp_path, *extra))
@@ -221,6 +232,17 @@ def test_snapshots_expected_follow_the_interval(frozen_split, tmp_path):
     (("--n-train", "-1"), "negative"),
     (("--monitor-subset", "test"), "TEST"),
     (("--train-subset", "train+test"), "TEST"),
+    (("--peft-method", "late_ft"), "needs the encoder blocks"),
+    (("--peft-method", "full_ft", "--peft-layers", "1"), "whole encoder"),
+    (("--peft-method", "full_ft", "--lora-rank", "32"), "no effect"),
+    (("--peft-method", "late_ft", "--peft-layers", "1",
+      "--update-matrices", "q"), "update_matrices"),
+    (("--trainable", "instance_decoder", "--peft-method", "full_ft"),
+     "encoder is frozen"),
+    (("--peft-method", "full_ft", "--encoder-lr", "0"), "--encoder-lr"),
+    (("--base-model", "vit_l", "--trainable", "lora"), "no instance decoder"),
+    (("--base-model", "vit_l"), None),
+    (("--peft-method", "late_ft", "--peft-layers", "12-23"), None),
 ])
 def test_impossible_settings_are_refused(
     frozen_split, tmp_path, extra, fragment
@@ -287,3 +309,123 @@ def test_turning_the_interactive_loss_on_explicitly_changes_nothing(
     explicit = _args(frozen_split, tmp_path, "--interactive-loss", "on")
 
     assert cli.run_name(explicit) == cli.run_name(default)
+
+
+def test_late_lora_on_every_projection_reaches_the_trainer(
+    frozen_split, tmp_path, trainer_calls
+):
+    args = _args(
+        frozen_split, tmp_path, "--peft-layers", "12-23",
+        "--update-matrices", "mlp", "q", "k", "v",
+    )
+
+    cli.execute(args)
+
+    [(name, kwargs)] = trainer_calls
+    assert "_L12-23_qkvmlp_lora0.0003_" in name
+    assert kwargs["peft_method"] == "lora"
+    assert kwargs["peft_layers"] == list(range(12, 24))
+    assert kwargs["update_matrices"] == ["q", "k", "v", "mlp"]
+    record = json.loads(
+        (args.save_root / f"{name}_provenance.json").read_text()
+    )
+    assert record["lora_update_matrices"] == ["q", "k", "v", "mlp"]
+    assert record["encoder_learning_rate"] is None
+
+
+def test_late_fine_tuning_trains_under_the_encoder_rate(
+    frozen_split, tmp_path, trainer_calls
+):
+    args = _args(
+        frozen_split, tmp_path, "--peft-method", "late_ft",
+        "--peft-layers", "12-23",
+    )
+
+    cli.execute(args)
+
+    [(name, kwargs)] = trainer_calls
+    assert "_lateft_L12-23_" in name
+    assert "_lora0" not in name
+    assert f"_enc{ENCODER_LEARNING_RATE:g}_" in name
+    assert kwargs["peft_method"] == "late_ft"
+    assert kwargs["encoder_learning_rate"] == ENCODER_LEARNING_RATE
+    assert kwargs["tracking"].tags["peft_method"] == "late_ft"
+    record = json.loads(
+        (args.save_root / f"{name}_provenance.json").read_text()
+    )
+    assert record["lora_learning_rate"] is None
+    assert record["lora_rank"] is None
+    assert record["encoder_learning_rate"] == ENCODER_LEARNING_RATE
+
+
+def test_the_base_model_reaches_the_trainer_and_the_name(
+    frozen_split, tmp_path, trainer_calls
+):
+    args = _args(
+        frozen_split, tmp_path, "--base-model", "vit_l",
+        "--decoder-lr", "1e-4", "--epochs", "6",
+    )
+
+    cli.execute(args)
+
+    [(name, kwargs)] = trainer_calls
+    assert name.startswith("full_b_vit_l_both_e6_")
+    assert kwargs["model_type"] == "vit_l"
+    assert kwargs["tracking"].tags["base_model"] == "vit_l"
+
+
+def test_the_default_name_does_not_change_with_the_new_options(
+    frozen_split, tmp_path
+):
+    """Runs before the adaptation options existed keep their names."""
+    explicit = _args(
+        frozen_split, tmp_path, "--peft-method", "lora",
+        "--update-matrices", "v", "q", "--base-model", "vit_l_lm",
+    )
+
+    assert cli.run_name(explicit) == cli.run_name(
+        _args(frozen_split, tmp_path)
+    )
+
+
+@pytest.mark.parametrize("extra, ignored", [
+    (("--peft-method", "late_ft", "--peft-layers", "1",
+      "--lora-lr", "1e-3"), ["--lora-lr"]),
+    (("--encoder-lr", "1e-5"), ["--encoder-lr"]),
+    (("--peft-method", "full_ft", "--encoder-lr", "1e-5"), []),
+])
+def test_a_rate_for_something_that_does_not_train_is_reported(
+    frozen_split, tmp_path, extra, ignored
+):
+    assert cli.ignored_rates(_args(frozen_split, tmp_path, *extra)) == ignored
+
+
+def test_a_decoder_from_scratch_at_the_adopted_rate_is_warned_about(
+    frozen_split, tmp_path
+):
+    assert cli.untrained_decoder_warning(
+        _args(frozen_split, tmp_path, "--base-model", "vit_l")
+    ) is not None
+    assert cli.untrained_decoder_warning(_args(
+        frozen_split, tmp_path, "--base-model", "vit_l",
+        "--decoder-lr", "1e-4",
+    )) is None
+    assert cli.untrained_decoder_warning(
+        _args(frozen_split, tmp_path)
+    ) is None
+
+
+@pytest.mark.parametrize("text, layers", [
+    ("12-23", list(range(12, 24))), ("12,14,16", [12, 14, 16]),
+    ("0-1,5", [0, 1, 5]), ("3,3", [3]),
+])
+def test_blocks_are_read_from_ranges_and_lists(text, layers):
+    assert cli.parse_layers(text) == layers
+
+
+@pytest.mark.parametrize("text", ["23-12", "a", "", "1-"])
+def test_an_unreadable_choice_of_blocks_is_rejected(text):
+    import argparse
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli.parse_layers(text)

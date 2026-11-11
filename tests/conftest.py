@@ -1,10 +1,11 @@
-"""Shared pytest fixtures for the data inventory test suite."""
+"""Shared pytest fixtures: miniature data splits and a miniature SAM."""
 import hashlib
 import json
 from pathlib import Path
 
 import pandas as pd
 import pytest
+import torch
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -100,3 +101,76 @@ def frozen_split(tmp_path, frozen_table):
         "forced_train": list(CV_FORCED_TRAIN),
     }), encoding="utf-8")
     return split_csv, manifest
+
+
+# Width and depth of the miniature encoder: small enough to build in
+# milliseconds, with the module names of SAM's ViT, which is all the
+# library's adaptation wrappers and the checkpoint reader look at.
+TINY_SAM_DIM = 8
+TINY_SAM_BLOCKS = 4
+
+
+class _TinyMlp(torch.nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.lin1 = torch.nn.Linear(dim, 2 * dim)
+        self.lin2 = torch.nn.Linear(2 * dim, dim)
+        self.act = torch.nn.GELU()
+
+    def forward(self, x):
+        return self.lin2(self.act(self.lin1(x)))
+
+
+class _TinyAttention(torch.nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.qkv = torch.nn.Linear(dim, 3 * dim)
+
+
+class _TinyBlock(torch.nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.norm1 = torch.nn.LayerNorm(dim)
+        self.attn = _TinyAttention(dim)
+        self.mlp = _TinyMlp(dim)
+
+
+class _TinyEncoder(torch.nn.Module):
+    def __init__(self, dim, n_blocks):
+        super().__init__()
+        self.patch_embed = torch.nn.Linear(dim, dim)
+        self.blocks = torch.nn.ModuleList(
+            _TinyBlock(dim) for _ in range(n_blocks)
+        )
+        self.neck = torch.nn.Linear(dim, dim)
+
+
+class _TinySam(torch.nn.Module):
+    def __init__(self, dim, n_blocks):
+        super().__init__()
+        self.image_encoder = _TinyEncoder(dim, n_blocks)
+        self.prompt_encoder = torch.nn.Linear(dim, dim)
+        self.mask_decoder = torch.nn.Linear(dim, dim)
+
+
+@pytest.fixture
+def tiny_sam():
+    """Build a miniature SAM, wrapped the way a run's adaptation wraps it.
+
+    Returns a function taking the library's wrapper arguments (``None``
+    for the plain model) and returning the model, with the parts every
+    run freezes already frozen.
+    """
+    from micro_sam.models.peft_sam import PEFT_Sam
+
+    def build(peft_kwargs=None, seed=0):
+        torch.manual_seed(seed)
+        sam = _TinySam(TINY_SAM_DIM, TINY_SAM_BLOCKS)
+        if peft_kwargs is not None:
+            sam = PEFT_Sam(sam, **dict(peft_kwargs)).sam
+        for part in (sam.prompt_encoder, sam.mask_decoder):
+            for parameter in part.parameters():
+                parameter.requires_grad = False
+        return sam
+
+    return build

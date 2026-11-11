@@ -77,6 +77,21 @@ Score the snapshots chosen on VALIDATION on TEST, once, at the end:
     $ python scripts/peft_sam/evaluate_checkpoint.py \\
         --subset test --unlock-test \\
         --checkpoint checkpoints/e1/checkpoints/d4_seed20260907/epoch-10.pt
+
+Score the generalist as shipped, the zero-shot point every run starts
+from (figures go to the JSON report only):
+    $ python scripts/peft_sam/evaluate_checkpoint.py --pretrained vit_l_lm \\
+        --out checkpoints/adhoc/zero_shot_vit_l_lm.json
+
+Let SAM's mask decoder draw the instances from prompts derived from the
+decoder output, instead of a watershed (``apg``; never recorded in
+MLflow, whose metric names do not say which path produced a figure):
+    $ python scripts/peft_sam/evaluate_checkpoint.py \\
+        --segmentation-mode apg --checkpoint <path> --out apg.json
+
+The way a checkpoint's encoder was adapted - rank, projections, blocks,
+or no low-rank factors at all - is read from its weights, so every
+checkpoint of the study loads without being told how it was trained.
 """
 import argparse
 import json
@@ -92,7 +107,10 @@ from materials_vision.evaluation import (DECISION_SCALE, AggregateResult,
                                          WatershedParams, aggregate,
                                          cross_sections, load_size_bins,
                                          robustness_series)
-from materials_vision.evaluation.inference import (build_segmenter,
+from materials_vision.evaluation.inference import (APG_UNUSED_SETTINGS,
+                                                   SEGMENTATION_MODES,
+                                                   build_pretrained_segmenter,
+                                                   build_segmenter,
                                                    score_settings)
 from materials_vision.evaluation.watershed import POSTPROCESSING_CONFIGS
 from materials_vision.logging_config import setup_logging
@@ -101,8 +119,7 @@ from materials_vision.tracking import (configure_tracking,
                                        log_evaluation_to_run,
                                        postprocessing_id, snapshot_epoch,
                                        summarize_curve)
-from materials_vision.training import (LORA_RANK, PEFT_KWARGS, build_source,
-                                       prepare_geometry)
+from materials_vision.training import build_source, prepare_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +177,24 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             "and combinable with --checkpoint. Scoring a whole run's "
             "epochs is the usual case, and naming sixty paths by hand "
             "is both unreadable and easy to get wrong."
+        ),
+    )
+    parser.add_argument(
+        "--pretrained", action="append", default=[],
+        help=(
+            "Score this generalist as shipped, e.g. vit_l_lm: the "
+            "zero-shot point no adaptation has touched. Repeatable, and "
+            "combinable with --checkpoint. Its figures go to the JSON "
+            "report only, as no training run holds them."
+        ),
+    )
+    parser.add_argument(
+        "--segmentation-mode", default="ais", choices=SEGMENTATION_MODES,
+        help=(
+            "'ais' grows instances by a watershed from the decoder's "
+            "distance maps, as every figure of the study so far. 'apg' "
+            "prompts SAM's mask decoder with a point per seed. Figures "
+            "under 'apg' never go to MLflow."
         ),
     )
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
@@ -372,7 +407,7 @@ def score_checkpoint(
     args: argparse.Namespace,
     settings: tuple[WatershedParams, ...],
 ) -> list[tuple[WatershedParams, AggregateResult, list]]:
-    """Segment every image of a subset and measure the result.
+    """Segment every image of a subset with a checkpoint and measure it.
 
     Parameters
     ----------
@@ -387,14 +422,62 @@ def score_checkpoint(
         Per setting: the setting, the pooled figures, and the per-image
         evaluations behind them.
     """
+    segmenter = build_segmenter(
+        checkpoint, MODEL_TYPE, segmentation_mode=args.segmentation_mode,
+    )
+    return _score(segmenter, str(checkpoint), args, settings)
+
+
+def score_pretrained(
+    model_type: str,
+    args: argparse.Namespace,
+    settings: tuple[WatershedParams, ...],
+) -> list[tuple[WatershedParams, AggregateResult, list]]:
+    """The same for a generalist as shipped, with no adaptation at all.
+
+    Parameters
+    ----------
+    model_type : str
+    args : argparse.Namespace
+    settings : tuple of WatershedParams
+
+    Returns
+    -------
+    list of tuple
+        As :func:`score_checkpoint`.
+    """
+    segmenter = build_pretrained_segmenter(
+        model_type, segmentation_mode=args.segmentation_mode,
+    )
+    return _score(segmenter, f"pretrained:{model_type}", args, settings)
+
+
+def _score(
+    segmenter: object,
+    label: str,
+    args: argparse.Namespace,
+    settings: tuple[WatershedParams, ...],
+) -> list[tuple[WatershedParams, AggregateResult, list]]:
+    """Segment every image of a subset and measure the result.
+
+    Parameters
+    ----------
+    segmenter : InstanceSegmentationWithDecoder
+    label : str
+        What the segmenter is, for the logs and the pooled figures.
+    args : argparse.Namespace
+    settings : tuple of WatershedParams
+
+    Returns
+    -------
+    list of tuple
+        As :func:`score_checkpoint`.
+    """
     source = build_source(
         args.split, args.manifest, args.subset,
         allow_test=args.unlock_test,
     )
     size_bins = load_size_bins(args.size_bins)
-    segmenter = build_segmenter(
-        checkpoint, MODEL_TYPE, PEFT_KWARGS, LORA_RANK
-    )
 
     positions = list(range(len(source)))
     if 0 < args.n_images < len(source):
@@ -409,7 +492,7 @@ def score_checkpoint(
     elapsed_s = time.perf_counter() - started_s
     logger.info(
         "%s: %d image(s) x %d setting(s) in %.1f s (%.2f s each).",
-        checkpoint, len(positions), len(settings), elapsed_s,
+        label, len(positions), len(settings), elapsed_s,
         elapsed_s / max(1, len(positions)),
     )
     return [
@@ -417,7 +500,7 @@ def score_checkpoint(
             setting,
             aggregate(
                 evaluations[setting],
-                label=f"{checkpoint}@{setting.label()}",
+                label=f"{label}@{setting.label()}",
             ),
             evaluations[setting],
         )
@@ -495,6 +578,12 @@ def mlflow_refusal(args: argparse.Namespace) -> Optional[str]:
     """
     if args.no_mlflow:
         return "disabled on the command line"
+    if args.segmentation_mode != "ais":
+        return (
+            f"they come from the '{args.segmentation_mode}' path, and a "
+            f"metric name says nothing about the path, so they would land "
+            f"on the curves of the watershed's figures"
+        )
     if args.n_images > 0:
         return (
             f"only {args.n_images} image(s) scored, which would put a "
@@ -582,6 +671,51 @@ def write_json(
     logger.info("Wrote %s.", destination)
 
 
+def result_stem(stem: str, args: argparse.Namespace) -> str:
+    """Name a model's figures in the report.
+
+    The segmentation path enters the name only when it is not the
+    watershed, so every report written so far keeps reading as it did
+    and a prompt-based figure can never be mistaken for one of them.
+
+    Parameters
+    ----------
+    stem : str
+    args : argparse.Namespace
+
+    Returns
+    -------
+    str
+    """
+    if args.segmentation_mode == "ais":
+        return stem
+    return f"{stem}[{args.segmentation_mode}]"
+
+
+def _collect(
+    stem: str,
+    scored: list[tuple[WatershedParams, AggregateResult, list]],
+    results: dict[str, AggregateResult],
+    evaluations: dict[str, list],
+) -> None:
+    """File one model's figures under their names in the report.
+
+    Parameters
+    ----------
+    stem : str
+        From :func:`result_stem`.
+    scored : list of tuple
+        From :func:`score_checkpoint` or :func:`score_pretrained`.
+    results, evaluations : dict
+        Updated in place.
+    """
+    for setting, result, per_image in scored:
+        # The setting only enters the name when there is more than
+        # one, so an ordinary run's report reads as it always did.
+        name = stem if len(scored) == 1 else f"{stem}@{setting.label()}"
+        results[name], evaluations[name] = result, per_image
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """Score every checkpoint given and compare them.
 
@@ -594,10 +728,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     setup_logging()
 
     args.checkpoint = resolve_checkpoints(args)
-    if not args.checkpoint:
+    if not args.checkpoint and not args.pretrained:
         logger.error(
-            "No checkpoint selected. Pass --checkpoint or "
-            "--checkpoint-glob."
+            "No checkpoint selected. Pass --checkpoint, --checkpoint-glob "
+            "or --pretrained."
         )
         return EXIT_FAILED
     missing = [path for path in args.checkpoint if not path.exists()]
@@ -612,8 +746,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.error(refusal)
         return EXIT_FAILED
     logger.info(
-        "Scoring %d checkpoint(s) on %s.",
-        len(args.checkpoint), args.subset.upper(),
+        "Scoring %d checkpoint(s) and %d pretrained model(s) on %s, "
+        "instances by %s.",
+        len(args.checkpoint), len(args.pretrained), args.subset.upper(),
+        args.segmentation_mode,
     )
 
     prepare_geometry()
@@ -622,6 +758,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         "Watershed setting(s): %s.",
         ", ".join(setting.label() for setting in settings),
     )
+    if args.segmentation_mode == "apg":
+        logger.warning(
+            "The prompt-based path has no smoothing step: %s of each "
+            "setting are not used, so settings differing only there "
+            "score alike.", ", ".join(APG_UNUSED_SETTINGS),
+        )
     refusal = mlflow_refusal(args)
     if refusal is None:
         configure_tracking()
@@ -630,17 +772,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     results: dict[str, AggregateResult] = {}
     evaluations: dict[str, list] = {}
     tracked_runs: set[str] = set()
+    for model_type in args.pretrained:
+        scored = score_pretrained(model_type, args, settings)
+        _collect(
+            result_stem(f"pretrained/{model_type}", args), scored,
+            results, evaluations,
+        )
     for checkpoint in args.checkpoint:
         # Run and snapshot both, because every epoch of one run lives
         # in a single directory: the directory alone would name them
         # all the same.
-        stem = f"{checkpoint.parent.name}/{checkpoint.stem}"
+        stem = result_stem(
+            f"{checkpoint.parent.name}/{checkpoint.stem}", args
+        )
         scored = score_checkpoint(checkpoint, args, settings)
-        for setting, result, per_image in scored:
-            # The setting only enters the name when there is more than
-            # one, so an ordinary run's report reads as it always did.
-            name = stem if len(scored) == 1 else f"{stem}@{setting.label()}"
-            results[name], evaluations[name] = result, per_image
+        _collect(stem, scored, results, evaluations)
         if refusal is None:
             # The figures that matter go to the JSON report; the MLflow
             # copy is for viewing. Several evaluations may write to the

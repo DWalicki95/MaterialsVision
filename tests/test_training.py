@@ -20,20 +20,21 @@ import torch
 from materials_vision.augmentation import (AugmentationPolicy,
                                            OrientationConfig, PolicyConfig)
 from materials_vision.training import (BATCH_SIZE, DECODER_LEARNING_RATE,
-                                       FROZEN_SAM_PARTS, LORA_LEARNING_RATE,
-                                       LORA_RANK, N_OBJECTS_PER_BATCH,
-                                       NUM_WORKERS, PEFT_KWARGS,
+                                       ENCODER_LEARNING_RATE, FROZEN_SAM_PARTS,
+                                       LORA_LEARNING_RATE, LORA_RANK,
+                                       N_OBJECTS_PER_BATCH, NUM_WORKERS,
+                                       PEFT_KWARGS,
                                        CosineAnnealingIgnoringMetric,
                                        _check_trainable,
                                        _hold_decoder_batchnorm_in_eval,
-                                       _joint_trainer_class,
-                                       _parameter_groups,
+                                       _joint_trainer_class, _parameter_groups,
                                        _resolve_scheduler_horizon,
-                                       _select_trainable,
-                                       _trainable_groups,
+                                       _select_trainable, _split_adaptation,
+                                       _trainable_groups, _verify_adaptation,
                                        _without_interactive_training,
-                                       build_loader,
-                                       resolve_interactive_loss)
+                                       build_loader, build_peft_kwargs,
+                                       layers_label, resolve_interactive_loss,
+                                       training_params, validate_adaptation)
 from materials_vision.training_logger import learning_rates
 
 
@@ -687,3 +688,254 @@ def test_without_the_interactive_loss_the_correction_steps_once_per_image(
 
     assert n_steps == 3
     assert correction_moved
+
+
+# The encoder's adaptation method. The runs before 2026-11 all adapted
+# with low-rank corrections on q and v in every block; what follows pins
+# that the default still builds exactly that, and that every other
+# method trains what it says and nothing else.
+
+
+def test_the_default_adaptation_is_the_frozen_one():
+    assert build_peft_kwargs() == PEFT_KWARGS
+
+
+def test_late_fine_tuning_unfreezes_the_blocks_it_is_given():
+    from micro_sam.models.peft_sam import ClassicalSurgery
+
+    kwargs = build_peft_kwargs("late_ft", layers=[13, 12])
+
+    assert kwargs["peft_module"] is ClassicalSurgery
+    assert kwargs["attention_layers_to_update"] == [12, 13]
+
+
+def test_full_fine_tuning_wraps_nothing():
+    assert build_peft_kwargs("full_ft") is None
+
+
+def test_projections_are_listed_in_the_librarys_order():
+    kwargs = build_peft_kwargs(update_matrices=["mlp", "v", "q", "k"])
+
+    assert kwargs["update_matrices"] == ["q", "k", "v", "mlp"]
+
+
+@pytest.mark.parametrize("method, kwargs, match", [
+    ("adapter", {}, "peft_method"),
+    ("late_ft", {}, "needs the encoder blocks"),
+    ("full_ft", {"layers": [1]}, "whole encoder"),
+    ("late_ft", {"layers": [1], "rank": 8}, "rank"),
+    ("full_ft", {"update_matrices": ["q"]}, "update_matrices"),
+    ("lora", {"rank": 0}, "rank"),
+    ("lora", {"update_matrices": ["q", "o"]}, "update_matrices"),
+    ("lora", {"update_matrices": []}, "update_matrices"),
+    ("lora", {"layers": [-1]}, "negative"),
+    ("lora", {"layers": [2, 2]}, "repeated"),
+])
+def test_an_adaptation_that_contradicts_itself_is_refused(
+    method, kwargs, match
+):
+    with pytest.raises(ValueError, match=match):
+        build_peft_kwargs(method, **kwargs)
+
+
+def test_a_rank_is_refused_where_no_correction_is_built():
+    with pytest.raises(ValueError, match="no effect"):
+        validate_adaptation("both", "full_ft", lora_rank=32)
+
+
+@pytest.mark.parametrize("extra", [
+    {"peft_method": "late_ft", "layers": [1]},
+    {"peft_method": "lora", "layers": [1]},
+    {"peft_method": "lora", "update_matrices": ["q", "k", "v"]},
+])
+def test_no_adaptation_is_chosen_for_a_frozen_encoder(extra):
+    method = extra.pop("peft_method")
+    with pytest.raises(ValueError, match="encoder is frozen"):
+        validate_adaptation("instance_decoder", method, **extra)
+
+
+def test_a_frozen_encoder_still_takes_the_frozen_adaptation():
+    """A decoder-only run keeps its usual checkpoint layout."""
+    assert validate_adaptation("instance_decoder", "lora") == PEFT_KWARGS
+
+
+@pytest.mark.parametrize("layers, label", [
+    (None, "all"), ([], "all"), ([12, 13, 14], "12-14"),
+    ([14, 12, 13], "12-14"), ([1, 3], "1,3"), ([5], "5"),
+])
+def test_blocks_are_named_compactly(layers, label):
+    assert layers_label(layers) == label
+
+
+def _model_and_decoder(sam):
+    """The pair a run builds: the model around SAM, the decoder on its
+    encoder."""
+    model = torch.nn.Module()
+    model.sam = sam
+    unetr = torch.nn.Module()
+    unetr.encoder = sam.image_encoder
+    unetr.head = torch.nn.Linear(4, 3)
+    return model, unetr
+
+
+def _groups_for(tiny_sam, method, trainable="both", **kwargs):
+    model, unetr = _model_and_decoder(
+        tiny_sam(build_peft_kwargs(method, **kwargs))
+    )
+    adaptation, decoder = _select_trainable(
+        *_trainable_groups(model, unetr), trainable
+    )
+    factors, weights = _split_adaptation(model, adaptation)
+    return model, factors, weights, decoder
+
+
+def _names(model, parameters):
+    ids = {id(p) for p in parameters}
+    return {n for n, p in model.named_parameters() if id(p) in ids}
+
+
+def test_the_frozen_adaptation_trains_its_factors_and_nothing_else(tiny_sam):
+    model, factors, weights, _ = _groups_for(tiny_sam, "lora")
+    blocks = model.sam.image_encoder.blocks
+    dim = blocks[0].attn.qkv.dim
+
+    assert weights == []
+    assert all(".w_a_linear_" in n or ".w_b_linear_" in n
+               for n in _names(model, factors))
+    # q and v in every block, each an (r x d) and a (d x r) factor.
+    assert sum(p.numel() for p in factors) == (
+        len(blocks) * 2 * 2 * LORA_RANK * dim
+    )
+    _verify_adaptation("lora", factors, weights)
+
+
+def test_late_fine_tuning_trains_exactly_its_blocks(tiny_sam):
+    model, factors, weights, _ = _groups_for(
+        tiny_sam, "late_ft", layers=[2, 3],
+    )
+
+    names = _names(model, weights)
+    assert factors == []
+    assert names
+    assert all(n.startswith(("sam.image_encoder.blocks.2.",
+                             "sam.image_encoder.blocks.3."))
+               for n in names)
+    _verify_adaptation("late_ft", factors, weights)
+
+
+def test_full_fine_tuning_trains_the_whole_encoder_only(tiny_sam):
+    model, factors, weights, _ = _groups_for(tiny_sam, "full_ft")
+
+    names = _names(model, weights)
+    assert factors == []
+    assert names == {
+        n for n, _ in model.named_parameters()
+        if n.startswith("sam.image_encoder.")
+    }
+
+
+def test_encoder_weights_never_take_the_rate_of_the_correction(tiny_sam):
+    """The failure this guards against is silent: pretrained weights
+    stepped thirty times too fast, with nothing in the logs to show it."""
+    model, factors, weights, decoder = _groups_for(
+        tiny_sam, "late_ft", layers=[3],
+    )
+    optimizer = torch.optim.AdamW(_parameter_groups(
+        factors, LORA_LEARNING_RATE, decoder, DECODER_LEARNING_RATE,
+        weights, ENCODER_LEARNING_RATE,
+    ))
+
+    assert learning_rates(optimizer) == pytest.approx({
+        "decoder": DECODER_LEARNING_RATE,
+        "encoder": ENCODER_LEARNING_RATE,
+    })
+    encoder_group = next(
+        g for g in optimizer.param_groups if g["name"] == "encoder"
+    )
+    assert {id(p) for p in encoder_group["params"]} == {
+        id(p) for p in weights
+    }
+
+
+def test_a_frozen_encoder_trains_none_of_its_weights(tiny_sam):
+    _, factors, weights, decoder = _groups_for(
+        tiny_sam, "late_ft", trainable="instance_decoder", layers=[3],
+    )
+
+    assert factors == [] and weights == []
+    assert decoder
+
+
+def test_encoder_weights_without_a_rate_are_refused():
+    weight = torch.nn.Parameter(torch.zeros(1))
+    with pytest.raises(ValueError, match="no rate"):
+        _parameter_groups([], 1e-3, [], 1e-5, [weight], None)
+
+
+@pytest.mark.parametrize("method, factors, weights", [
+    ("lora", [], [torch.nn.Parameter(torch.zeros(1))]),
+    ("late_ft", [torch.nn.Parameter(torch.zeros(1))], []),
+])
+def test_a_wrapper_that_trains_the_wrong_thing_stops_the_run(
+    method, factors, weights
+):
+    with pytest.raises(RuntimeError):
+        _verify_adaptation(method, factors, weights)
+
+
+def test_train_run_rejects_an_invalid_adaptation_before_building_a_model(
+    monkeypatch,
+):
+    import materials_vision.training as training
+
+    def must_not_run() -> None:
+        raise AssertionError("validation ran after model setup began")
+
+    monkeypatch.setattr(training, "prepare_geometry", must_not_run)
+    with pytest.raises(ValueError, match="needs the encoder blocks"):
+        training.train_run(
+            "x", model_type="vit_b", train_loader=None,
+            val_loader=None, n_epochs=1, save_root=None,
+            peft_method="late_ft",
+        )
+
+
+def _params(**overrides):
+    kwargs = dict(
+        model_type="vit_l_lm", n_epochs=12, steps_per_epoch=494,
+        n_val_images=107, peft_kwargs=PEFT_KWARGS, trainable="both",
+        interactive_loss=True, lora_learning_rate=LORA_LEARNING_RATE,
+        decoder_learning_rate=DECODER_LEARNING_RATE,
+        scheduler_horizon_epochs=12, decoder_batchnorm_momentum=None,
+        early_stopping=None, n_lora_parameters=786432,
+        n_decoder_parameters=9591235,
+    )
+    kwargs.update(overrides)
+    return training_params(**kwargs)
+
+
+def test_a_low_rank_run_records_what_runs_before_it_recorded():
+    params = _params()
+
+    assert params["lora_rank"] == LORA_RANK
+    assert params["lora_update_matrices"] == "q,v"
+    assert params["lora_attention_layers"] == "all"
+    assert params["peft_method"] == "lora"
+    assert params["peft_layers"] == "all"
+    assert params["n_encoder_parameters"] == 0
+    assert params["encoder_learning_rate"] is None
+
+
+def test_a_full_weight_run_records_no_correction():
+    params = _params(
+        peft_kwargs=build_peft_kwargs("late_ft", layers=[12, 13]),
+        peft_method="late_ft", peft_layers=[12, 13],
+        lora_learning_rate=None, n_lora_parameters=0,
+        encoder_learning_rate=ENCODER_LEARNING_RATE,
+        n_encoder_parameters=1000,
+    )
+
+    assert params["lora_rank"] is None
+    assert params["lora_update_matrices"] is None
+    assert params["peft_layers"] == "12-13"
+    assert params["encoder_learning_rate"] == ENCODER_LEARNING_RATE

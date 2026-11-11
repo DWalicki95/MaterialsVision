@@ -10,8 +10,12 @@ Contents
   in every run, trainable part (``both``, ``lora`` or
   ``instance_decoder``), and whether the interactive loss trains the
   low-rank correction alongside the instance loss.
-- Learning rates: separate rates for the LoRA layers and the instance
-  decoder, with a cosine schedule annealed over the run length.
+- Adaptation method of the image encoder: low-rank corrections
+  (``lora``, every run before 2026-11), the original weights of chosen
+  blocks (``late_ft``) or the whole encoder (``full_ft``).
+- Learning rates: separate rates for the LoRA layers, the encoder's own
+  weights and the instance decoder, with a cosine schedule annealed
+  over the run length.
 - Data: ``build_source`` reads a subset of the split, ``build_loader``
   wraps it in a DataLoader (batch size 1, seeded sampler, optional
   augmentation, images at native resolution).
@@ -28,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 import torch
-from micro_sam.models.peft_sam import LoRASurgery
+from micro_sam.models.peft_sam import ClassicalSurgery, LoRASurgery
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
@@ -70,6 +74,24 @@ PEFT_KWARGS: dict[str, Any] = {
     "attention_layers_to_update": [],
     "quantize": False,
 }
+
+# How the image encoder is adapted. ``lora`` adds the low-rank
+# corrections of PEFT_KWARGS; ``late_ft`` unfreezes the original weights
+# of chosen blocks (the library's ClassicalSurgery); ``full_ft``
+# unfreezes the whole encoder. The two last are upper bounds on what
+# adapting the encoder can buy, not candidates for a parameter-efficient
+# recipe.
+PEFT_METHODS = ("lora", "late_ft", "full_ft")
+
+# Projections a low-rank correction can be attached to, in the order the
+# library names them. ``mlp`` covers both linear layers of a block's MLP.
+LORA_MATRICES = ("q", "k", "v", "mlp")
+
+# Rate for the encoder's own pretrained weights wherever a method
+# unfreezes them. The rate the PEFT-SAM study fine-tuned full weights
+# at; the correction's rate, which starts from zero, would move them
+# thirty times faster.
+ENCODER_LEARNING_RATE = 1e-5
 
 # SAM's interactive branch: the prompt encoder and the mask decoder
 # that turns a prompt into a single mask. Frozen in every run, whatever
@@ -339,6 +361,254 @@ def _check_trainable(
         )
 
 
+def layers_label(layers: Optional[Sequence[int]]) -> str:
+    """Name a choice of encoder blocks compactly.
+
+    Parameters
+    ----------
+    layers : sequence of int, optional
+        ``None`` or empty means every block.
+
+    Returns
+    -------
+    str
+        ``"all"``, a range such as ``"12-23"`` when the blocks are
+        consecutive, otherwise the blocks joined by commas.
+    """
+    if not layers:
+        return "all"
+    ordered = sorted(set(layers))
+    if ordered == list(range(ordered[0], ordered[-1] + 1)) \
+            and len(ordered) > 1:
+        return f"{ordered[0]}-{ordered[-1]}"
+    return ",".join(map(str, ordered))
+
+
+def build_peft_kwargs(
+    peft_method: str = "lora",
+    *,
+    rank: Optional[int] = None,
+    layers: Optional[Sequence[int]] = None,
+    update_matrices: Optional[Sequence[str]] = None,
+) -> Optional[dict[str, Any]]:
+    """The library's wrapper arguments for one way of adapting the encoder.
+
+    Parameters
+    ----------
+    peft_method : str, optional
+        One of :data:`PEFT_METHODS`.
+    rank : int, optional
+        Low-rank methods only. ``None`` means :data:`LORA_RANK`.
+    layers : sequence of int, optional
+        Encoder blocks adapted. ``None`` or empty means every block for
+        ``lora``; ``late_ft`` requires an explicit choice, because
+        unfreezing every block is ``full_ft`` without the neck and the
+        patch embedding.
+    update_matrices : sequence of str, optional
+        Low-rank methods only. ``None`` keeps the frozen choice, the
+        query and value projections.
+
+    Returns
+    -------
+    dict or None
+        ``None`` for ``full_ft``, which wraps nothing. For ``lora`` with
+        every argument at its default, a dict equal to
+        :data:`PEFT_KWARGS`.
+
+    Raises
+    ------
+    ValueError
+        For an unknown method, an argument the method does not take, a
+        rank below one, an unknown or repeated projection, or a
+        negative or repeated block.
+    """
+    if peft_method not in PEFT_METHODS:
+        raise ValueError(
+            f"peft_method must be one of {PEFT_METHODS}, got "
+            f"{peft_method!r}."
+        )
+    if layers is not None:
+        if any(layer < 0 for layer in layers):
+            raise ValueError(f"Encoder blocks cannot be negative: {layers}.")
+        if len(set(layers)) != len(layers):
+            raise ValueError(f"An encoder block is repeated: {layers}.")
+    if peft_method != "lora":
+        given = [
+            name for name, value in (
+                ("rank", rank), ("update_matrices", update_matrices),
+            ) if value is not None
+        ]
+        if given:
+            raise ValueError(
+                f"{', '.join(given)} only applies to low-rank "
+                f"corrections, not to {peft_method}."
+            )
+    if peft_method == "full_ft":
+        if layers:
+            raise ValueError(
+                "full_ft unfreezes the whole encoder; choose blocks "
+                "with late_ft instead."
+            )
+        return None
+    if peft_method == "late_ft":
+        if not layers:
+            raise ValueError("late_ft needs the encoder blocks to unfreeze.")
+        return {
+            "peft_module": ClassicalSurgery,
+            "attention_layers_to_update": sorted(layers),
+            "quantize": False,
+        }
+
+    rank = LORA_RANK if rank is None else rank
+    if rank < 1:
+        raise ValueError(f"The rank must be at least 1, got {rank}.")
+    matrices = (
+        list(PEFT_KWARGS["update_matrices"]) if update_matrices is None
+        else list(update_matrices)
+    )
+    unknown = sorted(set(matrices) - set(LORA_MATRICES))
+    if unknown or not matrices or len(set(matrices)) != len(matrices):
+        raise ValueError(
+            f"update_matrices must be distinct members of {LORA_MATRICES}, "
+            f"got {matrices}."
+        )
+    return {
+        **PEFT_KWARGS,
+        "rank": rank,
+        "update_matrices": [m for m in LORA_MATRICES if m in matrices],
+        "attention_layers_to_update": sorted(layers) if layers else [],
+    }
+
+
+def validate_adaptation(
+    trainable: str,
+    peft_method: str,
+    *,
+    lora_rank: int = LORA_RANK,
+    layers: Optional[Sequence[int]] = None,
+    update_matrices: Optional[Sequence[str]] = None,
+) -> Optional[dict[str, Any]]:
+    """Check a choice of encoder adaptation against what the run trains.
+
+    Called before any model is built, so a refusal costs nothing.
+
+    Parameters
+    ----------
+    trainable : str
+        One of :data:`TRAINABLE_CHOICES`.
+    peft_method : str
+        One of :data:`PEFT_METHODS`.
+    lora_rank : int, optional
+        Must stay at :data:`LORA_RANK` for a method without low-rank
+        corrections, where it would be silently ignored.
+    layers, update_matrices : optional
+        As in :func:`build_peft_kwargs`.
+
+    Returns
+    -------
+    dict or None
+        From :func:`build_peft_kwargs`.
+
+    Raises
+    ------
+    ValueError
+        If the choice is invalid, or if anything but the frozen
+        adaptation is asked for in a run that freezes the encoder:
+        there it changes nothing the run learns, only its name.
+    """
+    if trainable == "instance_decoder" and (
+        peft_method != "lora" or layers or update_matrices is not None
+    ):
+        raise ValueError(
+            "The encoder is frozen when only the instance decoder "
+            "trains; a choice of how to adapt it would change nothing."
+        )
+    if peft_method != "lora" and lora_rank != LORA_RANK:
+        raise ValueError(
+            f"A rank of {lora_rank} has no effect under {peft_method}, "
+            "which adds no low-rank corrections."
+        )
+    return build_peft_kwargs(
+        peft_method,
+        rank=lora_rank if peft_method == "lora" else None,
+        layers=layers,
+        update_matrices=update_matrices,
+    )
+
+
+def _is_low_rank_factor(name: str) -> bool:
+    """Whether a parameter name belongs to a low-rank correction.
+
+    Parameters
+    ----------
+    name : str
+
+    Returns
+    -------
+    bool
+    """
+    return ".w_a_linear_" in name or ".w_b_linear_" in name
+
+
+def _split_adaptation(
+    model: Any, adaptation: list[Any]
+) -> tuple[list[Any], list[Any]]:
+    """Separate the low-rank factors from the encoder's own weights.
+
+    The two start from different places - the correction from zero, the
+    weights pretrained - and cannot share a rate, which is why they are
+    told apart by name rather than lumped together as "what trains in
+    the model".
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+    adaptation : list of torch.nn.Parameter
+        The model's half from :func:`_select_trainable`.
+
+    Returns
+    -------
+    tuple of list
+        The low-rank factors, then the encoder's own weights.
+    """
+    factor_ids = {
+        id(parameter) for name, parameter in model.named_parameters()
+        if _is_low_rank_factor(name)
+    }
+    factors = [p for p in adaptation if id(p) in factor_ids]
+    weights = [p for p in adaptation if id(p) not in factor_ids]
+    return factors, weights
+
+
+def _verify_adaptation(
+    peft_method: str, factors: list[Any], weights: list[Any]
+) -> None:
+    """Fail if what trains in the model is not what the method promises.
+
+    Parameters
+    ----------
+    peft_method : str
+    factors, weights : list of torch.nn.Parameter
+        From :func:`_split_adaptation`.
+
+    Raises
+    ------
+    RuntimeError
+        If low-rank runs would step any pretrained weight, or a
+        full-weight method would step a low-rank factor. Either would
+        mean the library built something other than what was asked for.
+    """
+    if peft_method == "lora" and weights:
+        raise RuntimeError(
+            f"{sum(p.numel() for p in weights)} pretrained parameter(s) "
+            "would train in a low-rank run."
+        )
+    if peft_method != "lora" and factors:
+        raise RuntimeError(
+            f"{peft_method} built low-rank factors it should not have."
+        )
+
+
 def _resolve_scheduler_horizon(
     n_epochs: int, scheduler_horizon_epochs: Optional[int]
 ) -> int:
@@ -465,32 +735,51 @@ def _parameter_groups(
     lora_learning_rate: float,
     instance_decoder: list[Any],
     decoder_learning_rate: float,
+    encoder_weights: Sequence[Any] = (),
+    encoder_learning_rate: Optional[float] = None,
 ) -> list[dict[str, Any]]:
-    """The optimizer's groups, leaving out a frozen half.
+    """The optimizer's groups, leaving out whatever does not train.
 
     The trainer logs the rate of the first group as the run's rate, so
     a group with nothing in it must not come first. Each group carries
     its name, because with one left out its position no longer says
-    which half it is.
+    which part it is.
 
     Parameters
     ----------
     correction : list of torch.nn.Parameter
+        Low-rank factors only.
     lora_learning_rate : float
     instance_decoder : list of torch.nn.Parameter
     decoder_learning_rate : float
+    encoder_weights : sequence of torch.nn.Parameter, optional
+        Pretrained encoder weights a full-weight method unfreezes.
+    encoder_learning_rate : float, optional
+        Required when ``encoder_weights`` is not empty.
 
     Returns
     -------
     list of dict
+
+    Raises
+    ------
+    ValueError
+        If encoder weights are given without a rate for them.
     """
-    lora_name, decoder_name = PARAMETER_GROUP_NAMES
+    if encoder_weights and encoder_learning_rate is None:
+        raise ValueError("Encoder weights train but have no rate.")
+    lora_name, decoder_name, encoder_name = PARAMETER_GROUP_NAMES
     groups = [
         {"params": correction, "lr": lora_learning_rate, "name": lora_name},
         {
             "params": instance_decoder,
             "lr": decoder_learning_rate,
             "name": decoder_name,
+        },
+        {
+            "params": list(encoder_weights),
+            "lr": encoder_learning_rate,
+            "name": encoder_name,
         },
     ]
     return [group for group in groups if group["params"]]
@@ -663,6 +952,9 @@ def train_run(
     decoder_learning_rate: float = DECODER_LEARNING_RATE,
     lora_rank: int = LORA_RANK,
     update_matrices: Optional[Sequence[str]] = None,
+    peft_method: str = "lora",
+    peft_layers: Optional[Sequence[int]] = None,
+    encoder_learning_rate: float = ENCODER_LEARNING_RATE,
     trainable: str = "both",
     interactive_loss: Optional[bool] = None,
     scheduler_horizon_epochs: Optional[int] = None,
@@ -730,10 +1022,21 @@ def train_run(
     update_matrices : sequence of str, optional
         Attention projections that receive the correction. ``None``
         keeps the frozen choice, the query and value projections.
+    peft_method : {"lora", "late_ft", "full_ft"}, optional
+        How the image encoder is adapted; see :data:`PEFT_METHODS`.
+        ``lora`` is what every run before 2026-11 used.
+    peft_layers : sequence of int, optional
+        Encoder blocks adapted. ``None`` means every block for
+        ``lora``; required for ``late_ft``.
+    encoder_learning_rate : float, optional
+        Rate of the encoder's own weights under ``late_ft`` and
+        ``full_ft``. Ignored under ``lora``, which leaves them frozen.
     trainable : {"both", "lora", "instance_decoder"}, optional
         What the run adapts, on top of the SAM parts frozen in every
-        run (:data:`FROZEN_SAM_PARTS`). ``"both"`` is the configuration
-        every comparison of policies uses. ``"lora"`` freezes the
+        run (:data:`FROZEN_SAM_PARTS`). ``"lora"`` names the encoder's
+        adaptation, whatever ``peft_method`` it uses. ``"both"`` is the
+        configuration every comparison of policies uses. ``"lora"``
+        freezes the
         instance decoder and holds its batch statistics at their pretrained
         values; the correction still learns from both losses, the
         instance one reaching it through the frozen decoder.
@@ -784,12 +1087,20 @@ def train_run(
     ------
     ValueError
         If ``trainable`` is unknown or conflicts with
-        ``decoder_batchnorm_momentum`` or ``interactive_loss``, or if
-        ``n_epochs`` and ``scheduler_horizon_epochs`` are invalid.
+        ``decoder_batchnorm_momentum`` or ``interactive_loss``, if
+        ``n_epochs`` and ``scheduler_horizon_epochs`` are invalid, or if
+        the adaptation is invalid (:func:`validate_adaptation`).
+    RuntimeError
+        If what the library built trains something other than the
+        method promises (:func:`_verify_adaptation`).
     """
     _check_trainable(trainable, decoder_batchnorm_momentum)
     horizon = _resolve_scheduler_horizon(n_epochs, scheduler_horizon_epochs)
     interactive_loss = resolve_interactive_loss(trainable, interactive_loss)
+    peft_kwargs = validate_adaptation(
+        trainable, peft_method, lora_rank=lora_rank, layers=peft_layers,
+        update_matrices=update_matrices,
+    )
 
     import torch_em
     from micro_sam.instance_segmentation import get_unetr
@@ -803,17 +1114,14 @@ def train_run(
     _check_loader(train_loader, True, "train", VERIFY_N_LABELS_IN_LOADER)
     _check_loader(val_loader, True, "val", VERIFY_N_LABELS_IN_LOADER)
 
-    peft_kwargs = dict(PEFT_KWARGS)
-    peft_kwargs["rank"] = lora_rank
-    if update_matrices is not None:
-        peft_kwargs["update_matrices"] = list(update_matrices)
     resolved_device = get_device(device)
     model, state = get_trainable_sam_model(
         model_type=model_type,
         device=resolved_device,
         freeze=list(FROZEN_SAM_PARTS),
         return_state=True,
-        peft_kwargs=peft_kwargs,
+        # The library may edit the dict it is handed.
+        peft_kwargs=None if peft_kwargs is None else dict(peft_kwargs),
     )
     unetr = get_unetr(
         image_encoder=model.sam.image_encoder,
@@ -829,9 +1137,11 @@ def train_run(
             ),
         )
 
-    correction, instance_decoder = _select_trainable(
+    adaptation, instance_decoder = _select_trainable(
         *_trainable_groups(model, unetr), trainable
     )
+    correction, encoder_weights = _split_adaptation(model, adaptation)
+    _verify_adaptation(peft_method, correction, encoder_weights)
     if trainable == "lora":
         logger.info(
             "Batch-norm held in evaluation mode on %d frozen decoder "
@@ -840,18 +1150,22 @@ def train_run(
     optimizer = torch.optim.AdamW(_parameter_groups(
         correction, lora_learning_rate,
         instance_decoder, decoder_learning_rate,
+        encoder_weights, encoder_learning_rate,
     ))
     trainer_class = _joint_trainer_class(interactive_loss)
     instance_loss = torch_em.loss.DiceBasedDistanceLoss(
         mask_distances_in_bg=True
     )
     logger.info(
-        "Training %r (%s, interactive loss %s) from %s: %d epoch(s) x "
-        "%d step(s), rank %d, correction %d parameter(s) at lr %.0e, "
-        "decoder %d at %.0e, annealed over %d epoch(s).",
-        name, trainable, "on" if interactive_loss else "off", model_type,
-        n_epochs, len(train_loader), lora_rank,
+        "Training %r (%s, %s on blocks %s, interactive loss %s) from %s: "
+        "%d epoch(s) x %d step(s), correction %d parameter(s) at lr "
+        "%.0e, encoder weights %d at %.0e, decoder %d at %.0e, annealed "
+        "over %d epoch(s).",
+        name, trainable, peft_method, layers_label(peft_layers),
+        "on" if interactive_loss else "off", model_type,
+        n_epochs, len(train_loader),
         sum(p.numel() for p in correction), lora_learning_rate,
+        sum(p.numel() for p in encoder_weights), encoder_learning_rate,
         sum(p.numel() for p in instance_decoder), decoder_learning_rate,
         horizon,
     )
@@ -897,17 +1211,23 @@ def train_run(
         steps_per_epoch=len(train_loader),
         n_val_images=len(val_loader),
         peft_kwargs=peft_kwargs,
+        peft_method=peft_method,
+        peft_layers=peft_layers,
         trainable=trainable,
         interactive_loss=interactive_loss,
         lora_learning_rate=lora_learning_rate if correction else None,
         decoder_learning_rate=(
             decoder_learning_rate if instance_decoder else None
         ),
+        encoder_learning_rate=(
+            encoder_learning_rate if encoder_weights else None
+        ),
         scheduler_horizon_epochs=horizon,
         decoder_batchnorm_momentum=decoder_batchnorm_momentum,
         early_stopping=early_stopping,
         n_lora_parameters=sum(p.numel() for p in correction),
         n_decoder_parameters=sum(p.numel() for p in instance_decoder),
+        n_encoder_parameters=sum(p.numel() for p in encoder_weights),
     )
     checkpoint_dir = Path(save_root) / "checkpoints" / name
     with tracked_run(name, checkpoint_dir, tracking, params):
@@ -920,7 +1240,7 @@ def training_params(
     n_epochs: int,
     steps_per_epoch: int,
     n_val_images: int,
-    peft_kwargs: dict[str, Any],
+    peft_kwargs: Optional[dict[str, Any]],
     trainable: str,
     interactive_loss: bool,
     lora_learning_rate: Optional[float],
@@ -930,6 +1250,10 @@ def training_params(
     early_stopping: Optional[int],
     n_lora_parameters: int,
     n_decoder_parameters: int,
+    peft_method: str = "lora",
+    peft_layers: Optional[Sequence[int]] = None,
+    encoder_learning_rate: Optional[float] = None,
+    n_encoder_parameters: int = 0,
 ) -> dict[str, Any]:
     """Everything that defines a run, as the flat record MLflow keeps.
 
@@ -943,28 +1267,40 @@ def training_params(
     rather than as the value the caller happened to pass, so a run's
     page cannot suggest that something frozen was trained.
 
-    ``interactive_loss`` is absent from runs logged before 2026-11-09.
-    Those runs had it on unless only the instance decoder trained.
+    ``interactive_loss`` is absent from runs logged before 2026-11-09,
+    and the ``peft_*`` and encoder entries from runs logged before
+    2026-11-12. The former had it on unless only the instance decoder
+    trained; all of them adapted with low-rank corrections.
+
+    The ``lora_*`` entries keep their names and values for low-rank
+    runs, so old and new runs stay comparable, and are ``None`` for a
+    method that adds no correction.
 
     Returns
     -------
     dict of str to Any
     """
+    low_rank = peft_method == "lora" and peft_kwargs is not None
     return {
         "model_type": model_type,
         "n_epochs": n_epochs,
         "steps_per_epoch": steps_per_epoch,
         "n_val_images": n_val_images,
-        "lora_rank": peft_kwargs["rank"],
-        "lora_update_matrices": ",".join(peft_kwargs["update_matrices"]),
+        "peft_method": peft_method,
+        "peft_layers": layers_label(peft_layers),
+        "lora_rank": peft_kwargs["rank"] if low_rank else None,
+        "lora_update_matrices": (
+            ",".join(peft_kwargs["update_matrices"]) if low_rank else None
+        ),
         "lora_attention_layers": (
             ",".join(map(str, peft_kwargs["attention_layers_to_update"]))
             or "all"
-        ),
+        ) if low_rank else None,
         "trainable": trainable,
         "interactive_loss": interactive_loss,
         "lora_learning_rate": lora_learning_rate,
         "decoder_learning_rate": decoder_learning_rate,
+        "encoder_learning_rate": encoder_learning_rate,
         "scheduler": "cosine",
         "scheduler_horizon_epochs": scheduler_horizon_epochs,
         "decoder_batchnorm_momentum": decoder_batchnorm_momentum,
@@ -978,6 +1314,7 @@ def training_params(
         "min_fragment_area_px2": A_MIN_FRAGMENT_PX2,
         "n_lora_parameters": n_lora_parameters,
         "n_decoder_parameters": n_decoder_parameters,
+        "n_encoder_parameters": n_encoder_parameters,
     }
 
 

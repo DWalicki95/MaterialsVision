@@ -23,6 +23,7 @@ def no_model_work(monkeypatch):
 
     monkeypatch.setattr(cli, "prepare_geometry", refuse)
     monkeypatch.setattr(cli, "score_checkpoint", refuse)
+    monkeypatch.setattr(cli, "score_pretrained", refuse)
 
 
 def _snapshots(tmp_path, *names):
@@ -181,3 +182,60 @@ def test_the_report_breaks_the_figures_down_by_formulation(tmp_path):
         "material=AS", "material=K",
     ]
     assert "per_scale_bin" in entry
+
+
+def test_nothing_to_score_is_refused(no_model_work):
+    assert cli.main([]) == cli.EXIT_FAILED
+
+
+def test_a_pretrained_model_alone_is_enough_to_score(no_model_work):
+    with pytest.raises(ReachedModelWork):
+        cli.main(["--pretrained", "vit_l_lm"])
+
+
+def test_the_pretrained_model_is_scored_without_any_checkpoint(
+    monkeypatch, tmp_path
+):
+    scored = []
+
+    def fake_score(model_type, args, settings):
+        scored.append(model_type)
+        return []
+
+    monkeypatch.setattr(cli, "prepare_geometry", lambda: None)
+    monkeypatch.setattr(cli, "score_pretrained", fake_score)
+    monkeypatch.setattr(
+        cli, "score_checkpoint",
+        lambda *a, **k: pytest.fail("no checkpoint was asked for"),
+    )
+
+    status = cli.main([
+        "--pretrained", "vit_l_lm", "--no-mlflow",
+        "--out", str(tmp_path / "zero_shot.json"),
+    ])
+
+    assert status == cli.EXIT_OK
+    assert scored == ["vit_l_lm"]
+
+
+def test_prompt_based_figures_never_reach_mlflow():
+    args = cli.parse_args(["--checkpoint", "x.pt",
+                           "--segmentation-mode", "apg"])
+
+    assert cli.mlflow_refusal(args) is not None
+
+
+def test_watershed_figures_still_reach_mlflow():
+    args = cli.parse_args(["--checkpoint", "x.pt"])
+
+    assert cli.mlflow_refusal(args) is None
+
+
+@pytest.mark.parametrize("mode, expected", [
+    ("ais", "run/epoch-3"), ("apg", "run/epoch-3[apg]"),
+])
+def test_only_the_prompt_based_path_is_named_in_the_report(mode, expected):
+    args = cli.parse_args(["--checkpoint", "x.pt",
+                           "--segmentation-mode", mode])
+
+    assert cli.result_stem("run/epoch-3", args) == expected
