@@ -1,10 +1,12 @@
 """Registry of per-series filename parsers.
 
-The AS and VAB/K series use unrelated filename conventions: AS encodes
-magnification in the name and never has a cross-section; VAB/K never
-encodes magnification but always repeats formulation+cross-section
-twice. A single regex covering both would be unreadable and fragile,
-so each series gets its own ``SeriesProfile`` implementation bundling:
+The AS, VAB/K and PIR series use unrelated filename conventions: AS
+encodes magnification in the name and never has a cross-section; VAB/K
+never encodes magnification but always repeats formulation+cross-
+section twice; PIR encodes neither formulation nor cross-section, only
+a folder code that ``PIRProfile.FOLDERS`` resolves. A single regex
+covering them all would be unreadable and fragile, so each series gets
+its own ``SeriesProfile`` implementation bundling:
 the filename parser, the sidecar path convention, and a lightweight
 series-consistency check.
 
@@ -310,9 +312,127 @@ class VABProfile(SeriesProfile):
         return bool(self._HINT_RE.match(filename))
 
 
+class PIRProfile(SeriesProfile):
+    """Filename convention for the PIR series (rigid PIR foams with a
+    cocoa-husk filler, TM3000, 2025).
+
+    Pattern::
+
+        [<ls_hash>-]<CODE>_<MAG>[<sep><N>|<suffix>]
+
+    ``CODE`` is a two-digit folder code (``01`` ... ``08``) and is the
+    only place the formulation and cross-section are recorded, so they
+    come from ``FOLDERS`` rather than from the name. ``sep`` is ``-``
+    or ``_`` depending on the folder. A base image has no ``N``; one
+    folder spells its base image ``08_40szw`` instead, which is kept
+    as a nonstandard name for the same base image.
+
+    ``MAG`` is not reliable: ``03_40_1`` and ``03_40_2`` were taken at
+    50x, as their sidecars and burned-in data panels both show. The
+    sidecar wins whenever there is one; the images without a sidecar
+    were all checked to be at the 40x their name states.
+    """
+
+    name = "PIR"
+
+    # Folder code -> (sidecar folder, formulation, canonical cross-
+    # section). Formulations name the filler content in php after the
+    # sidecar's own Directory field (SZW, SZW-5, SZW-15, SZW-25), which
+    # is authoritative where the folder name disagrees with it: folder
+    # 08 says "z_napelniaczem" but its sidecars point at SZW (no
+    # filler), the perpendicular pair of folder 01. Folder 05 is a
+    # byte-for-byte copy of 02 and is excluded in the configuration, so
+    # it has no entry here.
+    FOLDERS: dict[str, tuple[str, str, str]] = {
+        "01": ("sztywne_pianka_bez_napelniacza_rownolegle", "PIR0",
+               "rownolegly"),
+        "02": ("sztywne_prostopadle_15php_kakao", "PIR15", "prostopadly"),
+        "03": ("sztywne_prostopadle_25php_kakao", "PIR25", "prostopadly"),
+        "04": ("sztywne_prostopadle_5proc_napelniacza_kakao", "PIR5",
+               "prostopadly"),
+        "06": ("sztywne_rownolegle_25php_kakao", "PIR25", "rownolegly"),
+        "07": ("sztywne_rownolegle_5php_kakao", "PIR5", "rownolegly"),
+        "08": ("sztywne_z_napelniaczem_luski_kakao", "PIR0",
+               "prostopadly"),
+    }
+
+    _PIR_RE = re.compile(
+        rf"^{_LS_PREFIX}(?P<code>\d{{2}})_(?P<mag>\d+)"
+        r"(?:(?P<sep>[-_])(?P<num>\d+)|(?P<suffix>[a-z]+))?$"
+    )
+    _HINT_RE = re.compile(rf"^{_LS_PREFIX}\d{{2}}_\d")
+
+    def parse(
+        self,
+        filename: str,
+        *,
+        collector: IssueCollector,
+        fuzzy_cutoff: float = 0.85,
+    ) -> ParsedName:
+        match = self._match(filename)
+        code = match.group("code")
+        if code not in self.FOLDERS:
+            raise FilenameParseError(
+                f"PIR folder code {code!r} has no FOLDERS entry "
+                f"(known: {sorted(self.FOLDERS)}): {filename}"
+            )
+        _, formulation, cross_section = self.FOLDERS[code]
+        num = match.group("num")
+        sample = num if num is not None else "0"
+
+        return ParsedName(
+            image_id=f"{formulation}_{cross_section}_{sample}",
+            series=self.name,
+            material="PIR",
+            formulation=formulation,
+            cross_section=cross_section,
+            magnification_from_name=int(match.group("mag")),
+            sample_id=sample,
+            source_filename=filename,
+            is_nonstandard=match.group("suffix") is not None,
+            cross_section_redundancy_ok=None,
+        )
+
+    def sidecar_candidates(self, parsed: ParsedName) -> tuple[Path, ...]:
+        match = self._match(parsed.source_filename)
+        folder, _, _ = self.FOLDERS[match.group("code")]
+        stem = match.group("mag")
+        if match.group("num") is not None:
+            stem += match.group("sep") + match.group("num")
+        return (Path(folder) / f"{stem}.txt",)
+
+    def detect_series(self, filename: str) -> bool:
+        return bool(self._HINT_RE.match(filename))
+
+    def _match(self, filename: str) -> re.Match:
+        """Match ``filename`` against the PIR pattern or raise.
+
+        Parameters
+        ----------
+        filename : str
+
+        Returns
+        -------
+        re.Match
+
+        Raises
+        ------
+        FilenameParseError
+            If ``filename`` does not match the PIR convention.
+        """
+        match = self._PIR_RE.match(filename)
+        if not match:
+            raise FilenameParseError(
+                f"PIR filename does not match "
+                f"'<code>_<mag>[<sep><n>|<suffix>]': {filename}"
+            )
+        return match
+
+
 PROFILES: dict[str, SeriesProfile] = {
     "AS": ASProfile(),
     "VAB": VABProfile(),
+    "PIR": PIRProfile(),
 }
 
 

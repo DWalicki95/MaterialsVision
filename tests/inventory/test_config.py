@@ -146,3 +146,52 @@ sources:
 
     with pytest.raises(ConfigError, match="avoid_annotators"):
         load_config(config_path)
+
+
+def _write_yaml_with_source_key(tmp_path, valid_layout, line):
+    images_dir, ls_json, sem_dir = valid_layout
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"""
+manifest_version: v1
+output_dir: {tmp_path / "out"}
+mask_root: {tmp_path / "masks"}
+sources:
+  - series: AS
+    images_dir: {images_dir}
+    label_studio_json: {ls_json}
+    sem_metadata_dirs:
+      - {sem_dir}
+    {line}
+""", encoding="utf-8")
+    return config_path
+
+
+def test_load_config_exclude_images_defaults_empty(tmp_path, valid_layout):
+    images_dir, ls_json, sem_dir = valid_layout
+    config_path = _write_yaml(tmp_path, images_dir, ls_json, sem_dir)
+
+    config = load_config(config_path)
+
+    assert config.sources[0].exclude_images == ()
+
+
+def test_load_config_exclude_images_parsed(tmp_path, valid_layout):
+    config_path = _write_yaml_with_source_key(
+        tmp_path, valid_layout, 'exclude_images: ["05_*", "x.jpg"]'
+    )
+
+    config = load_config(config_path)
+
+    assert config.sources[0].exclude_images == ("05_*", "x.jpg")
+
+
+@pytest.mark.parametrize("value", ['"05_*"', '[""]', "[5]"])
+def test_load_config_exclude_images_invalid_raises(
+    tmp_path, valid_layout, value
+):
+    config_path = _write_yaml_with_source_key(
+        tmp_path, valid_layout, f"exclude_images: {value}"
+    )
+
+    with pytest.raises(ConfigError, match="exclude_images"):
+        load_config(config_path)

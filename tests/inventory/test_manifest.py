@@ -9,6 +9,76 @@ from data_prep.inventory.manifest import (MANIFEST_COLUMNS, build_manifest,
                                           write_artifacts)
 
 
+class TestBuildManifestPIR:
+    def test_excluded_image_is_neither_row_nor_rejection(
+        self, pir_dataset
+    ):
+        result = build_manifest(pir_dataset.config)
+
+        assert len(result.manifest) == pir_dataset.expected_rows
+        assert len(result.rejected) == pir_dataset.expected_rejections
+        excluded = [
+            i for i in result.issues if i.code == "excluded_by_config"
+        ]
+        assert [i.image_ref for i in excluded] == [
+            "cccccccc-05_40_1.png"
+        ]
+        assert (
+            len(result.manifest) + len(result.rejected) + len(excluded)
+            == pir_dataset.total_tasks
+        )
+
+    def test_sidecar_checked_against_series_calibration(
+        self, pir_dataset
+    ):
+        result = build_manifest(pir_dataset.config)
+
+        row = result.manifest.set_index("image_id").loc[
+            "PIR0_rownolegly_0"
+        ]
+        assert row["pixel_size_source"] == "sem_sidecar"
+        assert row["pixel_size_um"] == pytest.approx(3.30078)
+        assert row["microscope"] == "M1"
+        assert pd.isna(row["pixel_size_consistency"])
+        codes = {i.code for i in result.issues}
+        assert "pixel_size_inconsistent" not in codes
+        assert "microscope_product_conflict" not in codes
+
+    def test_missing_sidecar_falls_back_to_series_calibration(
+        self, pir_dataset
+    ):
+        result = build_manifest(pir_dataset.config)
+
+        row = result.manifest.set_index("image_id").loc[
+            "PIR0_rownolegly_3"
+        ]
+        assert row["pixel_size_source"] == "nominal_dict"
+        assert row["magnification_source"] == "filename"
+        # The 2025 table, not the 2023 TM3000 one (3.24023) AS uses.
+        assert row["pixel_size_um"] == pytest.approx(3.300781)
+        assert row["microscope"] == "M1"
+        assert row["microscope_source"] == "series_map"
+
+    def test_panel_left_in_file_is_cropped(self, pir_dataset):
+        result = build_manifest(pir_dataset.config)
+
+        # 260-row fixture frames with an 80-row panel
+        for _, row in result.manifest.iterrows():
+            assert row["load_crop_bbox"] == "0,0,128,180"
+            assert row["content_bbox"] == row["load_crop_bbox"]
+
+    def test_exclusion_lost_aborts_instead_of_passing(self, pir_dataset):
+        source = dataclasses.replace(
+            pir_dataset.config.sources[0], exclude_images=()
+        )
+        config = dataclasses.replace(
+            pir_dataset.config, sources=(source,)
+        )
+
+        with pytest.raises(ManifestBuildAborted):
+            build_manifest(config)
+
+
 class TestBuildManifestMiniDataset:
     def test_row_and_rejection_counts(self, mini_dataset):
         result = build_manifest(mini_dataset.config)

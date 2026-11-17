@@ -19,11 +19,14 @@ from PIL import Image, ImageDraw
 from data_prep.inventory.issues import Issue
 from data_prep.inventory.manifest import (INSTRUMENT_TO_MICROSCOPE,
                                           PANEL_HEIGHT_ROWS_BY_MICROSCOPE,
+                                          PANEL_HEIGHT_ROWS_BY_SERIES,
                                           Q_REFERENCE_UM,
                                           SCALE_BIN_COARSE_MIN_UM,
                                           SCALE_BIN_FINE_MIN_UM,
+                                          SERIES_TO_CALIBRATION,
                                           InventoryResult)
 from data_prep.inventory.models import InventoryConfig
+from data_prep.inventory.sem_sidecar import CALIBRATION_PIXEL_SIZE_CONSTANTS_NM
 from data_prep.run_provenance import (git_commit, library_versions,
                                       python_version, sha256_of)
 from materials_vision.quantitative_analysis.stats_utils import \
@@ -356,6 +359,7 @@ def write_run_metadata(
                 "sem_metadata_dirs": [
                     str(d) for d in s.sem_metadata_dirs
                 ],
+                "exclude_images": list(s.exclude_images),
             }
             for s in config.sources
         ],
@@ -373,13 +377,17 @@ def write_run_metadata(
         # here so the manifest stays self-describing even as these
         # values evolve across manifest_version bumps.
         "derivation_rules": {
-            "version": "v2",
+            "version": "v3",
             "scale_bin_coarse_min_um": SCALE_BIN_COARSE_MIN_UM,
             "scale_bin_fine_min_um": SCALE_BIN_FINE_MIN_UM,
             "q_reference_um": Q_REFERENCE_UM,
             "instrument_to_microscope": INSTRUMENT_TO_MICROSCOPE,
             "panel_height_rows_by_microscope":
                 PANEL_HEIGHT_ROWS_BY_MICROSCOPE,
+            "panel_height_rows_by_series": PANEL_HEIGHT_ROWS_BY_SERIES,
+            "series_to_calibration": SERIES_TO_CALIBRATION,
+            "calibration_pixel_size_constants_nm":
+                CALIBRATION_PIXEL_SIZE_CONSTANTS_NM,
         },
     }
 

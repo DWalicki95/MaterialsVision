@@ -1,10 +1,12 @@
 """Tests for data_prep.inventory.series_profiles."""
+from pathlib import Path
+
 import pytest
 
 from data_prep.inventory.issues import (FilenameParseError, IssueCollector,
                                         IssueLevel)
-from data_prep.inventory.series_profiles import (ASProfile, VABProfile,
-                                                 get_profile)
+from data_prep.inventory.series_profiles import (ASProfile, PIRProfile,
+                                                 VABProfile, get_profile)
 
 
 @pytest.fixture
@@ -215,8 +217,94 @@ class TestVABProfile:
         )
 
 
+class TestPIRProfile:
+    def test_base_image(self, collector):
+        parsed = PIRProfile().parse("5cad7728-01_40", collector=collector)
+        assert parsed.image_id == "PIR0_rownolegly_0"
+        assert parsed.series == "PIR"
+        assert parsed.material == "PIR"
+        assert parsed.formulation == "PIR0"
+        assert parsed.cross_section == "rownolegly"
+        assert parsed.magnification_from_name == 40
+        assert parsed.sample_id == "0"
+        assert parsed.is_nonstandard is False
+        assert collector.all() == []
+
+    @pytest.mark.parametrize("filename,image_id", [
+        ("6d0ac775-01_40-1", "PIR0_rownolegly_1"),
+        ("dad069e8-02_40_1", "PIR15_prostopadly_1"),
+        ("eaee385a-04_40-1", "PIR5_prostopadly_1"),
+        ("3963b44d-07_40-1", "PIR5_rownolegly_1"),
+    ])
+    def test_both_separators(self, collector, filename, image_id):
+        parsed = PIRProfile().parse(filename, collector=collector)
+        assert parsed.image_id == image_id
+        assert parsed.sample_id == "1"
+        assert parsed.is_nonstandard is False
+
+    def test_folder_08_is_unfilled_perpendicular(self, collector):
+        # The folder name says "z_napelniaczem", its sidecars say SZW
+        # (no filler); the sidecars win.
+        parsed = PIRProfile().parse("6dcc15ac-08_40-1", collector=collector)
+        assert parsed.formulation == "PIR0"
+        assert parsed.cross_section == "prostopadly"
+
+    def test_suffixed_base_image_is_nonstandard(self, collector):
+        parsed = PIRProfile().parse(
+            "c29de270-08_40szw", collector=collector
+        )
+        assert parsed.image_id == "PIR0_prostopadly_0"
+        assert parsed.sample_id == "0"
+        assert parsed.is_nonstandard is True
+
+    def test_folder_codes_give_unique_image_ids(self, collector):
+        profile = PIRProfile()
+        ids = {
+            profile.parse(f"{code}_40_1", collector=collector).image_id
+            for code in profile.FOLDERS
+        }
+        assert len(ids) == len(profile.FOLDERS)
+
+    def test_unmapped_folder_code_raises(self, collector):
+        # 05 is excluded in the configuration; reaching the parser
+        # means the exclusion was lost, which must not pass silently.
+        with pytest.raises(FilenameParseError, match="'05'"):
+            PIRProfile().parse("a205cfb7-05_40_1", collector=collector)
+
+    def test_unparsable_name_raises(self, collector):
+        with pytest.raises(FilenameParseError):
+            PIRProfile().parse("not_a_pir_filename", collector=collector)
+
+    @pytest.mark.parametrize("filename,expected", [
+        ("5cad7728-01_40",
+         Path("sztywne_pianka_bez_napelniacza_rownolegle") / "40.txt"),
+        ("6d0ac775-01_40-1",
+         Path("sztywne_pianka_bez_napelniacza_rownolegle") / "40-1.txt"),
+        ("dad069e8-02_40_1",
+         Path("sztywne_prostopadle_15php_kakao") / "40_1.txt"),
+        ("c29de270-08_40szw",
+         Path("sztywne_z_napelniaczem_luski_kakao") / "40.txt"),
+    ])
+    def test_sidecar_candidates(self, collector, filename, expected):
+        profile = PIRProfile()
+        parsed = profile.parse(filename, collector=collector)
+        assert profile.sidecar_candidates(parsed) == (expected,)
+
+    def test_detect_series(self):
+        profile = PIRProfile()
+        assert profile.detect_series("5cad7728-01_40")
+        assert profile.detect_series("02_40_3")
+        assert not profile.detect_series(
+            "00ae5c27-AS26_40_15_jpg.rf.hash_image"
+        )
+        assert not profile.detect_series(
+            "5ad2e566-K3_rownolegle_K3_r_m004"
+        )
+
+
 def test_get_profile_registry():
     assert isinstance(get_profile("AS"), ASProfile)
     assert isinstance(get_profile("VAB"), VABProfile)
+    assert isinstance(get_profile("PIR"), PIRProfile)
     with pytest.raises(KeyError):
         get_profile("unknown")

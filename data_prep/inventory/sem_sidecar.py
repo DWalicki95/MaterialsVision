@@ -28,6 +28,14 @@ INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM: dict[str, float] = {
     "SU8000": 99218.75,
 }
 
+# The same constant per calibration rather than per instrument: a
+# calibration is a key of ``pixel_sizes_by_instrument`` in
+# sem_calibration.yaml. The TM3000 was recalibrated
+CALIBRATION_PIXEL_SIZE_CONSTANTS_NM: dict[str, float] = {
+    **INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM,
+    "TM3000_2025": 132031.25,
+}
+
 _DATASIZE_RE = re.compile(r"^(\d+)\s*[xX]\s*(\d+)$")
 
 
@@ -113,15 +121,17 @@ def interpret_sidecar(
 
 
 def check_pixel_size_consistency(
-    rec: SidecarRecord, tolerance: float
+    rec: SidecarRecord,
+    tolerance: float,
+    expected_product_nm: Optional[float] = None,
 ) -> list[str]:
     """Sanity-check a sidecar's pixel size against independent evidence.
 
     Two checks, both skipped (not failed) when the inputs needed are
     missing:
 
-    1. ``PixelSize x Magnification`` must match the sidecar's
-       instrument constant within ``tolerance`` (relative).
+    1. ``PixelSize x Magnification`` must match the expected constant
+       within ``tolerance`` (relative).
     2. The scale bar length implied by ``MicronMarker / PixelSize``
        must fall within 5-95% of the acquisition width - a sanity
        range, not a precise bound.
@@ -131,6 +141,12 @@ def check_pixel_size_consistency(
     rec : SidecarRecord
     tolerance : float
         Relative tolerance for the instrument-constant check.
+    expected_product_nm : float, optional
+        Constant to check ``PixelSize x Magnification`` against. When
+        omitted, the sidecar's own instrument constant from
+        ``INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM`` is used; a caller that
+        knows the calibration the image was taken under passes that
+        calibration's constant instead.
 
     Returns
     -------
@@ -139,12 +155,16 @@ def check_pixel_size_consistency(
     """
     codes: list[str] = []
 
+    if expected_product_nm is None:
+        expected_product_nm = INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM.get(
+            rec.instrument or ""
+        )
     if (
-        rec.instrument in INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM
+        expected_product_nm is not None
         and rec.pixel_size_raw_nm is not None
         and rec.magnification is not None
     ):
-        expected = INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM[rec.instrument]
+        expected = expected_product_nm
         actual = rec.pixel_size_raw_nm * rec.magnification
         if abs(actual - expected) / expected > tolerance:
             codes.append("pixel_size_magnification_product_mismatch")

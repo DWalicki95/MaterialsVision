@@ -5,7 +5,9 @@ global validation and deterministic CSV writing.
 This is the orchestrator: it wires together every other module in
 ``data_prep.inventory``.
 """
+import fnmatch
 import logging
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,16 +33,28 @@ from data_prep.inventory.models import (InventoryConfig, ParsedName,
                                         SidecarRecord, SourceConfig)
 from data_prep.inventory.nonimage_region import detect_nonimage_region
 from data_prep.inventory.sem_sidecar import (
-    INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM, check_pixel_size_consistency,
-    find_sidecar, interpret_sidecar, parse_sidecar_file)
+    CALIBRATION_PIXEL_SIZE_CONSTANTS_NM, INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM,
+    check_pixel_size_consistency, find_sidecar, interpret_sidecar,
+    parse_sidecar_file)
 from data_prep.inventory.series_profiles import get_profile
 from materials_vision.utils import load_pixel_sizes_by_instrument
 
 logger = logging.getLogger(__name__)
 
-# Which nominal instrument's pixel-size table to fall back to when a
-# series has no sidecar at all
-SERIES_TO_INSTRUMENT: dict[str, str] = {"AS": "TM3000", "VAB": "SU8000"}
+# The physical instrument each series was acquired on
+SERIES_TO_INSTRUMENT: dict[str, str] = {
+    "AS": "TM3000", "VAB": "SU8000", "PIR": "TM3000",
+}
+
+# Which calibration (a key of pixel_sizes_by_instrument in
+# sem_calibration.yaml and of CALIBRATION_PIXEL_SIZE_CONSTANTS_NM) a
+# series' pixel sizes follow: the fallback table for rows with no
+# sidecar, and the constant PixelSize x Magnification is checked
+# against. It is the instrument's own calibration unless overridden:
+# PIR was taken on the same TM3000 as AS, after a recalibration.
+SERIES_TO_CALIBRATION: dict[str, str] = {
+    **SERIES_TO_INSTRUMENT, "PIR": "TM3000_2025",
+}
 
 # InstructName (SEM control software identifier) -> logical microscope
 # label. TM3000 and SU8000 are the two physical microscopes used to
@@ -57,19 +71,11 @@ _MICROSCOPE_FALLBACK_BY_SERIES: dict[str, str] = {
     for series, instrument in SERIES_TO_INSTRUMENT.items()
 }
 
-# pixel_size_um x magnification is a hardware constant for a given
-# microscope (field of view scales inversely with magnification), so
-# this product should land near the same value regardless of which
-# image it's measured on. Used only as a sanity check on an
-# already-resolved `microscope` value, never to assign it - magnifi-
-# cation itself is sometimes missing or comes from an unreliable
-# source. Derived from sem_sidecar.INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM
-# (the same constant used to validate a sidecar's own internal
-# consistency) so the two checks cannot silently drift apart.
-MICROSCOPE_PRODUCT_UM: dict[str, float] = {
-    INSTRUMENT_TO_MICROSCOPE[instrument]: constant_nm / 1000.0
-    for instrument, constant_nm
-    in INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM.items()
+_LS_UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{8}-")
+
+_MICROSCOPE_TO_INSTRUMENT: dict[str, str] = {
+    microscope: instrument
+    for instrument, microscope in INSTRUMENT_TO_MICROSCOPE.items()
 }
 
 # Height, in rows, of the bottom data panel (scale bar / acquisition
@@ -82,6 +88,12 @@ MICROSCOPE_PRODUCT_UM: dict[str, float] = {
 # dimensions (e.g. a `dimension_outlier` row), and for the smaller
 # synthetic images used in tests.
 PANEL_HEIGHT_ROWS_BY_MICROSCOPE: dict[str, int] = {"M1": 0, "M2": 70}
+
+# Series whose export differs from its microscope's rule above. The
+# M1 value of 0 describes how AS was exported, not the TM3000 itself:
+# PIR comes from the same microscope with its 80-row panel (rows
+# 960-1039 of a 1280x1040 frame) still in the file.
+PANEL_HEIGHT_ROWS_BY_SERIES: dict[str, int] = {"PIR": 80}
 
 # Pixel-size thresholds (um/px) separating coarse-scale images from
 # fine-scale ones, with a gap below the fine threshold reserved for
@@ -322,8 +334,18 @@ def _process_source(
     n_rejected_before = len(rejection_log)
     matched_sidecars: set[Path] = set()
 
+    n_excluded = 0
     for task in sorted(tasks, key=lambda t: t["id"]):
         filename = _task_filename(task)
+        pattern = _matching_exclusion(filename, source.exclude_images)
+        if pattern is not None:
+            collector.add(
+                IssueLevel.INFO, "excluded_by_config", filename,
+                f"task id={task.get('id')} matches exclude_images "
+                f"pattern {pattern!r}",
+            )
+            n_excluded += 1
+            continue
         if filename not in files:
             issue = collector.add(
                 IssueLevel.ERROR, "task_without_image", filename,
@@ -347,12 +369,13 @@ def _process_source(
     n_processed = (
         (len(rows) - n_rows_before)
         + (len(rejection_log) - n_rejected_before)
+        + n_excluded
     )
     if n_processed != len(tasks):
         raise ManifestSchemaError(
             f"[{source.series}] processed {n_processed} of "
-            f"{len(tasks)} tasks - rows + rejections must equal the "
-            f"number of Label Studio tasks"
+            f"{len(tasks)} tasks - rows + rejections + exclusions must "
+            f"equal the number of Label Studio tasks"
         )
 
     _report_orphan_sidecars(source, matched_sidecars, collector)
@@ -454,7 +477,10 @@ def _process_one_image(
                 f"formulation={parsed.formulation!r}",
             )
         codes = check_pixel_size_consistency(
-            sidecar, config.pixel_size_tolerance
+            sidecar, config.pixel_size_tolerance,
+            expected_product_nm=_expected_product_nm(
+                parsed.series, sidecar.instrument
+            ),
         )
         if codes:
             pixel_size_consistency = ";".join(codes)
@@ -479,16 +505,17 @@ def _process_one_image(
         config.pixel_size_tolerance, collector,
     )
     load_crop_bbox = _resolve_load_crop_bbox(
-        microscope, props.width_px, props.height_px
+        parsed.series, microscope, props.width_px, props.height_px
     )
     if load_crop_bbox is not None and load_crop_bbox != region.content_bbox:
         issue = collector.add(
             IssueLevel.FATAL, "content_bbox_crop_mismatch",
             parsed.image_id,
             f"detected content_bbox={region.content_bbox} vs frozen "
-            f"load_crop_bbox={load_crop_bbox} (microscope="
-            f"{microscope!r}); PANEL_HEIGHT_ROWS_BY_MICROSCOPE may be "
-            f"stale for this data",
+            f"load_crop_bbox={load_crop_bbox} (series="
+            f"{parsed.series!r}, microscope={microscope!r}); "
+            f"PANEL_HEIGHT_ROWS_BY_SERIES/_BY_MICROSCOPE may be stale "
+            f"for this data",
         )
         return None, issue
     scale_bin = _scale_bin(pixel_size_um)
@@ -572,6 +599,20 @@ def _task_filename(task: Mapping[str, Any]) -> str:
     return str(task["data"]["image"]).rsplit("/", 1)[-1]
 
 
+def _matching_exclusion(
+    filename: str, patterns: tuple[str, ...],
+) -> Optional[str]:
+    """Return the first `exclude_images` pattern `filename` matches,
+    or None. Matched against the name without its Label Studio upload
+    prefix, so a pattern names the file as it was before upload rather
+    than an export-specific hash."""
+    bare = _LS_UPLOAD_PREFIX_RE.sub("", filename)
+    for pattern in patterns:
+        if fnmatch.fnmatchcase(bare, pattern):
+            return pattern
+    return None
+
+
 def _sidecar_name_consistent(
     parsed: ParsedName, sidecar: SidecarRecord
 ) -> bool:
@@ -633,10 +674,10 @@ def _resolve_pixel_size(
         pixel_size_um: Optional[float] = sidecar.pixel_size_um
         pixel_size_source = "sem_sidecar"
     elif magnification is not None:
-        nominal_instrument = SERIES_TO_INSTRUMENT.get(parsed.series)
+        calibration = SERIES_TO_CALIBRATION.get(parsed.series)
         nominal_table = (
-            pixel_sizes_by_instrument.get(nominal_instrument, {})
-            if nominal_instrument is not None
+            pixel_sizes_by_instrument.get(calibration, {})
+            if calibration is not None
             else {}
         )
         pixel_size_um = nominal_table.get(magnification)
@@ -720,16 +761,20 @@ def _check_microscope_product(
 ) -> None:
     """Sanity-check the resolved `microscope` against an independent
     physical fact: pixel_size_um x magnification is a hardware
-    constant for a given microscope (`MICROSCOPE_PRODUCT_UM`). A
+    constant for a given microscope calibration (field of view scales
+    inversely with magnification; see `_expected_product_nm`). A
     mismatch only flags the row for review - it never changes
     `microscope` itself, since the sidecar instrument or the series
     fallback are more trustworthy sources. Skipped entirely when
     either input is unknown."""
     if pixel_size_um is None or magnification is None:
         return
-    expected_um = MICROSCOPE_PRODUCT_UM.get(microscope)
-    if expected_um is None:
+    expected_nm = _expected_product_nm(
+        parsed.series, _MICROSCOPE_TO_INSTRUMENT.get(microscope)
+    )
+    if expected_nm is None:
         return
+    expected_um = expected_nm / 1000.0
     actual_um = pixel_size_um * magnification
     if abs(actual_um - expected_um) / expected_um > tolerance:
         collector.add(
@@ -740,19 +785,44 @@ def _check_microscope_product(
         )
 
 
+def _expected_product_nm(
+    series: str, instrument: Optional[str],
+) -> Optional[float]:
+    """PixelSize[nm] x Magnification expected for an image of `series`
+    taken on `instrument`. The series' own calibration applies when
+    the instrument is the one the series was acquired on; any other
+    instrument (a misattributed sidecar) is checked against that
+    instrument's nominal constant, as before calibrations were
+    distinguished. None when the instrument has no known constant.
+    Both sanity checks - the sidecar's internal consistency and the
+    resolved microscope's - go through here so they cannot drift
+    apart."""
+    if instrument is None:
+        return None
+    if SERIES_TO_INSTRUMENT.get(series) == instrument:
+        return CALIBRATION_PIXEL_SIZE_CONSTANTS_NM.get(
+            SERIES_TO_CALIBRATION[series]
+        )
+    return INSTRUMENT_PIXEL_SIZE_CONSTANTS_NM.get(instrument)
+
+
 def _resolve_load_crop_bbox(
-    microscope: Optional[str], width_px: int, height_px: int,
+    series: str, microscope: Optional[str], width_px: int, height_px: int,
 ) -> Optional[tuple[int, int, int, int]]:
     """Compute the bounding box of this image's actual content,
-    excluding the bottom data panel if its microscope has one.
-    Computed from this image's own on-disk dimensions minus
-    `PANEL_HEIGHT_ROWS_BY_MICROSCOPE`, not hardcoded as an absolute
-    pixel pair - see that constant's comment for why. None when
-    `microscope` could not be resolved at all, since there is then no
-    panel height to subtract."""
-    if microscope not in PANEL_HEIGHT_ROWS_BY_MICROSCOPE:
+    excluding the bottom data panel if the file carries one. Computed
+    from this image's own on-disk dimensions minus the panel height
+    (`PANEL_HEIGHT_ROWS_BY_SERIES`, else `PANEL_HEIGHT_ROWS_BY_
+    MICROSCOPE`), not hardcoded as an absolute pixel pair - see those
+    constants' comments for why. None when neither the series nor
+    `microscope` gives a panel height, since there is then nothing to
+    subtract."""
+    if series in PANEL_HEIGHT_ROWS_BY_SERIES:
+        panel_rows = PANEL_HEIGHT_ROWS_BY_SERIES[series]
+    elif microscope in PANEL_HEIGHT_ROWS_BY_MICROSCOPE:
+        panel_rows = PANEL_HEIGHT_ROWS_BY_MICROSCOPE[microscope]
+    else:
         return None
-    panel_rows = PANEL_HEIGHT_ROWS_BY_MICROSCOPE[microscope]
     return (0, 0, width_px, height_px - panel_rows)
 
 

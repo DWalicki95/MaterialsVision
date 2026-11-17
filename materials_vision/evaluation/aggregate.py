@@ -60,8 +60,11 @@ from materials_vision.evaluation.materials import (AreaNumberDensity,
 from materials_vision.evaluation.shape import (InstanceShapes, ShapeErrors,
                                                instance_shapes, shape_errors)
 from materials_vision.evaluation.size_bins import (SIZE_BIN_LABELS,
+                                                   SizeBinDetection,
                                                    SizeBinRecall, SizeBins,
-                                                   recall_per_size_bin)
+                                                   detection_per_size_bin,
+                                                   recall_per_size_bin,
+                                                   size_bin_detection)
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +94,7 @@ class ImageEvaluation:
     boundary : dict
         One :class:`BoundaryScore` per tolerance, keyed by scale.
     size_bins : tuple of SizeBinRecall
+    size_bin_detection : tuple of SizeBinDetection
     shape : ShapeErrors
     porosity : PorosityError
     density : AreaNumberDensity
@@ -102,6 +106,7 @@ class ImageEvaluation:
     match: InstanceMatch
     boundary: dict[float, BoundaryScore]
     size_bins: tuple[SizeBinRecall, ...]
+    size_bin_detection: tuple[SizeBinDetection, ...]
     shape: ShapeErrors
     porosity: PorosityError
     density: AreaNumberDensity
@@ -162,6 +167,9 @@ class AggregateResult:
         and averaged over images respectively.
     size_bin_recall : tuple of SizeBinRecall
         Recall per pore size class, pooled.
+    size_bin_detection : tuple of SizeBinDetection
+        Precision, recall, F1 and matched-pair IoU per size class,
+        pooled; unmatched predictions are classed by their own area.
     median_diameter_error, median_elongation_error : float
     median_angle_error_deg : float
         Per-pair shape errors, pooled as medians over every usable
@@ -210,6 +218,7 @@ class AggregateResult:
     boundary_f1: dict[float, float]
     macro_boundary_f1: dict[float, float]
     size_bin_recall: tuple[SizeBinRecall, ...]
+    size_bin_detection: tuple[SizeBinDetection, ...]
     median_diameter_error: float
     median_elongation_error: float
     median_angle_error_deg: float
@@ -261,6 +270,7 @@ def evaluate_image(
 
     matched_gt_ids = np.array([pair.gt_id for pair in match.pairs],
                               dtype=np.int64)
+    pair_ious = np.array([pair.iou for pair in match.pairs], dtype=float)
     return ImageEvaluation(
         record=record,
         match=match,
@@ -268,6 +278,11 @@ def evaluate_image(
                                  scales=boundary_scales),
         size_bins=recall_per_size_bin(gt_labels, matched_gt_ids, size_bins,
                                       pixel_size_um=pixel_size_um),
+        size_bin_detection=detection_per_size_bin(
+            gt_labels, pred_labels, matched_gt_ids, pair_ious,
+            match.unmatched_pred_ids, size_bins,
+            pixel_size_um=pixel_size_um,
+        ),
         shape=shape_errors(match, gt_shapes, pred_shapes),
         porosity=porosity_error(gt_labels, pred_labels),
         density=area_number_density(gt_labels, pred_labels,
@@ -433,6 +448,7 @@ def _assemble(
         boundary_f1=_pooled_boundary(evaluations),
         macro_boundary_f1=_macro_boundary(evaluations),
         size_bin_recall=_pooled_size_bins(evaluations),
+        size_bin_detection=_pooled_size_bin_detection(evaluations),
         median_diameter_error=_median_of(
             [pair.diameter_error for pair in pairs]
         ),
@@ -560,6 +576,26 @@ def _pooled_size_bins(
             recall=_ratio(n_matched, n_gt),
         ))
     return tuple(pooled)
+
+
+def _pooled_size_bin_detection(
+    evaluations: Sequence[ImageEvaluation],
+) -> tuple[SizeBinDetection, ...]:
+    """Detection per size class, counts pooled over the subset."""
+    return tuple(
+        size_bin_detection(
+            label,
+            sum(e.size_bin_detection[index].n_true_positives
+                for e in evaluations),
+            sum(e.size_bin_detection[index].n_false_positives
+                for e in evaluations),
+            sum(e.size_bin_detection[index].n_false_negatives
+                for e in evaluations),
+            sum(e.size_bin_detection[index].sum_pair_iou
+                for e in evaluations),
+        )
+        for index, label in enumerate(SIZE_BIN_LABELS)
+    )
 
 
 def _density(evaluations: Sequence[ImageEvaluation], side: str) -> float:

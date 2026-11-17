@@ -3,9 +3,11 @@
 # masks are versioned together because the manifest's n_instances and
 # mask_path must describe the same objects; v2 and its masks are left
 # in place, paired with each other.
-manifest_version: v3
-output_dir: /home/dwalicki/dane/manifests/v3
-mask_root: /home/dwalicki/dane/masks/v3
+# v4 is v3 plus the PIR series (rigid PIR foams with cocoa-husk filler,
+# TM3000, 2025); the AS and VAB rows are unchanged from v3.
+manifest_version: v4
+output_dir: /home/dwalicki/dane/manifests/v4
+mask_root: /home/dwalicki/dane/masks/v4
 
 sources:
   - series: AS
@@ -20,10 +22,20 @@ sources:
     sem_metadata_dirs:
       - /mnt/d/dane/SEM/SEM/11.10.2022
       - "/mnt/d/dane/SEM/SEM/20.10.2022 GK"
+  - series: PIR
+    images_dir: /home/dwalicki/dane/dane_treningowe/iteracja_2/unknown/images
+    label_studio_json: /home/dwalicki/dane/dane_treningowe/iteracja_2/unknown/project-31-at-2026-11-15-14-28-e9775845.json
+    sem_metadata_dirs:
+      - /home/dwalicki/dane/dane_treningowe/iteracja_2/unknown
+    # Folder 05 is duplicate of folder 02
+    exclude_images: ["05_*"]
 
 scale_outlier_ratio: 1.5
 fuzzy_cutoff: 0.85
-nonimage_extreme_fraction: 0.90
+# Was 0.90 through v3. One text row of the PIR (TM3000) panel drops to
+# 0.897 after JPEG compression; content rows never exceed 0.18 in any
+# v3 or PIR image, so 0.80 leaves every v3 band unchanged.
+nonimage_extreme_fraction: 0.80
 nonimage_max_band_fraction: 0.35
 overlap_significant_fraction: 0.01
 pixel_size_tolerance: 0.01

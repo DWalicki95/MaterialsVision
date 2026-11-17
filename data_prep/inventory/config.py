@@ -115,12 +115,22 @@ def _load_source(entry: dict) -> SourceConfig:
             f"{avoid_annotators_raw!r}"
         )
 
+    exclude_images_raw = entry.get("exclude_images", [])
+    if not isinstance(exclude_images_raw, list) or not all(
+        isinstance(p, str) and p for p in exclude_images_raw
+    ):
+        raise ConfigError(
+            f"[{series}] exclude_images must be a list of non-empty "
+            f"str: {exclude_images_raw!r}"
+        )
+
     return SourceConfig(
         series=series,
         images_dir=images_dir,
         label_studio_json=label_studio_json,
         sem_metadata_dirs=sem_metadata_dirs,
         avoid_annotators=tuple(avoid_annotators_raw),
+        exclude_images=tuple(exclude_images_raw),
     )
 
 

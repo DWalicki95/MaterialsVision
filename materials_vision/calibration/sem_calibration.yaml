@@ -29,3 +29,8 @@ pixel_sizes_by_instrument:
     130:  0.7632211
     200:  0.4960938
     400:  0.2480469
+  # Same physical TM3000, but images from the PIR series in 2025 have slightly
+  # different pixel sizes due to recalibration.
+  TM3000_2025:
+    40:   3.300781
+    50:   2.640625

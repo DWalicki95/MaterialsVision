@@ -1,9 +1,12 @@
 """Tests for data_prep.inventory.sem_sidecar."""
 from pathlib import Path
 
-from data_prep.inventory.sem_sidecar import (check_pixel_size_consistency,
-                                             interpret_sidecar,
-                                             parse_sidecar_file)
+import pytest
+
+from data_prep.inventory.sem_sidecar import (
+    CALIBRATION_PIXEL_SIZE_CONSTANTS_NM, check_pixel_size_consistency,
+    interpret_sidecar, parse_sidecar_file)
+from materials_vision.utils import load_pixel_sizes_by_instrument
 
 
 class TestParseSidecarFile:
@@ -128,3 +131,39 @@ class TestPixelSizeConsistency:
     def test_missing_fields_skip_checks_without_crashing(self):
         rec = interpret_sidecar({}, path=Path("synthetic.txt"))
         assert check_pixel_size_consistency(rec, tolerance=0.01) == []
+
+    def test_2025_tm3000_sidecar_against_its_own_calibration(self):
+        raw = {
+            "InstructName": "TM3000",
+            "Magnification": "40",
+            "PixelSize": "3300.78",
+            "DataSize": "1280x1040",
+            "MicronMarker": "2000000",
+        }
+        rec = interpret_sidecar(raw, path=Path("synthetic.txt"))
+        # Against the 2023 instrument constant it is 1.9% off...
+        assert "pixel_size_magnification_product_mismatch" in (
+            check_pixel_size_consistency(rec, tolerance=0.01)
+        )
+        # ...and consistent with the calibration it was taken under.
+        assert check_pixel_size_consistency(
+            rec, tolerance=0.01,
+            expected_product_nm=CALIBRATION_PIXEL_SIZE_CONSTANTS_NM[
+                "TM3000_2025"
+            ],
+        ) == []
+
+
+@pytest.mark.parametrize(
+    "calibration", sorted(CALIBRATION_PIXEL_SIZE_CONSTANTS_NM)
+)
+def test_calibration_table_matches_its_product_constant(calibration):
+    # The fallback table in sem_calibration.yaml and the constant the
+    # sidecars are checked against are two records of one fact; a
+    # table entry that drifts from it would hand rows without a
+    # sidecar a pixel size no sidecar of that calibration could have.
+    table = load_pixel_sizes_by_instrument()[calibration]
+    expected_nm = CALIBRATION_PIXEL_SIZE_CONSTANTS_NM[calibration]
+    for magnification, pixel_size_um in table.items():
+        product_nm = pixel_size_um * 1000.0 * magnification
+        assert product_nm == pytest.approx(expected_nm, rel=1e-4)

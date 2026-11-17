@@ -264,3 +264,71 @@ def mini_dataset(tmp_path) -> MiniDataset:
         expected_rejections=1,  # task 5, missing file
         total_tasks=6,  # 5 AS tasks + 1 VAB task
     )
+
+
+_PIR_WIDTH, _PIR_HEIGHT = 128, 260
+# Measured on the real files (rows 960-1039 of 1280x1040), written
+# out rather than read from manifest.PANEL_HEIGHT_ROWS_BY_SERIES so a
+# wrong or missing value there fails the PIR tests instead of being
+# copied into the fixture.
+_PIR_PANEL_ROWS = 80
+_PIR_FOLDER_01 = "sztywne_pianka_bez_napelniacza_rownolegle"
+
+
+@pytest.fixture
+def pir_dataset(tmp_path) -> MiniDataset:
+    """A PIR source as Label Studio exports it: upload-prefixed names,
+    an 80-row data panel left in the file, one image with a 2025
+    TM3000 sidecar, one without a sidecar, and one image from the
+    excluded folder 05."""
+    images = tmp_path / "pir_images"
+    images.mkdir()
+    sem = tmp_path / "pir_sem"
+    w, h = _PIR_WIDTH, _PIR_HEIGHT
+    panel_rows = _PIR_PANEL_ROWS
+
+    with_sidecar = "aaaaaaaa-01_40.png"
+    without_sidecar = "bbbbbbbb-01_40-3.png"
+    excluded = "cccccccc-05_40_1.png"
+    for seed, name in enumerate(
+        (with_sidecar, without_sidecar, excluded)
+    ):
+        _make_gray_image_with_panel(
+            images / name, w, h, panel_rows, seed=seed,
+        )
+    _write_sidecar(sem / _PIR_FOLDER_01 / "40.txt", {
+        "InstructName": "TM3000", "Magnification": 40,
+        "PixelSize": 3300.78, "DataSize": f"{w}x{h}",
+        "MicronMarker": 200000, "Format": "JPG",
+        "ImageName": "40.jpg", "Date": "10/23/2025", "Time": "12:08:40",
+    })
+
+    tasks = [
+        _polygon_task(301 + i, f"/data/upload/31/{name}", w, h, 301 + i)
+        for i, name in enumerate(
+            (with_sidecar, without_sidecar, excluded)
+        )
+    ]
+    ls_json = tmp_path / "pir_export.json"
+    ls_json.write_text(json.dumps(tasks), encoding="utf-8")
+
+    config = InventoryConfig(
+        manifest_version="v1",
+        output_dir=tmp_path / "out",
+        mask_root=tmp_path / "masks",
+        sources=(
+            SourceConfig(
+                series="PIR", images_dir=images,
+                label_studio_json=ls_json,
+                sem_metadata_dirs=(sem,),
+                exclude_images=("05_*",),
+            ),
+        ),
+        nonimage_extreme_fraction=0.80,
+    )
+    return MiniDataset(
+        config=config,
+        expected_rows=2,
+        expected_rejections=0,
+        total_tasks=3,
+    )

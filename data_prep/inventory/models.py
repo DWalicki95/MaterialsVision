@@ -35,6 +35,13 @@ class SourceConfig:
         annotation among the remaining annotators, when one exists.
         Empty by default, which reproduces the unconditional
         latest-wins behaviour.
+    exclude_images : tuple of str
+        ``fnmatch`` patterns of images deliberately left out of the
+        manifest, matched against the task's image filename with the
+        Label Studio upload prefix (``<8 hex>-``) removed, e.g.
+        ``"05_*"``. An excluded image is reported as an INFO issue and
+        skipped before parsing, so it is neither a row nor a
+        rejection. Empty by default.
     """
 
     series: str
@@ -42,6 +49,7 @@ class SourceConfig:
     label_studio_json: Path
     sem_metadata_dirs: tuple[Path, ...]
     avoid_annotators: tuple[int, ...] = ()
+    exclude_images: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
