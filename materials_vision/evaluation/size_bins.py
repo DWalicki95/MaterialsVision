@@ -8,9 +8,15 @@ exactly what one augmentation family is meant to rescue, so the effect
 has to be visible somewhere. Here it is - annotated pores are sorted
 into four size classes and recall is reported in each.
 
-Only recall is reported. Precision has no meaning per size class,
-because a prediction with no counterpart has no annotated size to be
-classified by.
+Recall alone cannot say whether a model that finds more small pores
+also invents more small objects, so a second report,
+:func:`detection_per_size_bin`, gives precision, F1 and the overlap of
+matched pairs per class as well. Its rule for placing each count in a
+class: a matched pair and a missed pore go by the annotated area, an
+unmatched prediction - which has no annotated counterpart - by its
+own area. Each count then lands in exactly one class, so the classes
+decompose the overall true positive, false positive and false negative
+counts.
 
 **Class edges are quartiles of the annotated areas, measured in square
 micrometres.** The unit is the whole point and not a formality. The
@@ -144,6 +150,174 @@ class SizeBinRecall:
     n_gt: int
     n_matched: int
     recall: float
+
+
+@dataclass(frozen=True)
+class SizeBinDetection:
+    """Detection quality within one size class.
+
+    Parameters
+    ----------
+    label : str
+        Class name, ``Q1`` to ``Q4``.
+    n_true_positives : int
+        Matched pairs whose annotated pore falls in this class.
+    n_false_positives : int
+        Unmatched predictions whose own area falls in this class.
+    n_false_negatives : int
+        Unmatched annotated pores in this class.
+    sum_pair_iou : float
+        Sum of the IoU of this class's matched pairs, kept so that
+        classes can be pooled over images into an exact mean.
+    precision, recall, f1 : float
+        From the three counts; ``nan`` where the denominator is zero.
+    mean_pair_iou : float
+        Mean IoU of this class's matched pairs, ``nan`` without pairs.
+        Only pairs at or above the matching threshold exist, so this
+        measures how well found pores are outlined, not detection.
+    """
+
+    label: str
+    n_true_positives: int
+    n_false_positives: int
+    n_false_negatives: int
+    sum_pair_iou: float
+    precision: float
+    recall: float
+    f1: float
+    mean_pair_iou: float
+
+
+def size_bin_detection(
+    label: str,
+    n_true_positives: int,
+    n_false_positives: int,
+    n_false_negatives: int,
+    sum_pair_iou: float,
+) -> SizeBinDetection:
+    """Build one class's report from its counts.
+
+    Parameters
+    ----------
+    label : str
+    n_true_positives, n_false_positives, n_false_negatives : int
+    sum_pair_iou : float
+
+    Returns
+    -------
+    SizeBinDetection
+    """
+    tp, fp, fn = n_true_positives, n_false_positives, n_false_negatives
+    return SizeBinDetection(
+        label=label,
+        n_true_positives=tp,
+        n_false_positives=fp,
+        n_false_negatives=fn,
+        sum_pair_iou=float(sum_pair_iou),
+        precision=_guarded(tp, tp + fp),
+        recall=_guarded(tp, tp + fn),
+        f1=_guarded(2 * tp, 2 * tp + fp + fn),
+        mean_pair_iou=_guarded(sum_pair_iou, tp),
+    )
+
+
+def detection_per_size_bin(
+    gt_labels: np.ndarray,
+    pred_labels: np.ndarray,
+    pair_gt_ids: np.ndarray,
+    pair_ious: np.ndarray,
+    unmatched_pred_ids: np.ndarray,
+    bins: SizeBins,
+    *,
+    pixel_size_um: float,
+) -> tuple[SizeBinDetection, ...]:
+    """Report precision, recall, F1 and pair IoU per size class.
+
+    Parameters
+    ----------
+    gt_labels : np.ndarray
+        Ground-truth instance labels, 0 as background.
+    pred_labels : np.ndarray
+        Predicted instance labels on the same frame.
+    pair_gt_ids : np.ndarray
+        ``gt_id`` of every matched pair.
+    pair_ious : np.ndarray
+        IoU of every matched pair, in the same order.
+    unmatched_pred_ids : np.ndarray
+        Labels of the predictions with no counterpart.
+    bins : SizeBins
+        Frozen class boundaries.
+    pixel_size_um : float
+        Physical size of one pixel, in micrometres.
+
+    Returns
+    -------
+    tuple of SizeBinDetection
+        One entry per class, ordered from smallest to largest.
+
+    Raises
+    ------
+    ValueError
+        If the pair arrays differ in length, or an id is absent from
+        the label image it should come from, which means the match was
+        computed against a different image.
+    """
+    pair_gt = np.asarray(pair_gt_ids, dtype=np.int64).ravel()
+    ious = np.asarray(pair_ious, dtype=float).ravel()
+    if pair_gt.size != ious.size:
+        raise ValueError(
+            f"{pair_gt.size} pair id(s) but {ious.size} IoU value(s)"
+        )
+
+    gt_present, gt_areas = instance_areas_um2(
+        gt_labels, pixel_size_um=pixel_size_um
+    )
+    gt_class = bins.assign(gt_areas)
+    pair_position = _positions(gt_present, pair_gt, "matched gt ids")
+    pair_class = gt_class[pair_position]
+    missed = np.ones(gt_present.size, dtype=bool)
+    missed[pair_position] = False
+    missed_class = gt_class[missed]
+
+    pred_present, pred_areas = instance_areas_um2(
+        pred_labels, pixel_size_um=pixel_size_um
+    )
+    unmatched = np.asarray(unmatched_pred_ids, dtype=np.int64).ravel()
+    unmatched_class = bins.assign(
+        pred_areas[_positions(pred_present, unmatched,
+                              "unmatched prediction ids")]
+    )
+
+    tp = np.bincount(pair_class, minlength=N_SIZE_BINS)
+    iou_sum = np.bincount(pair_class, weights=ious, minlength=N_SIZE_BINS)
+    fp = np.bincount(unmatched_class, minlength=N_SIZE_BINS)
+    fn = np.bincount(missed_class, minlength=N_SIZE_BINS)
+    return tuple(
+        size_bin_detection(SIZE_BIN_LABELS[index], int(tp[index]),
+                           int(fp[index]), int(fn[index]),
+                           float(iou_sum[index]))
+        for index in range(N_SIZE_BINS)
+    )
+
+
+def _positions(
+    present: np.ndarray, ids: np.ndarray, what: str
+) -> np.ndarray:
+    """Locate ids among the sorted labels present, refusing strangers."""
+    position = np.searchsorted(present, ids)
+    if ids.size and (
+        np.any(position >= present.size)
+        or np.any(present[np.minimum(position, present.size - 1)] != ids)
+    ):
+        raise ValueError(f"{what} include labels absent from the image")
+    return position
+
+
+def _guarded(numerator: float, denominator: float) -> float:
+    """Ratio that is ``nan`` rather than zero over an empty class."""
+    if denominator == 0:
+        return float("nan")
+    return float(numerator) / denominator
 
 
 def calibrate_size_bins(areas_um2: np.ndarray) -> SizeBins:

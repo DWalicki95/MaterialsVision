@@ -32,6 +32,13 @@ Examples
     $ python scripts/cellpose/diagnose_cellpose_scale.py \\
         --checkpoint checkpoints/cellpose/selection/\\
 cpsam_lr1e-5_seed20260907/models/cpsam_lr1e-5_seed20260907_epoch_0140
+
+Enlarging instead, for the smallest pores (a diameter below 30), with
+the native variants already measured left out:
+
+    $ python scripts/cellpose/diagnose_cellpose_scale.py \\
+        --checkpoint ... --skip-native --diameters 20 15 10 \\
+        --out checkpoints/cellpose/selection/eval/scale_diagnosis_small.json
 """
 import argparse
 import json
@@ -140,8 +147,48 @@ def summary(evaluations: list) -> dict[str, Any]:
         key: result[key]
         for key in ("f1", "precision", "recall", "pore_count_error",
                     "merges_per_100_gt", "splits_per_100_gt",
-                    "size_bin_recall", "n_images", "n_gt")
+                    "mean_pair_iou", "size_bin_recall",
+                    "size_bin_detection", "n_images", "n_gt")
     }
+
+
+def size_bin_line(figures: dict[str, Any]) -> str:
+    """One log line of F1 and pair IoU per size class.
+
+    Parameters
+    ----------
+    figures : dict
+        One variant's entry from :func:`summary`.
+
+    Returns
+    -------
+    str
+    """
+    return "  ".join(
+        f"{b['label']} F1 {b['f1']:.3f} P {b['precision']:.3f} "
+        f"IoU {b['mean_pair_iou']:.3f}"
+        for b in figures.get("size_bin_detection", [])
+    )
+
+
+def variant_names(
+    niters: tuple, diameters: tuple, skip_native: bool
+) -> list[str]:
+    """Name every variant a run measures, native ones first.
+
+    Parameters
+    ----------
+    niters : tuple of int
+    diameters : tuple of float
+    skip_native : bool
+        Leave out the native-resolution variants.
+
+    Returns
+    -------
+    list of str
+    """
+    native = [] if skip_native else [f"native_niter{n}" for n in niters]
+    return native + [f"diameter{d:g}" for d in diameters]
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -162,11 +209,24 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--size-bins", type=Path, default=DEFAULT_SIZE_BINS)
     parser.add_argument("--n-images", type=int, default=0)
     parser.add_argument(
+        "--diameters", type=float, nargs="*", default=list(DIAMETERS),
+        help="Nominal diameters; below 30 the image is enlarged.",
+    )
+    parser.add_argument(
+        "--skip-native", action="store_true",
+        help="Leave out the native-resolution flow-step variants.",
+    )
+    parser.add_argument(
         "--out", type=Path,
         default=Path("checkpoints/cellpose/selection/eval/"
                      "scale_diagnosis.json"),
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if any(d <= 0 for d in args.diameters):
+        parser.error("--diameters must all be positive.")
+    if args.skip_native and not args.diameters:
+        parser.error("--skip-native with no --diameters measures nothing.")
+    return args
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -187,20 +247,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         stride = len(source) / args.n_images
         positions = [int(step * stride) for step in range(args.n_images)]
 
-    variants = [f"native_niter{n}" for n in NITERS] + [
-        f"diameter{d:g}" for d in DIAMETERS
-    ]
+    diameters = tuple(args.diameters)
+    variants = variant_names(NITERS, diameters, args.skip_native)
     measured: dict[str, list] = {variant: [] for variant in variants}
     started_s = time.perf_counter()
     for count, position in enumerate(positions, 1):
         prepared = source.load(position)
-        flows = predict_flows(model, prepared.image)
-        predictions = {
-            f"native_niter{n}": niter_masks(model, flows, n) for n in NITERS
-        }
+        predictions = {}
+        if not args.skip_native:
+            flows = predict_flows(model, prepared.image)
+            predictions.update({
+                f"native_niter{n}": niter_masks(model, flows, n)
+                for n in NITERS
+            })
         predictions.update({
             f"diameter{d:g}": diameter_masks(model, prepared.image, d)
-            for d in DIAMETERS
+            for d in diameters
         })
         for variant, labels in predictions.items():
             measured[variant].append(evaluate_image(
@@ -226,6 +288,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             " ".join(f"{b['label']} {b['recall']:.3f}"
                      for b in figures["size_bin_recall"]),
         )
+        logger.info("%-18s by size: %s", variant, size_bin_line(figures))
     logger.info("Wrote %s.", args.out)
     return EXIT_OK
 

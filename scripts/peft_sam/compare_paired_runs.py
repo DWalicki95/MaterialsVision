@@ -25,6 +25,16 @@ of late epochs:
 A run lacking an epoch of the window is reported as incomplete rather
 than judged on fewer points.
 
+**How well a run is paired.** The pairing is an observation, not a
+guarantee: a run that updates the weights very differently from the
+reference may stop following its wobble even under the same seed. Each
+comparison therefore reports the correlation of epoch-to-epoch changes
+of the validation instance loss, run against reference, over every
+epoch both logged. Below ``WEAK_PAIRING_R`` the run is flagged: its
+epoch differences then carry noise the pairing does not cancel, and the
+count of positive epochs says less than it seems. The flag does not
+change the verdict.
+
 **Where the figures come from.** F1 and the per-material F1 are read
 from MLflow, where ``evaluate_checkpoint.py`` writes them per epoch.
 Recall on the smallest size bin is only in that script's JSON reports,
@@ -48,6 +58,7 @@ import argparse
 import json
 import logging
 import re
+import statistics
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -85,6 +96,13 @@ N_LAST_EPOCHS = 3
 
 PERCENT = 100.0
 
+PAIRING_FIGURE = "epoch/val_instance_loss"
+
+# Runs of one seed have shown 0.81-0.97 here, other seeds 0.15 and 0.53.
+WEAK_PAIRING_R = 0.7
+
+MIN_PAIRING_STEPS = 3
+
 VERDICT_WINS = "wins"
 VERDICT_NO_GAIN = "no gain"
 VERDICT_GUARD = "guard failed"
@@ -108,6 +126,7 @@ class PairedComparison:
     last_epochs_mean_reference: Optional[float] = None
     guard_deltas_pp: dict[str, Optional[float]] = field(default_factory=dict)
     missing_epochs: list[int] = field(default_factory=list)
+    pairing_r: Optional[float] = None
     verdict: str = VERDICT_INCOMPLETE
 
 
@@ -136,6 +155,41 @@ def paired_deltas_pp(
     return [
         (candidate[epoch] - reference[epoch]) * PERCENT for epoch in epochs
     ]
+
+
+def change_correlation(
+    reference: Mapping[int, float],
+    candidate: Mapping[int, float],
+) -> Optional[float]:
+    """Correlation of epoch-to-epoch changes, run against reference.
+
+    Only steps from an epoch to the next one that both sides logged are
+    used, so a curve with gaps is not read as if its points were
+    adjacent.
+
+    Parameters
+    ----------
+    reference, candidate : mapping of int to float
+        Figure per epoch.
+
+    Returns
+    -------
+    float or None
+        Pearson's r, or nothing when fewer than ``MIN_PAIRING_STEPS``
+        steps are shared or either side does not change at all.
+    """
+    steps = [
+        epoch for epoch in sorted(set(reference) & set(candidate))
+        if epoch + 1 in reference and epoch + 1 in candidate
+    ]
+    if len(steps) < MIN_PAIRING_STEPS:
+        return None
+    reference_changes = [reference[e + 1] - reference[e] for e in steps]
+    candidate_changes = [candidate[e + 1] - candidate[e] for e in steps]
+    try:
+        return statistics.correlation(reference_changes, candidate_changes)
+    except statistics.StatisticsError:
+        return None
 
 
 def mean_guard_delta_pp(
@@ -256,8 +310,9 @@ def size_bin_recall_by_epoch(
     run : str
     label : str
         The watershed setting's label. A report scored under a single
-        setting names its entries without one, and those are taken as
-        that setting.
+        setting names its entries without one; their setting is then
+        read from the entry's own label, and an entry naming none is
+        skipped rather than assumed to match.
     size_bin : str, optional
 
     Returns
@@ -270,12 +325,23 @@ def size_bin_recall_by_epoch(
             match = _SNAPSHOT_NAME.match(name)
             if match is None or match.group("run") != run:
                 continue
-            if match.group("label") not in (None, label):
+            if _setting_of(match.group("label"), entry) != label:
                 continue
             for size in entry["overall"].get("size_bin_recall", []):
                 if size["label"] == size_bin:
                     recall[int(match.group("epoch"))] = size["recall"]
     return recall
+
+
+def _setting_of(
+    name_label: Optional[str], entry: Mapping[str, Any]
+) -> Optional[str]:
+    """The setting a report entry was scored under."""
+    if name_label is not None:
+        return name_label
+    scored = entry["overall"].get("label", "")
+    _, separator, setting = scored.rpartition("@")
+    return setting if separator else None
 
 
 def _metric_by_epoch(client: Any, run_id: str, key: str) -> dict[int, float]:
@@ -372,7 +438,14 @@ def report(comparisons: Sequence[PairedComparison]) -> None:
             f"{name} {'n/a' if delta is None else f'{delta:+.2f} pp'}"
             for name, delta in c.guard_deltas_pp.items()
         )
-        logger.info("%-60s guards: %s.", "", guards)
+        pairing = "n/a" if c.pairing_r is None else f"{c.pairing_r:.2f}"
+        logger.info("%-60s guards: %s; pairing r %s.", "", guards, pairing)
+        if c.pairing_r is not None and c.pairing_r < WEAK_PAIRING_R:
+            logger.warning(
+                "%s is weakly paired with the reference (r %.2f < %.2f): "
+                "read its mean difference, not its count of positive "
+                "epochs.", c.run, c.pairing_r, WEAK_PAIRING_R,
+            )
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -489,16 +562,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         "Comparing %d run(s) with %s over epochs %s, under %s.",
         len(names), args.reference, args.epochs, postprocessing_id(setting),
     )
+    reference_id = reference_runs[args.reference]
     reference = figures_of(
-        client, reference_runs[args.reference], args.reference, setting,
-        reports,
+        client, reference_id, args.reference, setting, reports,
     )
+    reference_loss = _metric_by_epoch(client, reference_id, PAIRING_FIGURE)
     comparisons = []
     for name in names:
+        run_id = candidate_runs[name]
         comparison = compare(
             name, reference,
-            figures_of(client, candidate_runs[name], name, setting, reports),
+            figures_of(client, run_id, name, setting, reports),
             args.epochs,
+        )
+        comparison.pairing_r = change_correlation(
+            reference_loss, _metric_by_epoch(client, run_id, PAIRING_FIGURE),
         )
         comparison.verdict = judge(
             comparison, args.min_gain_pp, args.min_positive,
@@ -516,6 +594,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "min_gain_pp": args.min_gain_pp,
                 "min_positive": args.min_positive,
                 "max_guard_loss_pp": args.max_guard_loss_pp,
+                "weak_pairing_r": WEAK_PAIRING_R,
             },
             "comparisons": [asdict(c) for c in comparisons],
         }, indent=2))

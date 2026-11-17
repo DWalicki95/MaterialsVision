@@ -14,6 +14,7 @@ import pytest
 from materials_vision.evaluation.size_bins import (SIZE_BIN_LABELS, SizeBins,
                                                    SizeBinsLoadError,
                                                    calibrate_size_bins,
+                                                   detection_per_size_bin,
                                                    instance_areas_um2,
                                                    load_size_bins,
                                                    recall_per_size_bin)
@@ -254,3 +255,58 @@ def test_an_unusable_artifact_is_refused(tmp_path, payload):
 def test_a_missing_artifact_is_refused(tmp_path):
     with pytest.raises(SizeBinsLoadError, match="Cannot read"):
         load_size_bins(tmp_path / "absent.json")
+
+
+def _detection(gt_sizes, pred_sizes, pair_gt_ids, pair_ious, unmatched):
+    return detection_per_size_bin(
+        _strip_labels(gt_sizes), _strip_labels(pred_sizes),
+        np.array(pair_gt_ids), np.array(pair_ious), np.array(unmatched),
+        _bins(), pixel_size_um=1.0,
+    )
+
+
+def test_an_unmatched_prediction_is_classed_by_its_own_area():
+    # 5 px -> 25 um^2 (Q1), 25 px -> 625 um^2 (Q4)
+    result = _detection(gt_sizes=[5, 25], pred_sizes=[5, 5, 25],
+                        pair_gt_ids=[1], pair_ious=[0.9], unmatched=[2, 3])
+    q1, q2, q3, q4 = result
+
+    assert (q1.n_true_positives, q1.n_false_positives,
+            q1.n_false_negatives) == (1, 1, 0)
+    assert (q4.n_true_positives, q4.n_false_positives,
+            q4.n_false_negatives) == (0, 1, 1)
+    assert q1.precision == pytest.approx(0.5)
+    assert q1.f1 == pytest.approx(2 / 3)
+    assert q4.f1 == pytest.approx(0.0)
+
+
+def test_pair_iou_is_averaged_within_the_annotated_class():
+    result = _detection(gt_sizes=[5, 5, 25], pred_sizes=[5, 5, 25],
+                        pair_gt_ids=[1, 2, 3], pair_ious=[0.6, 0.8, 0.95],
+                        unmatched=[])
+
+    assert result[0].mean_pair_iou == pytest.approx(0.7)
+    assert result[3].mean_pair_iou == pytest.approx(0.95)
+    assert result[0].sum_pair_iou == pytest.approx(1.4)
+
+
+def test_an_empty_class_reports_nan_for_every_ratio():
+    result = _detection(gt_sizes=[5], pred_sizes=[5], pair_gt_ids=[1],
+                        pair_ious=[0.9], unmatched=[])
+    q2 = result[1]
+
+    assert q2.n_true_positives == q2.n_false_positives == 0
+    assert all(np.isnan(value) for value in (
+        q2.precision, q2.recall, q2.f1, q2.mean_pair_iou))
+
+
+@pytest.mark.parametrize("pair_gt_ids, pair_ious, unmatched, message", [
+    ([1], [0.9, 0.8], [], "IoU value"),
+    ([7], [0.9], [], "matched gt ids"),
+    ([1], [0.9], [9], "unmatched prediction ids"),
+])
+def test_detection_refuses_ids_from_another_image(
+    pair_gt_ids, pair_ious, unmatched, message
+):
+    with pytest.raises(ValueError, match=message):
+        _detection([5], [5], pair_gt_ids, pair_ious, unmatched)

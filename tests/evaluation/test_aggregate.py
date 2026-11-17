@@ -251,3 +251,26 @@ def test_the_diameter_distribution_is_pooled_not_averaged():
     assert result.median_diameter_drift_um == pytest.approx(0.0, abs=15.0)
     assert result.iqr_drift_um > 0.0
     assert result.wasserstein_um > 0.0
+
+
+def test_size_bin_detection_decomposes_the_overall_counts_and_iou():
+    gt = _grid_labels(6)
+    imperfect = gt.copy()
+    imperfect[imperfect == 3] = 0
+    imperfect[100:104, 100:104] = 50
+    imperfect[gt == 5] = 0
+    imperfect[36:56, 68:84] = 5
+
+    result = aggregate([_evaluate(gt, imperfect), _evaluate(gt, gt.copy())])
+    classes = result.size_bin_detection
+
+    assert result.n_false_positives > 0 and result.n_false_negatives > 0
+    assert sum(c.n_true_positives for c in classes) == (
+        result.n_true_positives)
+    assert sum(c.n_false_positives for c in classes) == (
+        result.n_false_positives)
+    assert sum(c.n_false_negatives for c in classes) == (
+        result.n_false_negatives)
+    pooled_iou = (sum(c.sum_pair_iou for c in classes)
+                  / sum(c.n_true_positives for c in classes))
+    assert pooled_iou == pytest.approx(result.mean_pair_iou)
