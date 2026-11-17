@@ -128,7 +128,7 @@ def cv_dirs(tmp_path, frozen_split, monkeypatch):
     ]) == create_cli.EXIT_OK
     eval_dir.mkdir()
     final_report = tmp_path / "test_scores.json"
-    monkeypatch.setattr(cli, "FINAL_MODEL_SCORES", final_report)
+    monkeypatch.setattr(cli, "FINAL_MODEL_REPORTS", {12: final_report})
 
     frozen, deployed = "frozen", "min_instance_area_um2=200"
     for fold in range(1, 6):
@@ -151,7 +151,7 @@ def cv_dirs(tmp_path, frozen_split, monkeypatch):
         }
         if fold == 1:
             final_report.write_text(json.dumps(
-                {cli.FINAL_MODEL_ENTRY: entry, "b0/epoch-3": {}}
+                {cli.final_model_entry(12): entry, "b0/epoch-3": {}}
             ))
             continue
         stem = f"{cli.run_name(fold)}/epoch-12"
@@ -221,3 +221,259 @@ def test_a_partial_score_is_not_taken_for_the_fold(cv_dirs):
 def test_nan_figures_print_as_a_dash():
     assert cli._num(math.nan) == "-"
     assert cli._pct(0.051) == "+5.1%"
+
+
+def _entry(folds_dir, fold, missed=0):
+    """A report entry for a fold, consistent across its cross-sections.
+
+    ``missed`` removes true positives from every formulation, so that
+    entries scored under different settings can be told apart.
+    """
+    table = pd.read_csv(folds_dir / f"fold{fold}.csv")
+    held = table[(table["split"] == "test") & table["used"]]
+    per_formulation, per_material = [], []
+    for material, rows in held.groupby("material"):
+        parts = [
+            _section(f"formulation={name}", len(images), 10 * len(images),
+                     8 * len(images) - missed, 1)
+            for name, images in rows.groupby("formulation")
+        ]
+        per_formulation += parts
+        per_material.append(
+            {**cli.pooled(parts), "label": f"material={material}"}
+        )
+    return {
+        "overall": {**cli.pooled(per_material), "label": "overall"},
+        "per_material": per_material,
+        "per_formulation": per_formulation,
+    }
+
+
+@pytest.fixture
+def em_dirs(tmp_path, cv_dirs):
+    """Every fold of another base model at 24 epochs, fold one included,
+    each scored under the frozen setting and its own calibration."""
+    import scripts.peft_sam.calibrate_watershed as calibrate
+    from materials_vision.evaluation import WatershedParams
+
+    folds_dir = cv_dirs[0]
+    eval_dir = tmp_path / "eval_em"
+    calibration_dir = tmp_path / "calibration_em"
+    eval_dir.mkdir()
+    figures = type("Figures", (), {
+        "f1": 0.9, "boundary_f1": {}, "splits_per_100_gt": 0.0,
+        "merges_per_100_gt": 0.0, "pore_count_error": 0.0,
+    })()
+    for fold in range(1, 6):
+        chosen = WatershedParams(
+            center_distance_threshold=0.30 + 0.05 * (fold % 2),
+            boundary_distance_threshold=0.5,
+        )
+        calibrate.write_report(
+            calibration_dir / f"fold{fold}.json", tmp_path / "e.pt",
+            folds_dir / f"fold{fold}.csv", [0], 0.004, [(chosen, figures)],
+        )
+        stem = cli.run_name(fold, "vit_l_em_organelles", 24) + "/epoch-24"
+        (eval_dir / f"fold{fold}.json").write_text(json.dumps({
+            f"{stem}@frozen": _entry(folds_dir, fold, missed=1),
+            f"{stem}@{chosen.label()}": _entry(folds_dir, fold, missed=0),
+        }))
+    return folds_dir, eval_dir, calibration_dir
+
+
+def _em_main(em_dirs, *extra):
+    folds_dir, eval_dir, calibration_dir = em_dirs
+    return cli.main([
+        "--folds-dir", str(folds_dir), "--eval-dir", str(eval_dir),
+        "--base-model", "vit_l_em_organelles", "--epochs", "24",
+        "--calibration-dir", str(calibration_dir), "--no-mlflow", *extra,
+    ])
+
+
+def _summary(directory, name):
+    return json.loads((directory / name).read_text())
+
+
+def test_another_base_model_reads_all_five_folds_into_its_own_files(em_dirs):
+    assert _em_main(em_dirs) == cli.EXIT_OK
+
+    summary = _summary(
+        em_dirs[1], "cv5_v1_vit_l_em_organelles_e24_summary_frozen.json"
+    )
+    assert summary["folds_included"] == [1, 2, 3, 4, 5]
+    assert summary["model"]["base_model"] == "vit_l_em_organelles"
+    assert summary["model"]["epochs"] == 24
+
+
+def test_each_fold_is_read_under_its_own_calibration(em_dirs):
+    assert _em_main(em_dirs) == cli.EXIT_OK
+    assert _em_main(em_dirs, "--postprocessing", "calibrated") == cli.EXIT_OK
+
+    frozen = _summary(
+        em_dirs[1], "cv5_v1_vit_l_em_organelles_e24_summary_frozen.json"
+    )
+    calibrated = _summary(
+        em_dirs[1], "cv5_v1_vit_l_em_organelles_e24_summary_calibrated.json"
+    )
+    assert calibrated["folds_included"] == [1, 2, 3, 4, 5]
+    # The calibrated entries miss nothing; the frozen ones miss pores.
+    assert calibrated["pooled"]["f1"] > frozen["pooled"]["f1"]
+    for row in calibrated["per_fold"]:
+        assert row["n_true_positives"] == 8 * row["n_images"]
+
+
+def test_a_fold_not_yet_calibrated_is_missing(em_dirs):
+    (em_dirs[2] / "fold4.json").unlink()
+
+    assert _em_main(em_dirs, "--postprocessing", "calibrated") == (
+        cli.EXIT_FAILED
+    )
+    assert _em_main(
+        em_dirs, "--postprocessing", "calibrated", "--allow-missing"
+    ) == cli.EXIT_OK
+
+
+def test_a_broken_calibration_report_stops_the_summary(em_dirs):
+    (em_dirs[2] / "fold2.json").write_text("{}")
+
+    assert _em_main(em_dirs, "--postprocessing", "calibrated") == (
+        cli.EXIT_FAILED
+    )
+
+
+def test_calibrated_needs_its_reports_and_a_trained_model(em_dirs):
+    folds_dir, eval_dir, calibration_dir = em_dirs
+    base = ["--folds-dir", str(folds_dir), "--eval-dir", str(eval_dir),
+            "--no-mlflow", "--postprocessing", "calibrated"]
+
+    assert cli.main(base) == cli.EXIT_FAILED
+    assert cli.main(
+        base + ["--calibration-dir", str(calibration_dir),
+                "--pretrained", "vit_l_lm"]
+    ) == cli.EXIT_FAILED
+
+
+def test_the_mean_without_the_validation_fold_is_reported(em_dirs):
+    assert _em_main(em_dirs) == cli.EXIT_OK
+
+    summary = _summary(
+        em_dirs[1], "cv5_v1_vit_l_em_organelles_e24_summary_frozen.json"
+    )
+    across = summary["across_folds"]
+    others = [row["f1"] for row in summary["per_fold"]
+              if row["fold"] != cli.VALIDATION_FOLD]
+    assert across["validation_fold"] == 2
+    assert across["f1_mean_without_validation_fold"] == pytest.approx(
+        sum(others) / len(others)
+    )
+
+
+def test_a_final_model_scored_again_is_read_from_the_eval_dir(
+    tmp_path, cv_dirs, monkeypatch
+):
+    folds_dir, _ = cv_dirs
+    eval_dir = tmp_path / "eval_lm24"
+    eval_dir.mkdir()
+    once = tmp_path / "final_24ep_test_scores.json"
+    once.write_text(json.dumps(
+        {cli.final_model_entry(24): _entry(folds_dir, 1, missed=1)}
+    ))
+    monkeypatch.setattr(cli, "FINAL_MODEL_REPORTS", {24: once})
+    deployed = cli.POSTPROCESSING_CONFIGS["deployed"].label()
+    for fold in range(2, 6):
+        stem = cli.run_name(fold, epochs=24) + "/epoch-24"
+        (eval_dir / f"fold{fold}.json").write_text(json.dumps({
+            f"{stem}@frozen": _entry(folds_dir, fold),
+            f"{stem}@{deployed}": _entry(folds_dir, fold),
+        }))
+    argv = ["--folds-dir", str(folds_dir), "--eval-dir", str(eval_dir),
+            "--epochs", "24", "--no-mlflow"]
+
+    # Only the single TEST score: fold one is there under frozen alone,
+    # and its absence elsewhere is expected rather than an error.
+    assert cli.main(argv) == cli.EXIT_OK
+    assert cli.main(argv + ["--postprocessing", "deployed"]) == cli.EXIT_OK
+    assert _summary(
+        eval_dir, "cv5_v1_e24_summary_deployed.json"
+    )["folds_missing"] == [1]
+    summary = _summary(eval_dir, "cv5_v1_e24_summary_frozen.json")
+    assert summary["per_fold"][0]["n_true_positives"] < (
+        8 * summary["per_fold"][0]["n_images"]
+    )
+
+    # Scored again into the eval directory: that report is read instead.
+    (eval_dir / "fold1.json").write_text(json.dumps({
+        f"{cli.final_model_entry(24)}@frozen": _entry(folds_dir, 1),
+    }))
+    assert cli.main(argv) == cli.EXIT_OK
+    summary = _summary(eval_dir, "cv5_v1_e24_summary_frozen.json")
+    assert summary["per_fold"][0]["n_true_positives"] == (
+        8 * summary["per_fold"][0]["n_images"]
+    )
+
+
+def test_a_zero_shot_generalist_is_read_from_its_own_entries(
+    tmp_path, cv_dirs
+):
+    folds_dir, _ = cv_dirs
+    eval_dir = tmp_path / "zero_shot"
+    eval_dir.mkdir()
+    for fold in range(1, 6):
+        (eval_dir / f"fold{fold}.json").write_text(json.dumps({
+            f"pretrained/{name}@{label}": _entry(folds_dir, fold)
+            for name in ("vit_l_lm", "vit_l_em_organelles")
+            for label in ("frozen", "boundary_distance_threshold=0.5,"
+                          "center_distance_threshold=0.5")
+        }))
+    argv = ["--folds-dir", str(folds_dir), "--eval-dir", str(eval_dir),
+            "--no-mlflow"]
+
+    for name in ("vit_l_lm", "vit_l_em_organelles"):
+        for setting in ("frozen", "library_default"):
+            assert cli.main(
+                argv + ["--pretrained", name, "--postprocessing", setting]
+            ) == cli.EXIT_OK
+            summary = _summary(
+                eval_dir, f"cv5_v1_pretrained_{name}_summary_{setting}.json"
+            )
+            assert summary["folds_included"] == [1, 2, 3, 4, 5]
+    assert cli.main(argv + ["--pretrained", "vit_l"]) == cli.EXIT_FAILED
+
+
+@pytest.mark.parametrize("fold, extra", [
+    (3, []),
+    (3, ["--epochs", "24"]),
+    (1, ["--base-model", "vit_l_em_organelles", "--epochs", "24"]),
+    (4, ["--base-model", "vit_l", "--decoder-lr", "3e-4", "--epochs", "24"]),
+])
+def test_the_summary_looks_for_the_name_the_evaluator_files_under(
+    tmp_path, fold, extra
+):
+    """From the snapshot a fold run fixes in advance to the report key."""
+    import scripts.peft_sam.evaluate_checkpoint as evaluate
+    import scripts.peft_sam.train_cv_fold as fold_cli
+    from scripts.peft_sam.train_final_model import scored_snapshot
+
+    fold_args = fold_cli.parse_args(
+        ["--fold", str(fold), "--save-root", str(tmp_path), *extra]
+    )
+    snapshot = scored_snapshot(
+        tmp_path, fold_args.epochs, fold_cli.fold_run_name(fold_args)
+    )
+    evaluator_args = evaluate.parse_args(["--checkpoint", str(snapshot)])
+    filed_under = evaluate.result_stem(
+        f"{snapshot.parent.name}/{snapshot.stem}", evaluator_args
+    )
+    summary_args = cli.parse_args(["--eval-dir", str(tmp_path), *extra])
+
+    assert cli.fold_source(fold, summary_args).stem == filed_under
+
+
+def test_the_final_models_entry_is_the_name_of_its_snapshot():
+    from scripts.peft_sam.train_final_model import scored_snapshot
+
+    for epochs, root in cli.FINAL_MODEL_SAVE_ROOTS.items():
+        snapshot = scored_snapshot(root, epochs)
+        assert cli.final_model_entry(epochs) == (
+            f"{snapshot.parent.name}/{snapshot.stem}"
+        )

@@ -22,13 +22,25 @@ never averaged from per-fold figures: a fold with twice the pores
 weighs twice as much, as it would had all the images been scored in
 one pass.
 
-**Fold one comes from the final model's TEST report.** TEST was scored
-once, under the frozen post-processing, before the folds existed, and
-is not opened again. So fold one has no per-formulation breakdown -
-where a material has a single held-out formulation in it, its material
-figure is that formulation's figure; the three AS formulations of TEST
-stay unresolved - and it has no score under any other post-processing,
-where it is left out and the report says so.
+**Fold one of the recipe comes from the final model's TEST report.**
+TEST was scored once, under the frozen post-processing, before the
+folds existed. Where that report predates the per-formulation
+breakdown, a material with a single held-out formulation takes its
+material figure as that formulation's; the three AS formulations of
+TEST stay unresolved. Under any other post-processing fold one is left
+out and the report says so, unless the final model was scored again
+into the evaluation directory as ``fold1.json``.
+
+**Other models.** ``--base-model``, ``--epochs`` and ``--decoder-lr``
+name the folds of another starting point, as ``train_cv_fold.py``
+filed them; their fold one is a fold like any other. ``--pretrained``
+reads a zero-shot generalist instead. ``--postprocessing calibrated``
+reads each fold under the setting calibrated on that fold's own
+training images, from ``--calibration-dir``.
+
+**Fold two is VALIDATION.** The recipe was selected on it, so its
+score is optimistic for every model; the mean without it is reported
+alongside.
 
 Examples
 --------
@@ -37,6 +49,14 @@ Summarize under the frozen post-processing, the primary reading:
 
 The deployed post-processing alongside, folds two to five only:
     $ python scripts/peft_sam/summarize_cv.py --postprocessing deployed
+
+The electron microscopy generalist at 24 epochs, under the setting
+calibrated in each fold:
+    $ python scripts/peft_sam/summarize_cv.py \\
+        --base-model vit_l_em_organelles --epochs 24 \\
+        --eval-dir checkpoints/cv_e24/eval/vit_l_em_organelles \\
+        --postprocessing calibrated \\
+        --calibration-dir checkpoints/cv_e24/calibration/vit_l_em_organelles
 """
 import argparse
 import json
@@ -48,13 +68,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from materials_vision.evaluation.watershed import POSTPROCESSING_CONFIGS
+from materials_vision.evaluation.watershed import (POSTPROCESSING_CONFIGS,
+                                                   CalibrationReportError,
+                                                   load_calibrated_setting)
 from materials_vision.logging_config import setup_logging
 from materials_vision.tracking import configure_tracking, ensure_experiment
+from materials_vision.training import (BASE_MODELS,
+                                       BASE_MODELS_WITHOUT_DECODER,
+                                       DECODER_LEARNING_RATE)
+from scripts.peft_sam.run_e8_full import BASE_MODEL
 from scripts.peft_sam.train_cv_fold import (CV_ID, DEFAULT_FOLDS_DIR,
-                                            FINAL_MODEL_FOLD, N_FOLDS,
-                                            run_name)
+                                            FINAL_MODEL_FOLD,
+                                            FINAL_MODEL_SAVE_ROOTS, N_FOLDS,
+                                            VALIDATION_FOLD,
+                                            final_model_save_root, run_name)
 from scripts.peft_sam.train_final_model import N_EPOCHS
+from scripts.peft_sam.train_final_model import run_name as final_run_name
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +94,16 @@ ANALYSIS_EXPERIMENT = "peft_sam_analysis"
 
 DEFAULT_EVAL_DIR = Path("checkpoints/cv/eval")
 
-FINAL_MODEL_SCORES = Path("checkpoints/final/test_scores.json")
+# The final models' single TEST reports, by epoch budget.
+FINAL_MODEL_REPORTS = {
+    epochs: root / "test_scores.json"
+    for epochs, root in FINAL_MODEL_SAVE_ROOTS.items()
+}
 
-FINAL_MODEL_ENTRY = "full_b_trainval_seed20260907/epoch-12"
+# Read per fold from that fold's calibration report rather than named.
+CALIBRATED = "calibrated"
+
+POSTPROCESSING_CHOICES = (*sorted(POSTPROCESSING_CONFIGS), CALIBRATED)
 
 # The only post-processing TEST was scored under. Its entry carries no
 # setting in its name because it was the only one scored in that pass.
@@ -193,32 +229,105 @@ def find_entry(
     return entry
 
 
-def fold_source(
-    fold: int, eval_dir: Path
-) -> tuple[Path, str, Optional[str]]:
+@dataclass(frozen=True)
+class FoldSource:
+    """Where one fold's figures are and how to read them.
+
+    Parameters
+    ----------
+    report : Path
+    stem : str
+        The model's name in the report, ``run/epoch-N`` or
+        ``pretrained/<model>``.
+    bare_setting : str or None
+        The label an entry without ``@`` was scored under, when known.
+    scored_once : bool
+        Whether the report is the final model's single TEST score, so
+        that a setting absent from it is expected to stay absent.
+    """
+
+    report: Path
+    stem: str
+    bare_setting: Optional[str]
+    scored_once: bool
+
+
+def final_model_entry(epochs: int) -> str:
+    """The final model's name in its TEST report.
+
+    Parameters
+    ----------
+    epochs : int
+
+    Returns
+    -------
+    str
+    """
+    return f"{final_run_name()}/epoch-{epochs}"
+
+
+def fold_source(fold: int, args: argparse.Namespace) -> FoldSource:
     """Where a fold's figures are, and what a bare entry there means.
 
     Parameters
     ----------
     fold : int
-    eval_dir : Path
+    args : argparse.Namespace
+        The model read: ``pretrained``, ``base_model``, ``epochs`` and
+        ``decoder_lr``, and ``eval_dir``.
 
     Returns
     -------
-    report : Path
-    stem : str
-    bare_setting : str or None
+    FoldSource
     """
-    if fold == FINAL_MODEL_FOLD:
-        return (
-            FINAL_MODEL_SCORES, FINAL_MODEL_ENTRY,
-            POSTPROCESSING_CONFIGS[FINAL_MODEL_POSTPROCESSING].label(),
+    rescored = args.eval_dir / f"fold{fold}.json"
+    if args.pretrained is not None:
+        return FoldSource(
+            rescored, f"pretrained/{args.pretrained}", None, False
         )
-    return (
-        eval_dir / f"fold{fold}.json",
-        f"{run_name(fold)}/epoch-{N_EPOCHS}",
-        None,
+    final_root = final_model_save_root(
+        args.base_model, args.epochs, args.decoder_lr
     )
+    if fold == FINAL_MODEL_FOLD and final_root is not None:
+        stem = final_model_entry(args.epochs)
+        if rescored.exists():
+            return FoldSource(rescored, stem, None, False)
+        return FoldSource(
+            FINAL_MODEL_REPORTS[args.epochs], stem,
+            POSTPROCESSING_CONFIGS[FINAL_MODEL_POSTPROCESSING].label(),
+            True,
+        )
+    name = run_name(fold, args.base_model, args.epochs, args.decoder_lr)
+    return FoldSource(rescored, f"{name}/epoch-{args.epochs}", None, False)
+
+
+def setting_label(fold: int, args: argparse.Namespace) -> Optional[str]:
+    """The label of the setting a fold is read under.
+
+    Parameters
+    ----------
+    fold : int
+    args : argparse.Namespace
+
+    Returns
+    -------
+    str or None
+        ``None`` when the fold has not been calibrated yet.
+
+    Raises
+    ------
+    SummaryError
+        If the fold's calibration report names no usable setting.
+    """
+    if args.postprocessing != CALIBRATED:
+        return POSTPROCESSING_CONFIGS[args.postprocessing].label()
+    report = args.calibration_dir / f"fold{fold}.json"
+    if not report.exists():
+        return None
+    try:
+        return load_calibrated_setting(report).label()
+    except CalibrationReportError as error:
+        raise SummaryError(str(error)) from None
 
 
 def load_fold(
@@ -273,6 +382,97 @@ def load_fold(
         per_formulation=entry.get("per_formulation"),
         held_out=metadata["held_out"],
     )
+
+
+def reading(
+    eval_dir: Path,
+    folds_dir: Path = DEFAULT_FOLDS_DIR,
+    postprocessing: str = "frozen",
+    *,
+    base_model: str = BASE_MODEL,
+    epochs: int = N_EPOCHS,
+    decoder_lr: float = DECODER_LEARNING_RATE,
+    pretrained: Optional[str] = None,
+    calibration_dir: Optional[Path] = None,
+) -> argparse.Namespace:
+    """Describe one model's folds for :func:`load_folds`.
+
+    The same fields the command line gives, so that a script comparing
+    several models reads each of them exactly as this one would.
+
+    Parameters
+    ----------
+    eval_dir, folds_dir : Path
+    postprocessing : str, optional
+        A named setting or :data:`CALIBRATED`.
+    base_model, epochs, decoder_lr : optional
+        The trained model, as ``train_cv_fold.py`` named its folds.
+    pretrained : str, optional
+        A zero-shot generalist instead of trained folds.
+    calibration_dir : Path, optional
+        Needed under :data:`CALIBRATED`.
+
+    Returns
+    -------
+    argparse.Namespace
+    """
+    return argparse.Namespace(
+        eval_dir=Path(eval_dir), folds_dir=Path(folds_dir),
+        postprocessing=postprocessing, base_model=base_model,
+        epochs=epochs, decoder_lr=decoder_lr, pretrained=pretrained,
+        calibration_dir=(
+            None if calibration_dir is None else Path(calibration_dir)
+        ),
+    )
+
+
+def load_folds(
+    args: argparse.Namespace,
+) -> tuple[list[FoldScores], list[int], list[int]]:
+    """Every fold of one model that has a score under the setting read.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        From :func:`parse_args` or :func:`reading`.
+
+    Returns
+    -------
+    folds : list of FoldScores
+    missing : list of int
+        Folds with no score under the setting.
+    expected_missing : list of int
+        Those of ``missing`` whose only report is the final model's
+        single TEST score, where a setting it was not scored under is
+        expected to be absent.
+
+    Raises
+    ------
+    SummaryError
+        If a report or a calibration cannot be read for its fold.
+    """
+    folds: list[FoldScores] = []
+    missing: list[int] = []
+    expected_missing: list[int] = []
+    for fold in range(1, N_FOLDS + 1):
+        source = fold_source(fold, args)
+        label = setting_label(fold, args)
+        scores = None if label is None else load_fold(
+            fold, source.report, source.stem, label, source.bare_setting,
+            args.folds_dir / f"fold{fold}_metadata.json",
+        )
+        if scores is not None:
+            folds.append(scores)
+            continue
+        missing.append(fold)
+        if source.scored_once:
+            expected_missing.append(fold)
+            logger.info(
+                "Fold %d has no score under %s: TEST was scored once, "
+                "under %s, into %s.", fold, args.postprocessing,
+                FINAL_MODEL_POSTPROCESSING, source.report,
+            )
+    return folds, missing, expected_missing
 
 
 def formulation_rows(scores: FoldScores) -> list[dict[str, Any]]:
@@ -335,7 +535,9 @@ def material_sections(
 
 
 def summarize(
-    folds: Sequence[FoldScores], postprocessing: str
+    folds: Sequence[FoldScores],
+    postprocessing: str,
+    model: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """The three readings, from the folds that could be read.
 
@@ -343,6 +545,8 @@ def summarize(
     ----------
     folds : sequence of FoldScores
     postprocessing : str
+    model : dict, optional
+        What was read, from :func:`model_record`.
 
     Returns
     -------
@@ -362,8 +566,12 @@ def summarize(
             )
         per_fold.append(row)
     f1s = [row["f1"] for row in per_fold]
+    f1s_without_validation = [
+        row["f1"] for row in per_fold if row["fold"] != VALIDATION_FOLD
+    ]
     return {
         "cv_id": CV_ID,
+        "model": model,
         "postprocessing": postprocessing,
         "folds_included": [scores.fold for scores in folds],
         "per_fold": per_fold,
@@ -372,6 +580,11 @@ def summarize(
             "f1_sd": statistics.stdev(f1s) if len(f1s) > 1 else float("nan"),
             "f1_min": min(f1s),
             "f1_max": max(f1s),
+            "validation_fold": VALIDATION_FOLD,
+            "f1_mean_without_validation_fold": (
+                statistics.fmean(f1s_without_validation)
+                if f1s_without_validation else float("nan")
+            ),
         },
         "pooled": pooled([scores.overall for scores in folds]),
         "pooled_by_material": {
@@ -412,6 +625,8 @@ def format_markdown(summary: dict[str, Any], missing: list[int]) -> str:
         f"# Walidacja krzyzowa `{summary['cv_id']}` - "
         f"postprocessing `{summary['postprocessing']}`",
         "",
+        f"Model: `{model_tag(summary.get('model')) or 'receptura'}`",
+        "",
         f"Foldy w odczycie: {summary['folds_included']}"
         + (f"; bez wyniku: {missing}" if missing else ""),
         "",
@@ -435,7 +650,9 @@ def format_markdown(summary: dict[str, Any], missing: list[int]) -> str:
         "",
         f"Miedzy foldami: srednia {_num(across['f1_mean'])}, SD "
         f"{_num(across['f1_sd'])}, zakres {_num(across['f1_min'])}-"
-        f"{_num(across['f1_max'])}.",
+        f"{_num(across['f1_max'])}. Bez foldu {across['validation_fold']} "
+        f"(= VAL): srednia "
+        f"{_num(across['f1_mean_without_validation_fold'])}.",
         "",
         "## Zbiorczo (sumy licznikow po foldach)",
         "",
@@ -613,8 +830,13 @@ def record(summary: dict[str, Any], files: list[Path]) -> str:
             metrics[f"pooled/{material}/{key}"] = figures[key]
     with mlflow.start_run(
         experiment_id=ensure_experiment(ANALYSIS_EXPERIMENT),
-        run_name=f"{CV_ID}_{summary['postprocessing']}",
+        run_name="_".join(filter(None, (
+            CV_ID, model_tag(summary.get("model")),
+            summary["postprocessing"],
+        ))),
         tags={"part": "cv", "cv_id": CV_ID,
+              **{key: str(value)
+                 for key, value in (summary.get("model") or {}).items()},
               "postprocessing": summary["postprocessing"],
               "folds": ",".join(map(str, summary["folds_included"]))},
     ) as run:
@@ -622,6 +844,80 @@ def record(summary: dict[str, Any], files: list[Path]) -> str:
         for path in files:
             mlflow.log_artifact(str(path))
         return run.info.run_id
+
+
+def model_record(args: argparse.Namespace) -> dict[str, Any]:
+    """What a summary reads, for its report and its MLflow tags.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+
+    Returns
+    -------
+    dict
+    """
+    if args.pretrained is not None:
+        return {"pretrained": args.pretrained}
+    return {
+        "base_model": args.base_model,
+        "epochs": args.epochs,
+        "decoder_learning_rate": args.decoder_lr,
+    }
+
+
+def model_tag(model: Optional[dict[str, Any]]) -> str:
+    """A short name for what was read, empty for the recipe itself.
+
+    Empty for the recipe at its own budget, so that the summaries
+    written before other models were read keep their names.
+
+    Parameters
+    ----------
+    model : dict or None
+        From :func:`model_record`.
+
+    Returns
+    -------
+    str
+    """
+    if not model:
+        return ""
+    if "pretrained" in model:
+        return f"pretrained_{model['pretrained']}"
+    parts = []
+    if model["base_model"] != BASE_MODEL:
+        parts.append(model["base_model"])
+    if model["epochs"] != N_EPOCHS:
+        parts.append(f"e{model['epochs']}")
+    if model["decoder_learning_rate"] != DECODER_LEARNING_RATE:
+        parts.append(f"dec{model['decoder_learning_rate']:g}")
+    return "_".join(parts)
+
+
+def refusal(args: argparse.Namespace) -> Optional[str]:
+    """Say why the summary may not be made as asked, or nothing.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+
+    Returns
+    -------
+    str or None
+    """
+    if args.postprocessing == CALIBRATED:
+        if args.pretrained is not None:
+            return (
+                "A zero-shot generalist was never calibrated; read it under "
+                "a named setting such as frozen or library_default."
+            )
+        if args.calibration_dir is None:
+            return f"--postprocessing {CALIBRATED} needs --calibration-dir."
+    if (args.pretrained is not None
+            and args.pretrained in BASE_MODELS_WITHOUT_DECODER):
+        return f"{args.pretrained} ships no instance decoder to score."
+    return None
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -640,8 +936,25 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--postprocessing", default="frozen",
-        choices=sorted(POSTPROCESSING_CONFIGS),
+        "--postprocessing", default="frozen", choices=POSTPROCESSING_CHOICES,
+        help=f"A named setting, or '{CALIBRATED}' for the setting each "
+             f"fold was calibrated to, read from --calibration-dir.",
+    )
+    parser.add_argument(
+        "--calibration-dir", type=Path, default=None,
+        help="Calibration reports, one fold<k>.json per fold.",
+    )
+    parser.add_argument(
+        "--base-model", choices=BASE_MODELS, default=BASE_MODEL,
+    )
+    parser.add_argument("--epochs", type=int, default=N_EPOCHS)
+    parser.add_argument(
+        "--decoder-lr", type=float, default=DECODER_LEARNING_RATE,
+    )
+    parser.add_argument(
+        "--pretrained", choices=BASE_MODELS, default=None,
+        help="Read this generalist's zero-shot figures instead of "
+             "trained folds.",
     )
     parser.add_argument("--eval-dir", type=Path, default=DEFAULT_EVAL_DIR)
     parser.add_argument("--folds-dir", type=Path, default=DEFAULT_FOLDS_DIR)
@@ -663,36 +976,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     """
     args = parse_args(argv)
     setup_logging()
-    label = POSTPROCESSING_CONFIGS[args.postprocessing].label()
+    reason = refusal(args)
+    if reason is not None:
+        logger.error(reason)
+        return EXIT_FAILED
 
-    folds: list[FoldScores] = []
-    missing: list[int] = []
     try:
-        for fold in range(1, N_FOLDS + 1):
-            report, stem, bare_setting = fold_source(fold, args.eval_dir)
-            scores = load_fold(
-                fold, report, stem, label, bare_setting,
-                args.folds_dir / f"fold{fold}_metadata.json",
-            )
-            if scores is None:
-                missing.append(fold)
-            else:
-                folds.append(scores)
+        folds, missing, expected_missing = load_folds(args)
     except SummaryError as e:
         logger.error("%s", e)
         return EXIT_FAILED
 
-    expected_missing = (
-        [] if args.postprocessing == FINAL_MODEL_POSTPROCESSING
-        else [FINAL_MODEL_FOLD]
-    )
     unexpected = sorted(set(missing) - set(expected_missing))
-    if expected_missing and FINAL_MODEL_FOLD in missing:
-        logger.info(
-            "Fold %d has no score under %s: TEST was scored once, under "
-            "%s, and is not opened again.", FINAL_MODEL_FOLD,
-            args.postprocessing, FINAL_MODEL_POSTPROCESSING,
-        )
     if unexpected and not args.allow_missing:
         logger.error(
             "No score under %s for fold(s) %s. Score them first, or pass "
@@ -704,8 +999,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.error("No fold has a score under %s.", args.postprocessing)
         return EXIT_FAILED
 
-    summary = summarize(folds, args.postprocessing)
-    stem = args.eval_dir / f"{CV_ID}_summary_{args.postprocessing}"
+    model = model_record(args)
+    summary = summarize(folds, args.postprocessing, model)
+    stem = args.eval_dir / "_".join(filter(None, (
+        CV_ID, model_tag(model), "summary", args.postprocessing,
+    )))
     stem.parent.mkdir(parents=True, exist_ok=True)
     json_path = stem.with_suffix(".json")
     json_path.write_text(json.dumps(

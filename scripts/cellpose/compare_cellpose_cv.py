@@ -38,7 +38,6 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from materials_vision.evaluation.watershed import POSTPROCESSING_CONFIGS
 from materials_vision.experiments.cellpose.split_evaluation import \
     CellposeSettings
 from materials_vision.logging_config import setup_logging
@@ -47,8 +46,8 @@ from scripts.cellpose.run_cellpose_fold import run_name as cellpose_run_name
 from scripts.cellpose.select_cellpose_recipe import DEFAULT_RECIPE
 from scripts.peft_sam.summarize_cv import (DEFAULT_EVAL_DIR, DEFAULT_FOLDS_DIR,
                                            MATERIALS, N_FOLDS, FoldScores,
-                                           SummaryError, fold_source,
-                                           load_fold, pooled, summarize)
+                                           SummaryError, load_fold, load_folds,
+                                           pooled, reading, summarize)
 
 logger = logging.getLogger(__name__)
 
@@ -123,15 +122,9 @@ def load_peft_sam_folds(
     tuple
         The folds found, and the numbers of those missing.
     """
-    label = POSTPROCESSING_CONFIGS[PEFT_SAM_POSTPROCESSING].label()
-    found, missing = [], []
-    for fold in range(1, N_FOLDS + 1):
-        report, stem, bare = fold_source(fold, eval_dir)
-        scores = load_fold(
-            fold, report, stem, label, bare,
-            folds_dir / f"fold{fold}_metadata.json",
-        )
-        (found if scores else missing).append(scores or fold)
+    found, missing, _ = load_folds(
+        reading(eval_dir, folds_dir, PEFT_SAM_POSTPROCESSING)
+    )
     return found, missing
 
 

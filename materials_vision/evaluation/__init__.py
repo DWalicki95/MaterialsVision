@@ -45,7 +45,8 @@ from materials_vision.evaluation.size_bins import (SIZE_BIN_LABELS,
                                                    recall_per_size_bin)
 from materials_vision.evaluation.watershed import (
     FROZEN_WATERSHED, LIBRARY_DEFAULT_WATERSHED, ROBUSTNESS_CENTER_THRESHOLDS,
-    WatershedParams, robustness_series)
+    CalibrationReportError, WatershedParams, load_calibrated_setting,
+    robustness_series)
 
 __all__ = [
     "ANGLE_ELONGATION_THRESHOLD",
@@ -58,6 +59,7 @@ __all__ = [
     "ROBUSTNESS_CENTER_THRESHOLDS",
     "SIZE_BIN_LABELS",
     "AggregateResult",
+    "CalibrationReportError",
     "AreaNumberDensity",
     "BoundaryScore",
     "DiameterDistributionError",
@@ -84,6 +86,7 @@ __all__ = [
     "evaluate_image",
     "instance_areas_um2",
     "instance_shapes",
+    "load_calibrated_setting",
     "load_size_bins",
     "match_instances",
     "orientation_distribution",

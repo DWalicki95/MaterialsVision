@@ -162,6 +162,7 @@ def train_recipe(
     save_every_kth_epoch: Optional[int] = None,
     lora_learning_rate: float = LORA_LEARNING_RATE,
     decoder_learning_rate: float = DECODER_LEARNING_RATE,
+    base_model: str = BASE_MODEL,
 ) -> None:
     """Train the adopted recipe on the given images.
 
@@ -205,6 +206,9 @@ def train_recipe(
     lora_learning_rate, decoder_learning_rate : float, optional
         The recipe's rates unless a study varies them on purpose; a run
         meant to reproduce the final model leaves both alone.
+    base_model : str, optional
+        Pretrained checkpoint the run starts from. The recipe's own
+        unless a study compares starting points on purpose.
     """
     torch.manual_seed(RUN_SEED)
     train_source = build_source(split, manifest, train_subset)
@@ -239,7 +243,7 @@ def train_recipe(
         )
     train_run(
         name,
-        model_type=BASE_MODEL,
+        model_type=base_model,
         train_loader=train_loader,
         val_loader=monitor_loader,
         n_epochs=epochs,
@@ -351,8 +355,18 @@ def write_provenance(args: argparse.Namespace) -> Path:
     return destination
 
 
-def recipe_record() -> dict[str, Any]:
+def recipe_record(
+    base_model: str = BASE_MODEL,
+    decoder_learning_rate: float = DECODER_LEARNING_RATE,
+) -> dict[str, Any]:
     """What the recipe is, independently of the data it is trained on.
+
+    Parameters
+    ----------
+    base_model : str, optional
+        The starting checkpoint the run actually used.
+    decoder_learning_rate : float, optional
+        The decoder rate the run actually used.
 
     Returns
     -------
@@ -361,13 +375,13 @@ def recipe_record() -> dict[str, Any]:
     policy = build_full_policy(POLICY)
     config = policy.config
     record: dict[str, Any] = {
-        "base_model": BASE_MODEL,
+        "base_model": base_model,
         "policy": POLICY,
         "families": list(policy.families),
         "seed": RUN_SEED,
         "monitor_images": MONITOR_IMAGES,
         "lora_learning_rate": LORA_LEARNING_RATE,
-        "decoder_learning_rate": DECODER_LEARNING_RATE,
+        "decoder_learning_rate": decoder_learning_rate,
         "early_stopping": None,
     }
     for family in ("orientation", "tonal", "blur"):

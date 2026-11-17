@@ -56,8 +56,7 @@ from materials_vision.evaluation.inference import (
     score_settings)
 from materials_vision.logging_config import setup_logging
 from materials_vision.provenance import run_provenance
-from materials_vision.training import (LORA_RANK, PEFT_KWARGS, build_source,
-                                       prepare_geometry)
+from materials_vision.training import build_source, prepare_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -185,9 +184,7 @@ def probe_one(
     tuple of AggregateResult
         As saved, then recalibrated.
     """
-    segmenter = build_segmenter(
-        checkpoint, MODEL_TYPE, PEFT_KWARGS, LORA_RANK
-    )
+    segmenter = build_segmenter(checkpoint, MODEL_TYPE)
     as_saved = score(
         segmenter, val_source, val_positions, size_bins,
         f"{checkpoint}@as-saved",

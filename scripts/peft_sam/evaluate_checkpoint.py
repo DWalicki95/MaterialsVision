@@ -89,6 +89,14 @@ MLflow, whose metric names do not say which path produced a figure):
     $ python scripts/peft_sam/evaluate_checkpoint.py \\
         --segmentation-mode apg --checkpoint <path> --out apg.json
 
+Score a cross-validation fold under the setting calibrated on that
+fold's own training images, next to the frozen one and the robustness
+cross-section (the calibrated entry is named by its setting's label):
+    $ python scripts/peft_sam/evaluate_checkpoint.py \\
+        --subset test --unlock-test --split <fold csv> \\
+        --also-calibration <calibrate_watershed.py report> \\
+        --center-threshold-sweep 0.25 0.30 0.35 --checkpoint <path>
+
 The way a checkpoint's encoder was adapted - rank, projections, blocks,
 or no low-rank factors at all - is read from its weights, so every
 checkpoint of the study loads without being told how it was trained.
@@ -104,9 +112,11 @@ from pathlib import Path
 from typing import Optional
 
 from materials_vision.evaluation import (DECISION_SCALE, AggregateResult,
+                                         CalibrationReportError,
                                          WatershedParams, aggregate,
-                                         cross_sections, load_size_bins,
-                                         robustness_series)
+                                         cross_sections,
+                                         load_calibrated_setting,
+                                         load_size_bins, robustness_series)
 from materials_vision.evaluation.inference import (APG_UNUSED_SETTINGS,
                                                    SEGMENTATION_MODES,
                                                    build_pretrained_segmenter,
@@ -235,6 +245,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             "Score under this named configuration as well, in the same "
             "pass over the images. Repeatable. Meant for measuring what "
             "a recalibration changed, on the same predictions."
+        ),
+    )
+    parser.add_argument(
+        "--also-calibration", type=Path, action="append", default=[],
+        help=(
+            "Score under the setting chosen in this report of "
+            "calibrate_watershed.py as well, in the same pass. "
+            "Repeatable. The figures are named by the setting's label, "
+            "as any other setting's."
         ),
     )
     parser.add_argument(
@@ -384,6 +403,12 @@ def resolve_settings(
     Returns
     -------
     tuple of WatershedParams
+
+    Raises
+    ------
+    CalibrationReportError
+        If a report given by ``--also-calibration`` names no usable
+        setting.
     """
     fields = POSTPROCESSING_CONFIGS[args.postprocessing].to_kwargs()
     for name in fields:
@@ -395,8 +420,13 @@ def resolve_settings(
         list(robustness_series(base, tuple(args.center_threshold_sweep)))
         if args.center_threshold_sweep else [base]
     )
-    for name in args.also_postprocessing:
-        extra = POSTPROCESSING_CONFIGS[name]
+    extras = [
+        POSTPROCESSING_CONFIGS[name] for name in args.also_postprocessing
+    ]
+    extras.extend(
+        load_calibrated_setting(report) for report in args.also_calibration
+    )
+    for extra in extras:
         if extra not in settings:
             settings.append(extra)
     return tuple(settings)
@@ -752,8 +782,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.segmentation_mode,
     )
 
+    try:
+        # Read before the model is loaded, so a wrong path costs nothing.
+        settings = resolve_settings(args)
+    except CalibrationReportError as error:
+        logger.error("%s", error)
+        return EXIT_FAILED
     prepare_geometry()
-    settings = resolve_settings(args)
     logger.info(
         "Watershed setting(s): %s.",
         ", ".join(setting.label() for setting in settings),

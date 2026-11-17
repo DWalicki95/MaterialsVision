@@ -68,8 +68,7 @@ from materials_vision.evaluation.postprocessing_calibration import (
 from materials_vision.evaluation.size_bins import load_size_bins
 from materials_vision.logging_config import setup_logging
 from materials_vision.provenance import run_provenance
-from materials_vision.training import (LORA_RANK, PEFT_KWARGS, build_source,
-                                       prepare_geometry)
+from materials_vision.training import build_source, prepare_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +191,55 @@ def report(
         )
 
 
+def write_report(
+    destination: Path,
+    checkpoint: Path,
+    split: Path,
+    positions: list[int],
+    tolerance: float,
+    ranked: list[tuple[WatershedParams, AggregateResult]],
+) -> None:
+    """Write the chosen setting and the whole grid, best first.
+
+    The chosen setting is what ``evaluate_checkpoint.py
+    --also-calibration`` scores under, read back by
+    :func:`materials_vision.evaluation.load_calibrated_setting`.
+
+    Parameters
+    ----------
+    destination, checkpoint, split : Path
+    positions : list of int
+        Positions of the calibration images in the subset.
+    tolerance : float
+        F1 differences treated as ties.
+    ranked : list of tuple
+        Settings with their figures, best first.
+    """
+    best, _ = ranked[0]
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps({
+        "provenance": run_provenance(),
+        "checkpoint": str(checkpoint),
+        "split": str(split),
+        "subset": SUBSET,
+        "positions": positions,
+        "tie_tolerance": tolerance,
+        "chosen": best.to_kwargs(),
+        "grid": [
+            {
+                "setting": setting.to_kwargs(),
+                "f1": result.f1,
+                "boundary_f1": boundary_at_decision_scale(result),
+                "splits_per_100_gt": result.splits_per_100_gt,
+                "merges_per_100_gt": result.merges_per_100_gt,
+                "pore_count_error": result.pore_count_error,
+            }
+            for setting, result in ranked
+        ],
+    }, indent=2, default=str))
+    logger.info("Wrote %s.", destination)
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     """Read the command line.
 
@@ -262,9 +310,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.checkpoint, len(settings), len(positions), SUBSET.upper(),
     )
 
-    segmenter = build_segmenter(
-        args.checkpoint, MODEL_TYPE, PEFT_KWARGS, LORA_RANK
-    )
+    segmenter = build_segmenter(args.checkpoint, MODEL_TYPE)
     started_s = time.perf_counter()
     measured = score_settings(
         segmenter, source, positions, size_bins, settings
@@ -292,33 +338,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     report(ranked)
 
     if args.out is not None:
-        best, best_result = ranked[0]
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps({
-            "provenance": run_provenance(),
-            "checkpoint": str(args.checkpoint),
-            "subset": SUBSET,
-            "positions": positions,
-            "tie_tolerance": tolerance,
-            "chosen": best.to_kwargs(),
-            "grid": [
-                {
-                    "setting": setting.to_kwargs(),
-                    "f1": result.f1,
-                    "boundary_f1": boundary_at_decision_scale(result),
-                    "splits_per_100_gt": result.splits_per_100_gt,
-                    "merges_per_100_gt": result.merges_per_100_gt,
-                    "pore_count_error": result.pore_count_error,
-                }
-                for setting, result in ranked
-            ],
-        }, indent=2, default=str))
-        logger.info("Wrote %s.", args.out)
+        write_report(
+            args.out, args.checkpoint, args.split, positions, tolerance,
+            ranked,
+        )
         logger.info(
             "Freeze the chosen setting in "
             "materials_vision/evaluation/watershed.py before starting "
-            "the runs it will apply to; changing it afterwards "
-            "invalidates every comparison made under the old one."
+            "the runs it will apply to, or score the one run it belongs "
+            "to with evaluate_checkpoint.py --also-calibration; changing "
+            "it afterwards invalidates every comparison made under the "
+            "old one."
         )
     return EXIT_OK
 

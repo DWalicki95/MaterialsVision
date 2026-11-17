@@ -136,3 +136,34 @@ def test_the_recipe_setting_is_read_back_whole():
         flow_threshold=0.6, cellprob_threshold=-1.0, min_size_px=15,
         niter=2000,
     )
+
+
+def test_peft_sam_fold_reports_are_found_under_the_names_evaluation_writes(
+    tmp_path, monkeypatch
+):
+    """The PEFT-SAM side reads the recipe's folds through the summary."""
+    import scripts.peft_sam.summarize_cv as summary_cli
+
+    monkeypatch.setattr(
+        summary_cli, "FINAL_MODEL_REPORTS",
+        {12: tmp_path / "no_test_scores.json"},
+    )
+    eval_dir = tmp_path / "eval"
+    folds_dir = tmp_path / "folds"
+    eval_dir.mkdir()
+    folds_dir.mkdir()
+    entry = _scores(2, 90, 10, 10)
+    (eval_dir / "fold2.json").write_text(json.dumps({
+        f"{summary_cli.run_name(2)}/epoch-12@frozen": {
+            "overall": entry.overall, "per_material": entry.per_material,
+        },
+    }))
+    for fold in range(1, 6):
+        (folds_dir / f"fold{fold}_metadata.json").write_text(json.dumps({
+            "counts": {"n_test_images": 10}, "held_out": entry.held_out,
+        }))
+
+    found, missing = cli.load_peft_sam_folds(eval_dir, folds_dir)
+
+    assert [scores.fold for scores in found] == [2]
+    assert missing == [1, 3, 4, 5]

@@ -22,6 +22,13 @@ model was, for a loss nothing reads.
 model is its model and the final model's TEST score is its score.
 Training it again would produce a second copy of one run.
 
+**Other starting points.** The same folds also compare base models:
+``--base-model`` swaps the pretrained checkpoint and changes nothing
+else, and ``--epochs`` sets a budget shared by every model compared.
+Fold one is then trained like any other fold, because the final model
+is not its model. A checkpoint without an instance decoder starts that
+decoder from random weights and must be given its own decoder rate.
+
 The one departure from the final model that is not data: these runs
 are recorded in MLflow, and the trainer's monitoring images are
 training images rather than validation images. Neither changes what is
@@ -36,6 +43,11 @@ Rehearse the whole path in minutes:
 
 Train a fold:
     $ python scripts/peft_sam/train_cv_fold.py --fold 3
+
+The same fold from the electron microscopy generalist, for 24 epochs:
+    $ python scripts/peft_sam/train_cv_fold.py --fold 3 \\
+        --base-model vit_l_em_organelles --epochs 24 \\
+        --save-root checkpoints/cv_e24
 
 Score its snapshot on the formulations it held out, once:
     $ python scripts/peft_sam/evaluate_checkpoint.py \\
@@ -60,7 +72,10 @@ from materials_vision.logging_config import setup_logging
 from materials_vision.provenance import run_provenance
 from materials_vision.tracking import (REHEARSAL_EXPERIMENT,
                                        TRAINING_EXPERIMENT, RunTracking)
-from scripts.peft_sam.run_e8_full import RUN_SEED
+from materials_vision.training import (BASE_MODELS,
+                                       BASE_MODELS_WITHOUT_DECODER,
+                                       DECODER_LEARNING_RATE)
+from scripts.peft_sam.run_e8_full import BASE_MODEL, RUN_SEED
 from scripts.peft_sam.train_final_model import (N_EPOCHS, POLICY,
                                                 recipe_record, scored_snapshot,
                                                 train_recipe)
@@ -86,6 +101,17 @@ N_FOLDS = 5
 # final model, trained on TRAIN and VALIDATION together.
 FINAL_MODEL_FOLD = 1
 
+# Fold two holds out exactly VALIDATION of the frozen split, on which the
+# recipe was selected, so its score is optimistic for every model.
+VALIDATION_FOLD = 2
+
+# The final models that exist, by epoch budget. Each is fold one's model
+# for the recipe trained that long from the recipe's own base model.
+FINAL_MODEL_SAVE_ROOTS = {
+    12: Path("checkpoints/final"),
+    24: Path("checkpoints/final_24ep"),
+}
+
 TRAIN_SUBSET = "train"
 
 REHEARSAL_N_TRAIN = 8
@@ -93,18 +119,78 @@ REHEARSAL_N_TRAIN = 8
 REHEARSAL_EPOCHS = 1
 
 
-def run_name(fold: int) -> str:
+def run_name(
+    fold: int,
+    base_model: str = BASE_MODEL,
+    epochs: int = N_EPOCHS,
+    decoder_learning_rate: float = DECODER_LEARNING_RATE,
+) -> str:
     """What one fold's checkpoints are filed under.
+
+    Every setting that differs from the recipe enters the name, so that
+    two runs of one fold set up differently never share a directory or
+    a provenance file. The recipe's own run keeps its original name.
 
     Parameters
     ----------
     fold : int
+    base_model : str, optional
+    epochs : int, optional
+    decoder_learning_rate : float, optional
 
     Returns
     -------
     str
     """
-    return f"{POLICY}_cv5_fold{fold}_seed{RUN_SEED}"
+    parts = [POLICY]
+    if base_model != BASE_MODEL:
+        parts.append(base_model)
+    parts.append(f"cv5_fold{fold}")
+    if epochs != N_EPOCHS:
+        parts.append(f"e{epochs}")
+    if decoder_learning_rate != DECODER_LEARNING_RATE:
+        parts.append(f"dec{decoder_learning_rate:g}")
+    parts.append(f"seed{RUN_SEED}")
+    return "_".join(parts)
+
+
+def fold_run_name(args: argparse.Namespace) -> str:
+    """The run name of the fold the command line asks for.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+
+    Returns
+    -------
+    str
+    """
+    return run_name(
+        args.fold, args.base_model, args.epochs, args.decoder_lr
+    )
+
+
+def final_model_save_root(
+    base_model: str, epochs: int, decoder_learning_rate: float
+) -> Optional[Path]:
+    """Where the final model is that serves as this run's fold one.
+
+    Parameters
+    ----------
+    base_model : str
+    epochs : int
+    decoder_learning_rate : float
+
+    Returns
+    -------
+    Path or None
+        ``None`` when no final model was trained with these settings,
+        so fold one has to be trained like any other.
+    """
+    if (base_model != BASE_MODEL
+            or decoder_learning_rate != DECODER_LEARNING_RATE):
+        return None
+    return FINAL_MODEL_SAVE_ROOTS.get(epochs)
 
 
 def fold_paths(folds_dir: Path, fold: int) -> tuple[Path, Path]:
@@ -141,7 +227,7 @@ def provenance_record(
     """
     return {
         "provenance": run_provenance(),
-        "run": run_name(args.fold),
+        "run": fold_run_name(args),
         "cv_id": CV_ID,
         "fold": args.fold,
         "held_out": fold_metadata.get("held_out"),
@@ -152,11 +238,11 @@ def provenance_record(
         "n_train": args.n_train,
         "rehearsal": args.rehearsal,
         "scored_snapshot": str(scored_snapshot(
-            args.save_root, args.epochs, run_name(args.fold)
+            args.save_root, args.epochs, fold_run_name(args)
         )),
         "split": str(args.split),
         "manifest": str(args.manifest),
-        **recipe_record(),
+        **recipe_record(args.base_model, args.decoder_lr),
     }
 
 
@@ -193,7 +279,9 @@ def build_tracking(
     -------
     RunTracking
     """
-    families = ",".join(recipe_record()["families"])
+    families = ",".join(
+        recipe_record(args.base_model, args.decoder_lr)["families"]
+    )
     return RunTracking(
         experiment=REHEARSAL_EXPERIMENT if args.rehearsal
         else TRAINING_EXPERIMENT,
@@ -202,6 +290,8 @@ def build_tracking(
             "part": "cv",
             "cv_id": CV_ID,
             "fold": str(args.fold),
+            "base_model": args.base_model,
+            "epochs": str(args.epochs),
             "policy": POLICY.upper(),
             "seed": str(RUN_SEED),
             "train_subset": TRAIN_SUBSET,
@@ -213,6 +303,7 @@ def build_tracking(
             "augmentation_families": families,
             "cv_id": CV_ID,
             "fold": args.fold,
+            "base_model": args.base_model,
         },
         artifacts=(provenance_path, metadata_path),
     )
@@ -231,12 +322,29 @@ def refusal(args: argparse.Namespace) -> Optional[str]:
     """
     if not 1 <= args.fold <= N_FOLDS:
         return f"There is no fold {args.fold}; folds run 1 to {N_FOLDS}."
-    if args.fold == FINAL_MODEL_FOLD:
+    final_root = final_model_save_root(
+        args.base_model, args.epochs, args.decoder_lr
+    )
+    if args.fold == FINAL_MODEL_FOLD and final_root is not None:
         return (
             f"Fold {FINAL_MODEL_FOLD} holds out exactly TEST, so its model "
-            f"is the final model and its score the final model's TEST "
-            f"score. Training it again would produce a second copy of one "
-            f"run."
+            f"is the final model in {final_root} and its score the final "
+            f"model's TEST score. Training it again would produce a second "
+            f"copy of one run."
+        )
+    if args.epochs < 1:
+        return f"A run needs at least one epoch, got {args.epochs}."
+    if args.decoder_lr <= 0:
+        return f"--decoder-lr must be positive, got {args.decoder_lr:g}."
+    if (args.base_model in BASE_MODELS_WITHOUT_DECODER
+            and args.decoder_lr == DECODER_LEARNING_RATE):
+        # Nothing is chosen on a fold, so a decoder left undertrained by
+        # a rate meant for a pretrained one would go into the comparison.
+        return (
+            f"{args.base_model} ships no instance decoder, which then "
+            f"trains from random weights; {args.decoder_lr:g} is the rate "
+            f"chosen for a pretrained one. Give the rate chosen for this "
+            f"model with --decoder-lr."
         )
     if not args.split.exists():
         return (
@@ -266,6 +374,22 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--save-root", type=Path, default=None)
     parser.add_argument(
+        "--base-model", choices=BASE_MODELS, default=BASE_MODEL,
+        help=f"Pretrained checkpoint to start from. Default {BASE_MODEL}, "
+             f"the recipe's.",
+    )
+    parser.add_argument(
+        "--epochs", type=int, default=N_EPOCHS,
+        help=f"Training budget; the last epoch is the snapshot scored. "
+             f"Default {N_EPOCHS}, the recipe's.",
+    )
+    parser.add_argument(
+        "--decoder-lr", type=float, default=DECODER_LEARNING_RATE,
+        help=f"Rate of the instance decoder. Default "
+             f"{DECODER_LEARNING_RATE:g}, the recipe's; a base model "
+             f"without a decoder needs its own.",
+    )
+    parser.add_argument(
         "--rehearsal", action="store_true",
         help=(
             f"{REHEARSAL_N_TRAIN} training images for {REHEARSAL_EPOCHS} "
@@ -280,7 +404,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     args.split, args.fold_metadata = fold_paths(args.folds_dir, args.fold)
     args.n_train = REHEARSAL_N_TRAIN if args.rehearsal else 0
-    args.epochs = REHEARSAL_EPOCHS if args.rehearsal else N_EPOCHS
+    if args.rehearsal:
+        args.epochs = REHEARSAL_EPOCHS
     if args.save_root is None:
         args.save_root = (
             REHEARSAL_SAVE_ROOT if args.rehearsal else DEFAULT_SAVE_ROOT
@@ -302,7 +427,7 @@ def execute(args: argparse.Namespace) -> None:
         provenance_record(args, fold_metadata), args.save_root
     )
     train_recipe(
-        run_name(args.fold),
+        fold_run_name(args),
         split=args.split,
         manifest=args.manifest,
         train_subset=TRAIN_SUBSET,
@@ -311,6 +436,8 @@ def execute(args: argparse.Namespace) -> None:
         epochs=args.epochs,
         n_train=args.n_train,
         tracking=build_tracking(args, provenance_path, args.fold_metadata),
+        decoder_learning_rate=args.decoder_lr,
+        base_model=args.base_model,
     )
 
 
@@ -342,7 +469,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     logger.info("Training on %s.", torch.cuda.get_device_name(0))
 
     snapshot = scored_snapshot(
-        args.save_root, args.epochs, run_name(args.fold)
+        args.save_root, args.epochs, fold_run_name(args)
     )
     if not args.force and snapshot.exists():
         logger.info("%s already exists; nothing to do.", snapshot)

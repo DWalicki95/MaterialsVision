@@ -31,7 +31,9 @@ and therefore flatters them. Reporting the main metric at several
 thresholds answers it with evidence rather than argument: a policy that
 wins at one threshold and loses at the others has not won.
 """
-from dataclasses import asdict, dataclass
+import json
+from dataclasses import asdict, dataclass, fields
+from pathlib import Path
 from typing import Any
 
 
@@ -235,10 +237,13 @@ DEPLOYED_POSTPROCESSING = WatershedParams(
 )
 
 # Named post-processing configurations a checkpoint can be scored under.
+# The library's own values are named for the zero-shot generalists,
+# whose decoder they were tuned for.
 POSTPROCESSING_CONFIGS = {
     "frozen": FROZEN_WATERSHED,
     "calibrated_2026_09_24": CALIBRATED_2026_09_24,
     "deployed": DEPLOYED_POSTPROCESSING,
+    "library_default": LIBRARY_DEFAULT_WATERSHED,
 }
 
 # Centre thresholds the main metric is reported at alongside the frozen
@@ -277,3 +282,52 @@ def robustness_series(
         if candidate not in series:
             series.append(candidate)
     return tuple(series)
+
+
+class CalibrationReportError(ValueError):
+    """Raised when a calibration report does not name a usable setting."""
+
+
+def load_calibrated_setting(report: Path) -> WatershedParams:
+    """The setting a ``calibrate_watershed.py`` report chose.
+
+    Read from the report rather than copied by hand, so that a figure
+    labelled as scored under a fold's calibration is scored under
+    exactly what that calibration chose.
+
+    Parameters
+    ----------
+    report : Path
+        JSON written by ``calibrate_watershed.py --out``.
+
+    Returns
+    -------
+    WatershedParams
+        Fields the report predates keep their frozen value.
+
+    Raises
+    ------
+    CalibrationReportError
+        If the file is missing or unreadable, carries no ``chosen``
+        setting, or names a field the setting does not have.
+    """
+    try:
+        payload = json.loads(Path(report).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CalibrationReportError(
+            f"Cannot read the calibration report {report}: {error}"
+        ) from None
+    chosen = payload.get("chosen") if isinstance(payload, dict) else None
+    if not isinstance(chosen, dict) or not chosen:
+        raise CalibrationReportError(
+            f"{report} names no chosen setting; is it a report of "
+            f"calibrate_watershed.py?"
+        )
+    known = {field.name for field in fields(WatershedParams)}
+    unknown = sorted(set(chosen) - known)
+    if unknown:
+        raise CalibrationReportError(
+            f"{report} chose fields the watershed has no setting for: "
+            f"{', '.join(unknown)}."
+        )
+    return WatershedParams(**{**FROZEN_WATERSHED.to_kwargs(), **chosen})

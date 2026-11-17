@@ -65,7 +65,9 @@ from materials_vision.data.split_io import SplitLoadError, load_split
 from materials_vision.logging_config import setup_logging
 from materials_vision.provenance import run_provenance
 from materials_vision.tracking import REHEARSAL_EXPERIMENT, RunTracking
-from materials_vision.training import (DECODER_LEARNING_RATE,
+from materials_vision.training import (BASE_MODELS,
+                                       BASE_MODELS_WITHOUT_DECODER,
+                                       DECODER_LEARNING_RATE,
                                        ENCODER_LEARNING_RATE,
                                        LORA_LEARNING_RATE, LORA_MATRICES,
                                        LORA_RANK, PEFT_KWARGS, PEFT_METHODS,
@@ -96,14 +98,6 @@ DEFAULT_SAVE_ROOT = Path("checkpoints/adhoc")
 NO_POLICY = "none"
 
 POLICIES = (NO_POLICY, *VARIANTS)
-
-# Registry names a run can start from. The generalists ship an instance
-# decoder; the plain SAM checkpoints do not, so theirs starts from
-# random weights.
-BASE_MODELS = ("vit_l_lm", "vit_l_em_organelles", "vit_l", "vit_b_lm",
-               "vit_b")
-
-BASE_MODELS_WITHOUT_DECODER = ("vit_l", "vit_b")
 
 # Short forms of the methods for run names.
 METHOD_TAGS = {"late_ft": "lateft", "full_ft": "fullft"}

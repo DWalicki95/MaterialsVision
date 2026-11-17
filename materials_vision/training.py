@@ -107,6 +107,14 @@ FROZEN_SAM_PARTS = ["prompt_encoder", "mask_decoder"]
 # ``get_unetr``, or both. SAM's own mask decoder is never among them.
 TRAINABLE_CHOICES = ("both", "lora", "instance_decoder")
 
+# Registry names a run can start from. The generalists ship an instance
+# decoder; the plain SAM checkpoints do not, so theirs starts from
+# random weights.
+BASE_MODELS = ("vit_l_lm", "vit_l_em_organelles", "vit_l", "vit_b_lm",
+               "vit_b")
+
+BASE_MODELS_WITHOUT_DECODER = ("vit_l", "vit_b")
+
 _BATCHNORM_KINDS = (
     torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d,
 )

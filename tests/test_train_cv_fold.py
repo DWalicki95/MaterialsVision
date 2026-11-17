@@ -188,3 +188,121 @@ def test_a_rehearsal_is_short_and_kept_apart(tmp_path, folds):
     assert args.epochs == cli.REHEARSAL_EPOCHS
     assert args.n_train == cli.REHEARSAL_N_TRAIN
     assert args.save_root == cli.REHEARSAL_SAVE_ROOT
+
+
+def test_the_recipes_own_fold_keeps_its_original_name():
+    assert cli.run_name(3) == "full_b_cv5_fold3_seed20260907"
+    assert cli.run_name(
+        3, final.BASE_MODEL, final.N_EPOCHS, final.DECODER_LEARNING_RATE
+    ) == "full_b_cv5_fold3_seed20260907"
+
+
+def test_every_setting_that_differs_enters_the_name():
+    names = {
+        cli.run_name(3, base_model, epochs, decoder_lr)
+        for base_model in ("vit_l_lm", "vit_l_em_organelles", "vit_l")
+        for epochs in (12, 24)
+        for decoder_lr in (final.DECODER_LEARNING_RATE, 1e-4, 3e-4)
+    }
+
+    assert len(names) == 3 * 2 * 3
+
+
+def test_another_base_model_reaches_the_trainer(
+    tmp_path, folds, trainer_calls
+):
+    args = _fold_args(
+        folds, tmp_path, "--base-model", "vit_l_em_organelles",
+        "--epochs", "24",
+    )
+
+    cli.execute(args)
+
+    [(name, kwargs)] = trainer_calls
+    assert name == "full_b_vit_l_em_organelles_cv5_fold3_e24_seed20260907"
+    assert kwargs["model_type"] == "vit_l_em_organelles"
+    assert kwargs["n_epochs"] == 24
+    assert kwargs["save_every_kth_epoch"] == 24
+    assert kwargs["decoder_learning_rate"] == final.DECODER_LEARNING_RATE
+    assert kwargs["tracking"].tags["base_model"] == "vit_l_em_organelles"
+    assert kwargs["tracking"].tags["epochs"] == "24"
+
+
+def test_the_provenance_states_the_base_model_and_decoder_rate(
+    tmp_path, folds, trainer_calls
+):
+    import json
+
+    args = _fold_args(
+        folds, tmp_path, "--base-model", "vit_l", "--decoder-lr", "1e-4",
+        "--epochs", "24",
+    )
+
+    cli.execute(args)
+
+    [(name, kwargs)] = trainer_calls
+    assert kwargs["decoder_learning_rate"] == 1e-4
+    [provenance] = [
+        path for path in kwargs["tracking"].artifacts
+        if path.name.endswith("_provenance.json")
+    ]
+    record = json.loads(provenance.read_text())
+    assert record["run"] == name
+    assert record["base_model"] == "vit_l"
+    assert record["decoder_learning_rate"] == 1e-4
+    assert record["scored_snapshot"].endswith(f"{name}/epoch-24.pt")
+
+
+def test_two_setups_of_one_fold_do_not_share_a_provenance_file(
+    tmp_path, folds, trainer_calls
+):
+    cli.execute(_fold_args(folds, tmp_path))
+    cli.execute(_fold_args(folds, tmp_path, "--epochs", "24"))
+
+    first, second = (kwargs["tracking"].artifacts[0]
+                     for _, kwargs in trainer_calls)
+    assert first != second
+    assert first.exists() and second.exists()
+
+
+@pytest.mark.parametrize("epochs", ["12", "24"])
+def test_fold_one_of_an_existing_final_model_is_refused(folds, epochs):
+    args = cli.parse_args([
+        "--fold", "1", "--folds-dir", str(folds[0]), "--epochs", epochs,
+    ])
+
+    assert str(cli.FINAL_MODEL_SAVE_ROOTS[int(epochs)]) in cli.refusal(args)
+
+
+@pytest.mark.parametrize("extra", [
+    ["--base-model", "vit_l_em_organelles", "--epochs", "24"],
+    ["--base-model", "vit_l", "--decoder-lr", "1e-4", "--epochs", "24"],
+    ["--epochs", "18"],
+])
+def test_fold_one_without_a_final_model_is_trained(folds, extra):
+    args = cli.parse_args(
+        ["--fold", "1", "--folds-dir", str(folds[0]), *extra]
+    )
+
+    assert cli.refusal(args) is None
+
+
+def test_a_base_model_without_a_decoder_needs_its_own_rate(folds):
+    args = cli.parse_args([
+        "--fold", "3", "--folds-dir", str(folds[0]), "--base-model", "vit_l",
+    ])
+
+    assert "--decoder-lr" in cli.refusal(args)
+
+
+def test_a_rehearsal_keeps_the_base_model(folds):
+    args = cli.parse_args([
+        "--fold", "1", "--folds-dir", str(folds[0]), "--rehearsal",
+        "--base-model", "vit_l_em_organelles", "--epochs", "24",
+    ])
+
+    assert args.epochs == cli.REHEARSAL_EPOCHS
+    assert cli.fold_run_name(args) == (
+        "full_b_vit_l_em_organelles_cv5_fold1_e1_seed20260907"
+    )
+    assert cli.refusal(args) is None
