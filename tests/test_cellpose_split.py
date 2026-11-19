@@ -391,6 +391,17 @@ def test_settings_resolve_to_one_the_grid_or_both_filters():
     assert grid == calibration_grid()
 
 
+@pytest.mark.parametrize("extra, refused", [
+    ((), False),
+    (("--no-mlflow",), True),
+    (("--n-images", "3"), True),
+])
+def test_mlflow_is_decided_from_this_command_line(extra, refused):
+    reason = evaluate_cli.mlflow_refusal(_eval_args(*extra))
+
+    assert (reason is not None) == refused
+
+
 def test_steps_resolve_for_one_setting_and_for_the_grid():
     single = evaluate_cli.resolve_settings(_eval_args(
         "--niter", "1000", "--also-area-filter",

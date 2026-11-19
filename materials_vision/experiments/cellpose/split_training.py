@@ -89,7 +89,10 @@ SAVE_EVERY = 10
 # The two arms of the selection on VALIDATION. They differ in the
 # learning rate alone: the rate the earlier grid search found best, and
 # the library's own default for fine-tuning.
-LEARNING_RATES = {"lr1e-3": 1e-3, "lr1e-5": 1e-5}
+LEARNING_RATES = {
+    "lr1e-3": 1e-3, "lr1e-4": 1e-4, "lr1e-5": 1e-5, "lr1e-6": 1e-6,
+}
+
 
 TRAINING_EXPERIMENT = "cellpose_training"
 

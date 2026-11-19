@@ -6,7 +6,8 @@ import pytest
 import scripts.cellpose.select_cellpose_recipe as cli
 from materials_vision.experiments.cellpose.split_evaluation import (
     CellposeSettings, calibration_grid)
-from materials_vision.experiments.cellpose.split_training import saved_epochs
+from materials_vision.experiments.cellpose.split_training import (
+    LEARNING_RATES, saved_epochs)
 from scripts.cellpose.train_cellpose_split import run_name
 
 N_VAL = 107
@@ -54,7 +55,7 @@ def test_the_snapshot_with_the_highest_f1_is_chosen():
     assert chosen["selected_under"] == "ft0.4_cp0_m15_n1000"
     assert chosen["selection_niter"] == 1000
     assert chosen["ranking"][0][1] == 0.9
-    assert len(chosen["ranking"]) == 2 * len(saved_epochs())
+    assert len(chosen["ranking"]) == len(LEARNING_RATES) * len(saved_epochs())
 
 
 def test_a_report_scored_under_other_steps_is_refused():

@@ -66,8 +66,7 @@ from materials_vision.tracking import (configure_tracking,
                                        find_run_for_checkpoint_dir,
                                        log_evaluation_to_run)
 from materials_vision.training import build_source
-from scripts.peft_sam.evaluate_checkpoint import (mlflow_refusal, report,
-                                                  write_json)
+from scripts.peft_sam.evaluate_checkpoint import report, write_json
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +150,30 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
              "trained in.",
     )
     return parser.parse_args(argv)
+
+
+def mlflow_refusal(args: argparse.Namespace) -> Optional[str]:
+    """Say why figures must stay out of MLflow, or nothing if they may go.
+
+    Kept apart from the PEFT-SAM script's check of the same name, which
+    reads options this command line does not have.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+
+    Returns
+    -------
+    str or None
+    """
+    if args.no_mlflow:
+        return "disabled on the command line"
+    if args.n_images > 0:
+        return (
+            f"only {args.n_images} image(s) scored, which would put a "
+            f"different population on the same curve"
+        )
+    return None
 
 
 def resolve_checkpoints(args: argparse.Namespace) -> list[Path]:
